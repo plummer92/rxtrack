@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD
-# Includes Date Slider, Smart Loader, & Time Between Pyxis
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
+# Fixes: Connection Timeouts & Cut-off Code
 ###############################################
 
 import streamlit as st
@@ -42,7 +42,7 @@ def seconds_to_mmss(seconds):
 ###########################################################
 #                 DATABASE CONNECTION
 ###########################################################
-@st.cache_resource
+# FIX: Removed @st.cache_resource to prevent 'connection closed' errors
 def get_db_connection():
     try:
         return psycopg2.connect(st.secrets["neon"]["db_url"])
@@ -59,14 +59,17 @@ def get_db_date_range():
         cur = conn.cursor()
         cur.execute("SELECT MIN(dt), MAX(dt) FROM events")
         min_dt, max_dt = cur.fetchone()
+        
+        # Close connection immediately to be safe
         cur.close()
+        conn.close()
         
         if min_dt and max_dt:
             return min_dt.date(), max_dt.date()
     except:
-        pass
+        if conn: conn.close()
     
-    # Default fallback if DB is empty
+    # Default fallback
     return datetime.today().date() - timedelta(days=7), datetime.today().date()
 
 ###########################################################
@@ -137,6 +140,7 @@ def insert_batch(df):
         conn.rollback()
     finally:
         cur.close()
+        conn.close()
 
 ###########################################################
 #            ANALYTICS LOGIC
@@ -150,26 +154,25 @@ def load_data(start_date, end_date):
         SELECT * FROM events 
         WHERE dt::date BETWEEN %s AND %s
     """
-    df = pd.read_sql(query, conn, params=(start_date, end_date))
+    
+    try:
+        df = pd.read_sql(query, conn, params=(start_date, end_date))
+    except Exception as e:
+        st.error(f"Query Error: {e}")
+        conn.close()
+        return pd.DataFrame()
+    
+    conn.close() # Always close connection after reading
     
     if not df.empty:
         df["dt"] = pd.to_datetime(df["dt"])
         df["is_refill"] = df["event_type"].str.lower().str.contains("refill|load", na=False)
         
         # --- CALCULATE TIME BETWEEN PYXIS (MM:SS) ---
-        # Sort by User then Time
         df = df.sort_values(['user_name', 'dt'])
-        
-        # Shift time by 1 to compare current row with previous row for same user
         df['prev_time'] = df.groupby('user_name')['dt'].shift(1)
-        
-        # Calculate difference in seconds
         df['gap_seconds'] = (df['dt'] - df['prev_time']).dt.total_seconds()
-        
-        # Apply the MM:SS formatter
         df['Time Between Pyxis'] = df['gap_seconds'].apply(seconds_to_mmss)
-        
-        # Create a pretty timestamp
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
     
     return df
@@ -187,7 +190,7 @@ with st.sidebar:
     
     st.markdown("### 📅 Date Range")
     
-    # Slider Logic: Defaults to last 7 days, but allows sliding back to start of data
+    # Slider Logic: Defaults to last 7 days
     default_start = max(min_db, max_db - timedelta(days=7))
     
     date_range = st.slider(
@@ -255,6 +258,8 @@ tab_stockout, tab_effic, tab_drill = st.tabs([
 # --- TAB 1: STOCKOUTS ---
 with tab_stockout:
     all_refills = df[df['is_refill']].copy()
+    
+    # Ensure sorted correctly for calc
     all_refills = all_refills.sort_values(['device', 'med_desc', 'dt'])
     
     all_refills['prev_refill_dt'] = all_refills.groupby(['device', 'med_desc'])['dt'].shift(1)
@@ -288,6 +293,8 @@ with tab_stockout:
         with c_list:
             st.markdown("#### Detailed Log")
             cols = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
+            
+            # Sort by DATE first to prevent KeyError
             st.dataframe(stockouts.sort_values('dt', ascending=False)[cols], use_container_width=True, hide_index=True)
     else:
         st.success("✅ Zero stockouts found.")
@@ -339,7 +346,7 @@ with tab_drill:
     # Columns to display
     display_cols = [
         'Timestamp', 
-        'Time Between Pyxis',  # <-- New Name
+        'Time Between Pyxis', 
         'user_name', 
         'device', 
         'event_type', 
