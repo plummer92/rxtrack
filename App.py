@@ -228,27 +228,68 @@ tab_stockout, tab_effic, tab_drill = st.tabs([
     "🔍 Data Explorer (Drill Down)"
 ])
 
-# --- TAB 1: STOCKOUTS ---
+# --- TAB 1: STOCKOUTS (WITH BURN RATE) ---
 with tab_stockout:
-    # Logic: Only care about refills where start count was 0
-    refills = df[df['is_refill']].copy()
-    stockouts = refills[refills['beginning_qty'] == 0]
+    # 1. Prepare Refill Data
+    # We need ALL refills first to calculate the time gaps correctly
+    all_refills = df[df['is_refill']].copy()
+    
+    # 2. Sort to ensure we compare chronological events
+    all_refills = all_refills.sort_values(['device', 'med_desc', 'dt'])
+    
+    # 3. Calculate "Time To Empty"
+    # Group by Device+Med, and subtract the current time from the PREVIOUS refill time
+    all_refills['prev_refill_dt'] = all_refills.groupby(['device', 'med_desc'])['dt'].shift(1)
+    all_refills['burn_duration'] = all_refills['dt'] - all_refills['prev_refill_dt']
+    
+    # 4. Filter for Stockouts (Where Beg Qty was 0)
+    stockouts = all_refills[all_refills['beginning_qty'] == 0].copy()
+    
+    # 5. Helper to format the duration nicely (e.g. "1d 4h 30m")
+    def format_burn_rate(td):
+        if pd.isna(td): return "First Record (N/A)"
+        total_seconds = int(td.total_seconds())
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, _ = divmod(remainder, 60)
+        
+        # Return format based on length
+        if days > 0: return f"{days}d {hours}h"
+        if hours > 0: return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+
+    stockouts['Time Since Last Refill'] = stockouts['burn_duration'].apply(format_burn_rate)
     
     st.markdown(f"### ⚠️ {len(stockouts)} Stockout Events Detected")
-    st.markdown("Beginning Count was 0. Potential patient care delay.")
+    st.markdown("""
+    **Time Since Last Refill Analysis:**
+    * **Short Time (< 4h):** Par Level is likely **TOO LOW**. It burned out almost immediately.
+    * **Long Time (> 2d):** Routine depletion. Check refill schedule frequency.
+    """)
     
     if not stockouts.empty:
         c_hot, c_list = st.columns([1, 2])
+        
         with c_hot:
+            st.markdown("#### Top Devices by Stockouts")
             hotspots = stockouts['device'].value_counts().reset_index()
             hotspots.columns = ['Device', 'Count']
             fig = px.bar(hotspots.head(10), x='Count', y='Device', orientation='h', color_discrete_sequence=['#FF4B4B'])
             fig.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig, use_container_width=True)
+            
         with c_list:
-            st.dataframe(stockouts[['Timestamp', 'device', 'med_desc', 'user_name']].sort_values('Timestamp', ascending=False), use_container_width=True)
+            st.markdown("#### Detailed Stockout Log")
+            # Reorder columns to show the new metric first
+            cols_to_show = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
+            
+            st.dataframe(
+                stockouts[cols_to_show].sort_values('dt', ascending=False), 
+                use_container_width=True,
+                hide_index=True
+            )
     else:
-        st.success("Zero stockouts found in this period.")
+        st.success("✅ Zero stockouts found in this period.")
 
 # --- TAB 2: EFFICIENCY ---
 with tab_effic:
