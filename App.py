@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL DEBUG)
-# Fixes: Slider Defaults & Date Range Visibility
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
+# Features: Financials, Data Gap Detection, Smart Loader
 ###############################################
 
 import streamlit as st
@@ -24,7 +24,7 @@ st.set_page_config(
 st.markdown("""
     <style>
     .metric-card { background-color: #f9f9f9; padding: 15px; border-radius: 10px; border-left: 5px solid #4CAF50; }
-    .stockout-card { border-left: 5px solid #FF4B4B; }
+    .missing-card { background-color: #ffebee; padding: 10px; border-radius: 5px; border-left: 5px solid #FF4B4B; margin-bottom: 10px;}
     .highlight { font-weight: bold; color: #2c3e50; }
     </style>
     """, unsafe_allow_html=True)
@@ -33,9 +33,7 @@ st.markdown("""
 #                 HELPER FUNCTIONS
 ###########################################################
 def seconds_to_mmss(seconds):
-    """Converts seconds (e.g. 95) to MM:SS format (e.g. 01:35)"""
-    if pd.isna(seconds) or seconds < 0:
-        return "-"
+    if pd.isna(seconds) or seconds < 0: return "-"
     m, s = divmod(int(seconds), 60)
     return f"{m:02d}:{s:02d}"
 
@@ -49,39 +47,53 @@ def get_db_connection():
         st.error(f"❌ DB Connection Error: {e}")
         return None
 
-def get_db_date_range():
-    """Gets the absolute min and max dates from the DB for the slider"""
+def get_db_stats():
+    """Gets date range and detects MISSING dates for the sidebar"""
     conn = get_db_connection()
-    # Default return if connection fails initially
-    if not conn: return datetime.today().date(), datetime.today().date()
+    if not conn: return 0, datetime.today().date(), datetime.today().date(), []
     
     try:
         cur = conn.cursor()
-        cur.execute("SELECT MIN(dt), MAX(dt) FROM events")
+        
+        # 1. Get Range & Count
+        cur.execute("SELECT MIN(dt), MAX(dt), COUNT(*) FROM events")
         result = cur.fetchone()
+        
+        min_dt = result[0] if result and result[0] else datetime.today()
+        max_dt = result[1] if result and result[1] else datetime.today()
+        total_rows = result[2] if result else 0
+        
+        # 2. Find Gaps (Dates with 0 records)
+        missing_dates = []
+        if total_rows > 0:
+            # Generate all dates in range
+            start = min_dt.date() if isinstance(min_dt, datetime) else pd.to_datetime(min_dt).date()
+            end = max_dt.date() if isinstance(max_dt, datetime) else pd.to_datetime(max_dt).date()
+            
+            # Create full list of expected dates
+            delta = (end - start).days
+            all_dates = {start + timedelta(days=x) for x in range(delta + 1)}
+            
+            # Get actual dates present
+            cur.execute("SELECT DISTINCT DATE(dt) FROM events")
+            present_dates = {row[0] for row in cur.fetchall()}
+            
+            # Compare sets
+            missing_dates = sorted(list(all_dates - present_dates))
+            
         cur.close()
         conn.close()
         
-        # If DB has data, return the real dates
-        if result and result[0] and result[1]:
-            # Convert timestamp to date object
-            min_d = result[0] if isinstance(result[0], datetime) else pd.to_datetime(result[0])
-            max_d = result[1] if isinstance(result[1], datetime) else pd.to_datetime(result[1])
-            return min_d.date(), max_d.date()
-            
+        return total_rows, min_dt.date() if isinstance(min_dt, datetime) else min_dt, max_dt.date() if isinstance(max_dt, datetime) else max_dt, missing_dates
+        
     except Exception as e:
-        # If query fails, show error so we know why slider is broken
-        st.sidebar.error(f"Date Error: {e}")
         if conn: conn.close()
-    
-    # Fallback only if DB is truly empty
-    return datetime.today().date(), datetime.today().date()
+        return 0, datetime.today().date(), datetime.today().date(), []
 
 ###########################################################
 #                 DATA CLEANING
 ###########################################################
 def generate_pk(row):
-    """Stable unique hash for deduplication."""
     row_str = "|".join(str(v) for v in row.values)
     return hashlib.sha256(row_str.encode()).hexdigest()
 
@@ -113,7 +125,6 @@ def clean_dataframe(df):
 
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
-    
     df = df.dropna(subset=["dt"]) 
 
     for c in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty"]:
@@ -121,35 +132,63 @@ def clean_dataframe(df):
 
     df["dt"] = df["dt"].astype(str)
     df["resolution_dt"] = df["resolution_dt"].astype(str).replace('NaT', None)
-    
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     
     return df[required_cols + ["pk"]]
 
-def insert_batch(df):
+def clean_cost_dataframe(df):
+    """Cleans the Financial Upload (MedID + Cost)"""
+    df = df.copy()
+    # Normalize headers
+    df.columns = df.columns.str.strip().str.lower()
+    
+    # Try to find ID and Cost columns flexibly
+    id_col = next((c for c in df.columns if "id" in c or "med" in c), None)
+    cost_col = next((c for c in df.columns if "cost" in c or "price" in c or "avg" in c), None)
+    
+    if not id_col or not cost_col:
+        return None
+    
+    df = df[[id_col, cost_col]].rename(columns={id_col: "med_id", cost_col: "cost_per_unit"})
+    # Clean cost data (remove $ signs, etc)
+    df["cost_per_unit"] = df["cost_per_unit"].astype(str).str.replace('$', '', regex=False)
+    df["cost_per_unit"] = pd.to_numeric(df["cost_per_unit"], errors="coerce").fillna(0)
+    df = df.dropna(subset=["med_id"])
+    
+    return df
+
+def insert_batch(df, table_name="events"):
     conn = get_db_connection()
     if not conn: return
     cur = conn.cursor()
     
-    sql = """
-        INSERT INTO events (
-            pk, user_name, device, med_id, med_desc, 
-            event_type, dt, qty, beginning_qty, ending_qty,
-            discrepancy_qty, discrepancy_reason, resolution_dt
-        )
-        VALUES (
-            %(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, 
-            %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s,
-            %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s
-        )
-        ON CONFLICT (pk) DO NOTHING;
-    """
+    if table_name == "events":
+        sql = """
+            INSERT INTO events (
+                pk, user_name, device, med_id, med_desc, 
+                event_type, dt, qty, beginning_qty, ending_qty,
+                discrepancy_qty, discrepancy_reason, resolution_dt
+            )
+            VALUES (
+                %(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, 
+                %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s,
+                %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s
+            )
+            ON CONFLICT (pk) DO NOTHING;
+        """
+    else: # Financial Table
+        sql = """
+            INSERT INTO med_costs (med_id, cost_per_unit)
+            VALUES (%(med_id)s, %(cost_per_unit)s)
+            ON CONFLICT (med_id) DO UPDATE 
+            SET cost_per_unit = EXCLUDED.cost_per_unit;
+        """
     
     rows = df.to_dict("records")
     try:
         execute_batch(cur, sql, rows, page_size=2000)
         conn.commit()
-        st.success(f"✅ Securely processed {len(rows)} records.")
+        st.success(f"✅ Securely processed {len(rows)} records into '{table_name}'.")
     except Exception as e:
         st.error(f"Error: {e}")
         conn.rollback()
@@ -165,9 +204,12 @@ def load_data(start_date, end_date):
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
     
+    # JOIN with Costs table
     query = """
-        SELECT * FROM events 
-        WHERE dt::date BETWEEN %s AND %s
+        SELECT e.*, c.cost_per_unit 
+        FROM events e
+        LEFT JOIN med_costs c ON e.med_id = c.med_id
+        WHERE e.dt::date BETWEEN %s AND %s
     """
     
     try:
@@ -183,33 +225,29 @@ def load_data(start_date, end_date):
         df["dt"] = pd.to_datetime(df["dt"])
         df["is_refill"] = df["event_type"].str.lower().str.contains("refill|load", na=False)
         
-        df = df.sort_values(['user_name', 'dt'])
+        # Financial Calcs
+        if "cost_per_unit" not in df.columns: df["cost_per_unit"] = 0
+        df["cost_per_unit"] = df["cost_per_unit"].fillna(0)
         
-        # Look Ahead/Behind logic
+        # Time Logic
+        df = df.sort_values(['user_name', 'dt'])
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['next_device'] = df.groupby('user_name')['device'].shift(-1)
-        
         df['prev_dt'] = df.groupby('user_name')['dt'].shift(1)
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['walk_seconds'] = (df['dt'] - df['prev_dt']).dt.total_seconds()
         
-        # Machine Time
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
-            df['duration_seconds'], 
-            0
+            df['duration_seconds'], 0
         )
-        
-        # Walk Time
         df['walk_time_sec'] = np.where(
             (df['device'] != df['prev_device']) & (df['walk_seconds'] < 1200),
-            df['walk_seconds'],
-            0
+            df['walk_seconds'], 0
         )
 
-        # Session ID
         df['is_new_session'] = np.where(
             (df['user_name'] != df['user_name'].shift(1)) | 
             (df['device'] != df['prev_device']) |
@@ -218,7 +256,6 @@ def load_data(start_date, end_date):
         )
         df['session_id'] = df['is_new_session'].cumsum()
 
-        # Formatting
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
@@ -235,35 +272,35 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
-    # --- DB HEALTH CHECK ---
-    min_db, max_db = get_db_date_range()
+    # --- 1. DATA GAP DETECTOR ---
+    total_rows, min_db, max_db, missing_dates = get_db_stats()
     
-    # Get row count for key generation
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM events")
-        total_rows = cur.fetchone()[0]
-        cur.close()
-        conn.close()
-    except:
-        total_rows = 0
+    with st.expander("💾 Database Coverage", expanded=True):
+        st.write(f"**Records:** {total_rows:,}")
+        st.write(f"**Range:** {min_db} to {max_db}")
         
-    with st.expander("💾 Database Stats", expanded=True):
-        st.write(f"**Rows:** {total_rows:,}")
-        st.write(f"**Earliest:** {min_db}") # Shows start date
-        st.write(f"**Latest:** {max_db}")   # Shows end date
+        if missing_dates:
+            st.markdown(f"""
+            <div class="missing-card">
+            ⚠️ <b>Missing Data ({len(missing_dates)} Days)</b><br>
+            <i>No records found for:</i><br>
+            {", ".join([d.strftime('%b %d') for d in missing_dates[:5]])}
+            {f"...and {len(missing_dates)-5} more" if len(missing_dates) > 5 else ""}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.success("✅ Complete Daily Coverage (No Gaps)")
     
     st.divider()
     
-    st.markdown("### 📅 Date Range")
+    # --- 2. DATE SLIDER ---
+    default_start = max(min_db, max_db - timedelta(days=7))
     
-    # FIX: Default to FULL range so user sees new data immediately
     date_range = st.slider(
-        "Select Range", 
+        "Select Analysis Range", 
         min_value=min_db, 
         max_value=max_db,
-        value=(min_db, max_db), # Set handles to full width
+        value=(min_db, max_db), # Default to full range to see new uploads
         format="MM/DD/YY",
         key=f"slider_{min_db}_{max_db}_{total_rows}"
     )
@@ -271,23 +308,39 @@ with st.sidebar:
     
     st.divider()
     
-    uploaded = st.file_uploader("Upload Daily Report", type=["csv","xlsx"])
+    # --- 3. SMART FILE LOADER (DUAL MODE) ---
+    uploaded = st.file_uploader("Upload File (Daily Report OR Price List)", type=["csv","xlsx"])
     if uploaded:
         try:
+            # 1. READ RAW HEADER (First 50 rows)
             if uploaded.name.endswith(".xlsx"):
                 preview = pd.read_excel(uploaded, header=None, nrows=50)
             else:
                 preview = pd.read_csv(uploaded, header=None, nrows=50)
             
-            header_row_idx = None
+            # 2. IDENTIFY FILE TYPE
+            file_type = "unknown"
+            header_row_idx = 0
+            
+            # Scan for keywords
             for idx, row in preview.iterrows():
                 row_str = str(row.values).lower()
+                
+                # Check for Daily Report Keywords
                 if "username" in row_str and "device" in row_str:
+                    file_type = "daily_report"
+                    header_row_idx = idx
+                    break
+                
+                # Check for Cost List Keywords (Simple check)
+                if ("med" in row_str or "id" in row_str) and ("cost" in row_str or "price" in row_str) and "username" not in row_str:
+                    file_type = "cost_list"
                     header_row_idx = idx
                     break
             
-            if header_row_idx is None:
-                st.error("❌ Could not find headers (UserName/Device) in first 50 rows.")
+            # 3. PROCESS BASED ON TYPE
+            if file_type == "unknown":
+                st.error("❌ Unknown file type. Could not find 'UserName' (Report) or 'Cost' (Financials).")
             else:
                 uploaded.seek(0)
                 if uploaded.name.endswith(".xlsx"):
@@ -295,13 +348,24 @@ with st.sidebar:
                 else:
                     raw = pd.read_csv(uploaded, header=header_row_idx)
                 
-                clean = clean_dataframe(raw)
-                st.success(f"✅ Found {len(clean)} rows.")
-                
-                if st.button("Process & Save to DB"):
-                    insert_batch(clean)
-                    st.cache_data.clear()
-                    st.rerun()
+                if file_type == "daily_report":
+                    clean = clean_dataframe(raw)
+                    st.info(f"📄 Detected Daily Report ({len(clean)} rows)")
+                    if st.button("Save Report to DB"):
+                        insert_batch(clean, "events")
+                        st.cache_data.clear()
+                        st.rerun()
+                        
+                elif file_type == "cost_list":
+                    clean = clean_cost_dataframe(raw)
+                    if clean is not None:
+                        st.info(f"💰 Detected Price List ({len(clean)} meds)")
+                        if st.button("Update Financials"):
+                            insert_batch(clean, "med_costs")
+                            st.cache_data.clear()
+                            st.success("✅ Prices updated!")
+                    else:
+                        st.error("Could not map 'MedID' and 'Cost' columns.")
 
         except Exception as e:
             st.error(f"Error reading file: {e}")
@@ -315,7 +379,7 @@ if df.empty:
 
 # --- TABS ---
 tab_over, tab_compliance, tab_stock, tab_effic, tab_drill = st.tabs([
-    "📊 Overview & Speed",
+    "📊 Overview",
     "🛡️ Compliance", 
     "🚨 Stockouts", 
     "⚡ Efficiency", 
@@ -356,13 +420,22 @@ with tab_compliance:
         disc_df = df[df['discrepancy_qty'] != 0].copy()
     else:
         disc_df = pd.DataFrame()
+        
+    # Calculate Financial Impact if cost is available
+    if not disc_df.empty:
+        disc_df['variance_cost'] = disc_df['discrepancy_qty'] * disc_df['cost_per_unit']
+        total_loss = disc_df['variance_cost'].sum()
+    else:
+        total_loss = 0
     
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     c1.metric("Total Count Errors", len(disc_df))
     if not disc_df.empty:
-        c2.metric("Net Variance", int(disc_df['discrepancy_qty'].sum()))
+        c2.metric("Net Variance Qty", int(disc_df['discrepancy_qty'].sum()))
+        c3.metric("Net Financial Variance", f"${total_loss:,.2f}", delta_color="inverse")
     else:
         c2.metric("Net Variance", 0)
+        c3.metric("Financial Impact", "$0.00")
     
     st.divider()
     
@@ -378,7 +451,7 @@ with tab_compliance:
             fig_med = px.bar(med_errors, x='Count', y='med_desc', orientation='h', title="Top Meds (Errors)")
             fig_med.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_med, use_container_width=True)
-        st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason']], use_container_width=True, hide_index=True)
+        st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'cost_per_unit', 'variance_cost']], use_container_width=True, hide_index=True)
     elif 'discrepancy_qty' in df.columns:
         st.success("✅ No discrepancies found!")
 
@@ -453,7 +526,6 @@ with tab_effic:
                     fig_trend = px.bar(daily_trend, x='Date', y='Trips', title=f"When?", color_discrete_sequence=['#3366CC'])
                     st.plotly_chart(fig_trend, use_container_width=True)
                 
-                # NEW: WHO Analysis
                 c_who, c_log = st.columns([1, 2])
                 with c_who:
                     who_stats = med_df.groupby('user_name').agg(Trips=('pk', 'count')).reset_index().sort_values('Trips', ascending=False).head(10)
@@ -496,6 +568,6 @@ with tab_drill:
     if sel_events: filtered = filtered[filtered['event_type'].isin(sel_events)]
         
     st.markdown(f"**Showing {len(filtered):,} records**")
-    cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty']
+    cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty', 'cost_per_unit']
     valid_cols = [c for c in cols if c in filtered.columns]
     st.dataframe(filtered[valid_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
