@@ -1,6 +1,6 @@
 ###############################################
 # RXTRACK: STEWARDSHIP & DRILL DOWN EDITION
-# Includes Smart File Loader & MM:SS Time Formatting
+# Includes Smart File Loader, MM:SS Time, & Burn Rate
 ###############################################
 
 import streamlit as st
@@ -20,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS for polished look
 st.markdown("""
     <style>
     .metric-card { background-color: #f9f9f9; padding: 15px; border-radius: 10px; border-left: 5px solid #4CAF50; }
@@ -61,7 +61,6 @@ def generate_pk(row):
 def clean_dataframe(df):
     df = df.copy()
     
-    # Map YOUR specific CSV headers to Database Columns
     colmap = {
         "UserName": "user_name", "UserID": "user_id", "Device": "device",
         "MedID": "med_id", "MedDescription": "med_desc",
@@ -77,16 +76,13 @@ def clean_dataframe(df):
         "beginning_qty", "ending_qty"
     ]
     
-    # Ensure columns exist
     for col in required_cols:
         if col not in df.columns:
             df[col] = None
 
-    # Parse Dates
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"]) 
 
-    # Numeric Cleanup
     for c in ["qty", "beginning_qty", "ending_qty"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
@@ -141,19 +137,11 @@ def load_data(start_date, end_date):
         df["dt"] = pd.to_datetime(df["dt"])
         df["is_refill"] = df["event_type"].str.lower().str.contains("refill|load", na=False)
         
-        # --- CALCULATE GAP TIMES FOR MM:SS DISPLAY ---
+        # Gap Times (MM:SS)
         df = df.sort_values(['user_name', 'dt'])
-        
-        # Shift time by 1 to compare current row with previous row
         df['prev_time'] = df.groupby('user_name')['dt'].shift(1)
-        
-        # Calculate difference in seconds
         df['gap_seconds'] = (df['dt'] - df['prev_time']).dt.total_seconds()
-        
-        # Apply the MM:SS formatter helper function
         df['Time Since Last (MM:SS)'] = df['gap_seconds'].apply(seconds_to_mmss)
-        
-        # Create a pretty timestamp for display
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
     
     return df
@@ -166,7 +154,6 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
-    # Date Filter
     end_val = datetime.today().date()
     start_val = end_val - timedelta(days=7)
     
@@ -176,17 +163,14 @@ with st.sidebar:
     
     st.divider()
     
-    # --- SMART FILE LOADER ---
     uploaded = st.file_uploader("Upload Daily Report", type=["csv","xlsx"])
     if uploaded:
         try:
-            # 1. Peek at the file to find headers
             if uploaded.name.endswith(".xlsx"):
                 preview = pd.read_excel(uploaded, header=None, nrows=20)
             else:
                 preview = pd.read_csv(uploaded, header=None, nrows=20)
             
-            # 2. Find row with 'UserName' and 'Device'
             header_row_idx = None
             for idx, row in preview.iterrows():
                 row_str = str(row.values).lower()
@@ -230,30 +214,24 @@ tab_stockout, tab_effic, tab_drill = st.tabs([
 
 # --- TAB 1: STOCKOUTS (WITH BURN RATE) ---
 with tab_stockout:
-    # 1. Prepare Refill Data
-    # We need ALL refills first to calculate the time gaps correctly
+    # 1. Prepare Refill Data (ALL refills needed for time calculation)
     all_refills = df[df['is_refill']].copy()
-    
-    # 2. Sort to ensure we compare chronological events
     all_refills = all_refills.sort_values(['device', 'med_desc', 'dt'])
     
-    # 3. Calculate "Time To Empty"
-    # Group by Device+Med, and subtract the current time from the PREVIOUS refill time
+    # 2. Calculate "Burn Duration" (Time since previous refill)
     all_refills['prev_refill_dt'] = all_refills.groupby(['device', 'med_desc'])['dt'].shift(1)
     all_refills['burn_duration'] = all_refills['dt'] - all_refills['prev_refill_dt']
     
-    # 4. Filter for Stockouts (Where Beg Qty was 0)
+    # 3. Filter for Stockouts (Beg Qty = 0)
     stockouts = all_refills[all_refills['beginning_qty'] == 0].copy()
     
-    # 5. Helper to format the duration nicely (e.g. "1d 4h 30m")
+    # 4. Helper format function
     def format_burn_rate(td):
         if pd.isna(td): return "First Record (N/A)"
         total_seconds = int(td.total_seconds())
         days, remainder = divmod(total_seconds, 86400)
         hours, remainder = divmod(remainder, 3600)
         minutes, _ = divmod(remainder, 60)
-        
-        # Return format based on length
         if days > 0: return f"{days}d {hours}h"
         if hours > 0: return f"{hours}h {minutes}m"
         return f"{minutes}m"
@@ -269,7 +247,6 @@ with tab_stockout:
     
     if not stockouts.empty:
         c_hot, c_list = st.columns([1, 2])
-        
         with c_hot:
             st.markdown("#### Top Devices by Stockouts")
             hotspots = stockouts['device'].value_counts().reset_index()
@@ -280,11 +257,12 @@ with tab_stockout:
             
         with c_list:
             st.markdown("#### Detailed Stockout Log")
-            # Reorder columns to show the new metric first
+            # Show the new "Time Since Last Refill" column first
             cols_to_show = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
             
+            # THE FIX: Sort by 'dt' FIRST, then select columns
             st.dataframe(
-                stockouts[cols_to_show].sort_values('dt', ascending=False), 
+                stockouts.sort_values('dt', ascending=False)[cols_to_show], 
                 use_container_width=True,
                 hide_index=True
             )
@@ -296,6 +274,7 @@ with tab_effic:
     st.markdown("### 📉 Low-Yield Refill Matrix")
     st.markdown("High effort (many trips) vs. Low yield (adding few meds).")
     
+    refills = df[df['is_refill']].copy()
     effic_stats = refills.groupby(['device', 'med_desc']).agg(
         Trips=('pk', 'count'),
         Avg_Added=('qty', 'mean'),
@@ -312,14 +291,11 @@ with tab_effic:
     else:
         st.success("Refill efficiency looks good.")
 
-# --- TAB 3: DATA EXPLORER (DRILL DOWN) ---
+# --- TAB 3: DRILL DOWN ---
 with tab_drill:
     st.header("🔍 Interactive Line-by-Line Analysis")
     
-    # 1. FILTERS
     c1, c2, c3 = st.columns(3)
-    
-    # Get unique sorted lists for dropdowns (handle None values safely)
     all_users = sorted([x for x in df['user_name'].unique() if x is not None])
     all_devices = sorted([x for x in df['device'].unique() if x is not None])
     all_meds = sorted([x for x in df['med_desc'].unique() if x is not None])
@@ -328,37 +304,18 @@ with tab_drill:
     sel_devices = c2.multiselect("Filter Device", all_devices)
     sel_meds = c3.multiselect("Filter Medication", all_meds)
     
-    # 2. APPLY FILTERS
     filtered = df.copy()
-    if sel_users:
-        filtered = filtered[filtered['user_name'].isin(sel_users)]
-    if sel_devices:
-        filtered = filtered[filtered['device'].isin(sel_devices)]
-    if sel_meds:
-        filtered = filtered[filtered['med_desc'].isin(sel_meds)]
+    if sel_users: filtered = filtered[filtered['user_name'].isin(sel_users)]
+    if sel_devices: filtered = filtered[filtered['device'].isin(sel_devices)]
+    if sel_meds: filtered = filtered[filtered['med_desc'].isin(sel_meds)]
         
     st.markdown(f"**Showing {len(filtered):,} records**")
     
-    # 3. DISPLAY TABLE
-    # Select just the columns we want to show for clarity
     display_cols = [
-        'Timestamp', 
-        'Time Since Last (MM:SS)', 
-        'user_name', 
-        'device', 
-        'event_type', 
-        'med_desc', 
-        'qty', 
-        'beginning_qty', 
-        'ending_qty'
+        'Timestamp', 'Time Since Last (MM:SS)', 'user_name', 
+        'device', 'event_type', 'med_desc', 'qty', 
+        'beginning_qty', 'ending_qty'
     ]
-    
-    # Ensure display columns actually exist in dataframe before showing
     valid_cols = [c for c in display_cols if c in filtered.columns]
     
-    # Sort so mostly recently activity is at top
-    st.dataframe(
-        filtered[valid_cols].sort_values('Timestamp', ascending=False),
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(filtered[valid_cols].sort_values('Timestamp', asce
