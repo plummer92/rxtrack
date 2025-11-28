@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
-# Fixes: Slider not updating, Header Scan Depth
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
+# Features: Compliance, Stewardship, Efficiency & Speed
 ###############################################
 
 import streamlit as st
@@ -57,12 +57,12 @@ def get_db_date_range():
     try:
         cur = conn.cursor()
         cur.execute("SELECT MIN(dt), MAX(dt) FROM events")
-        result = cur.fetchone()
+        min_dt, max_dt = cur.fetchone()
         cur.close()
         conn.close()
         
-        if result and result[0] and result[1]:
-            return result[0].date(), result[1].date()
+        if min_dt and max_dt:
+            return min_dt.date(), max_dt.date()
     except:
         if conn: conn.close()
     
@@ -79,11 +79,15 @@ def generate_pk(row):
 def clean_dataframe(df):
     df = df.copy()
     
+    # Updated Map to include Discrepancy Columns
     colmap = {
         "UserName": "user_name", "UserID": "user_id", "Device": "device",
         "MedID": "med_id", "MedDescription": "med_desc",
         "TransactionType": "event_type", "TransactionDateTime": "dt",
-        "Quantity": "qty", "Beg": "beginning_qty", "End": "ending_qty"
+        "Quantity": "qty", "Beg": "beginning_qty", "End": "ending_qty",
+        "DiscrepancyQuantity": "discrepancy_qty", 
+        "DiscrepancyReason": "discrepancy_reason",
+        "ResolutionDatetime": "resolution_dt"
     }
     
     df = df.rename(columns=colmap)
@@ -91,20 +95,29 @@ def clean_dataframe(df):
     required_cols = [
         "user_name", "device", "med_id", "med_desc", 
         "event_type", "dt", "qty", 
-        "beginning_qty", "ending_qty"
+        "beginning_qty", "ending_qty",
+        "discrepancy_qty", "discrepancy_reason", "resolution_dt"
     ]
     
+    # Ensure columns exist
     for col in required_cols:
         if col not in df.columns:
             df[col] = None
 
+    # Parse Dates
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
+    
     df = df.dropna(subset=["dt"]) 
 
-    for c in ["qty", "beginning_qty", "ending_qty"]:
+    # Numeric Cleanup
+    for c in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
+    # Convert to string for SQL compat
     df["dt"] = df["dt"].astype(str)
+    df["resolution_dt"] = df["resolution_dt"].astype(str).replace('NaT', None)
+    
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     
     return df[required_cols + ["pk"]]
@@ -114,14 +127,17 @@ def insert_batch(df):
     if not conn: return
     cur = conn.cursor()
     
+    # Updated SQL to include new compliance columns
     sql = """
         INSERT INTO events (
             pk, user_name, device, med_id, med_desc, 
-            event_type, dt, qty, beginning_qty, ending_qty
+            event_type, dt, qty, beginning_qty, ending_qty,
+            discrepancy_qty, discrepancy_reason, resolution_dt
         )
         VALUES (
             %(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, 
-            %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s
+            %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s,
+            %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s
         )
         ON CONFLICT (pk) DO NOTHING;
     """
@@ -166,7 +182,7 @@ def load_data(start_date, end_date):
         
         df = df.sort_values(['user_name', 'dt'])
         
-        # Look Ahead/Behind logic for Machine vs Walk Time
+        # Look Ahead/Behind logic
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['next_device'] = df.groupby('user_name')['device'].shift(-1)
         
@@ -176,14 +192,14 @@ def load_data(start_date, end_date):
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['walk_seconds'] = (df['dt'] - df['prev_dt']).dt.total_seconds()
         
-        # Machine Time: Same device, next event < 10 mins
+        # Machine Time
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 
             0
         )
         
-        # Walk Time: Different device, prev event < 20 mins
+        # Walk Time
         df['walk_time_sec'] = np.where(
             (df['device'] != df['prev_device']) & (df['walk_seconds'] < 1200),
             df['walk_seconds'],
@@ -221,20 +237,15 @@ with st.sidebar:
     st.markdown("### 📅 Date Range")
     default_start = max(min_db, max_db - timedelta(days=7))
     
-    # FIX: Added 'key' to force slider to reset when DB range changes
     date_range = st.slider(
-        "Select Range", 
-        min_value=min_db, 
-        max_value=max_db,
-        value=(default_start, max_db), 
-        format="MM/DD/YY",
+        "Select Range", min_value=min_db, max_value=max_db,
+        value=(default_start, max_db), format="MM/DD/YY",
         key=f"slider_{min_db}_{max_db}"
     )
     start_date, end_date = date_range
     
     st.divider()
     
-    # FIX: Increased nrows to 50 to find header deeper in the file
     uploaded = st.file_uploader("Upload Daily Report", type=["csv","xlsx"])
     if uploaded:
         try:
@@ -251,7 +262,7 @@ with st.sidebar:
                     break
             
             if header_row_idx is None:
-                st.error("❌ Could not find headers (UserName/Device) in first 50 rows.")
+                st.error("❌ Could not find headers (UserName/Device).")
             else:
                 uploaded.seek(0)
                 if uploaded.name.endswith(".xlsx"):
@@ -278,14 +289,15 @@ if df.empty:
     st.stop()
 
 # --- TABS ---
-tab_over, tab_stock, tab_effic, tab_drill = st.tabs([
+tab_over, tab_compliance, tab_stock, tab_effic, tab_drill = st.tabs([
     "📊 Overview & Speed",
-    "🚨 Stockout Risk", 
-    "⚡ Efficiency & Traffic", 
+    "🛡️ Compliance (NEW)", 
+    "🚨 Stockouts", 
+    "⚡ Efficiency", 
     "🔍 Drill Down"
 ])
 
-# --- TAB 1: OVERVIEW & SPEED ---
+# --- TAB 1: OVERVIEW ---
 with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
     
@@ -297,36 +309,80 @@ with tab_over:
     avg_walk_time = df[df['walk_time_sec'] > 0]['walk_time_sec'].mean()
     
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Transactions", f"{len(df):,}")
-    c2.metric("Avg Session Time", f"{seconds_to_mmss(avg_machine_time)}", help="Avg time spent standing at one machine per visit")
-    c3.metric("Avg Walk Time", f"{seconds_to_mmss(avg_walk_time)}", help="Avg time between different machines")
+    c1.metric("Transactions", f"{len(df):,}")
+    c2.metric("Avg Session", f"{seconds_to_mmss(avg_machine_time)}")
+    c3.metric("Avg Walk", f"{seconds_to_mmss(avg_walk_time)}")
     c4.metric("Active Techs", df['user_name'].nunique())
     
     st.divider()
     
-    st.markdown("#### 🐢 Slowest Meds to Process (Machine Time)")
-    
+    st.markdown("#### 🐢 Slowest Meds (Machine Time)")
     med_speed = df[df['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().reset_index()
     med_counts = df['med_desc'].value_counts()
     med_speed = med_speed[med_speed['med_desc'].isin(med_counts[med_counts > 5].index)]
-    
     top_slow = med_speed.sort_values('machine_time_sec', ascending=False).head(10)
     
     fig_slow = px.bar(top_slow, x='machine_time_sec', y='med_desc', orientation='h',
-                      title="Top 10 Slowest Meds (Avg Seconds per Transaction)",
-                      labels={'machine_time_sec': 'Seconds', 'med_desc': 'Medication'},
-                      color='machine_time_sec', color_continuous_scale='RdYlGn_r')
+                      title="Slowest Meds to Process (Avg Seconds)", color='machine_time_sec', color_continuous_scale='RdYlGn_r')
     fig_slow.update_layout(yaxis={'categoryorder':'total ascending'})
-    st.plotly_chart(fig_slow) # FIX: Removed deprecated arg
+    st.plotly_chart(fig_slow)
 
-# --- TAB 2: STOCKOUTS ---
+# --- TAB 2: COMPLIANCE ---
+with tab_compliance:
+    st.markdown("### 🛡️ Count Integrity & Accuracy")
+    
+    # Filter for Discrepancies
+    if 'discrepancy_qty' in df.columns:
+        disc_df = df[df['discrepancy_qty'] != 0].copy()
+    else:
+        disc_df = pd.DataFrame()
+        st.warning("Discrepancy data not found yet. Upload new reports to populate this tab.")
+    
+    c1, c2 = st.columns(2)
+    c1.metric("Total Count Errors", len(disc_df))
+    if not disc_df.empty:
+        c2.metric("Net Variance", int(disc_df['discrepancy_qty'].sum()))
+    else:
+        c2.metric("Net Variance", 0)
+    
+    st.divider()
+    
+    if not disc_df.empty:
+        c_left, c_right = st.columns(2)
+        
+        with c_left:
+            st.markdown("#### ⚠️ Top 'Frequent Flyers' (Users)")
+            user_errors = disc_df.groupby('user_name').agg(
+                Errors=('pk', 'count'),
+                Net_Variance=('discrepancy_qty', 'sum')
+            ).reset_index().sort_values('Errors', ascending=False).head(10)
+            
+            fig_user = px.bar(user_errors, x='Errors', y='user_name', orientation='h', 
+                              title="Users with Most Discrepancies", color='Net_Variance',
+                              color_continuous_scale='RdBu')
+            fig_user.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig_user, use_container_width=True)
+            
+        with c_right:
+            st.markdown("#### 💊 Problem Meds (Count Errors)")
+            med_errors = disc_df.groupby('med_desc')['pk'].count().reset_index(name='Count')
+            med_errors = med_errors.sort_values('Count', ascending=False).head(10)
+            
+            fig_med = px.bar(med_errors, x='Count', y='med_desc', orientation='h', title="Meds with Most Count Errors")
+            fig_med.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig_med, use_container_width=True)
+            
+        st.markdown("#### 📝 Detailed Discrepancy Log")
+        st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason']], use_container_width=True, hide_index=True)
+    elif 'discrepancy_qty' in df.columns:
+        st.success("✅ No discrepancies found in this period! Accuracy is 100%.")
+
+# --- TAB 3: STOCKOUTS ---
 with tab_stock:
     all_refills = df[df['is_refill']].copy()
     all_refills = all_refills.sort_values(['device', 'med_desc', 'dt'])
-    
     all_refills['prev_refill_dt'] = all_refills.groupby(['device', 'med_desc'])['dt'].shift(1)
     all_refills['burn_duration'] = all_refills['dt'] - all_refills['prev_refill_dt']
-    
     stockouts = all_refills[all_refills['beginning_qty'] == 0].copy()
     
     def format_burn_rate(td):
@@ -340,144 +396,91 @@ with tab_stock:
 
     stockouts['Time Since Last Refill'] = stockouts['burn_duration'].apply(format_burn_rate)
     
-    st.markdown(f"### ⚠️ {len(stockouts)} Stockout Events")
-    
     if not stockouts.empty:
         c_hot, c_list = st.columns([1, 2])
         with c_hot:
-            st.markdown("#### Top Devices")
             hotspots = stockouts['device'].value_counts().reset_index()
             hotspots.columns = ['Device', 'Count']
             fig = px.bar(hotspots.head(10), x='Count', y='Device', orientation='h', color_discrete_sequence=['#FF4B4B'])
             fig.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig)
+            st.plotly_chart(fig, use_container_width=True)
         with c_list:
             cols = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
-            st.dataframe(stockouts.sort_values('dt', ascending=False)[cols], hide_index=True)
+            st.dataframe(stockouts.sort_values('dt', ascending=False)[cols], use_container_width=True, hide_index=True)
     else:
         st.success("✅ Zero stockouts found.")
 
-# --- TAB 3: EFFICIENCY & TRAFFIC ---
+# --- TAB 4: EFFICIENCY ---
 with tab_effic:
     c_left, c_right = st.columns([2, 1])
-    
     with c_left:
         st.markdown("### 📉 Inefficient Refill Candidates")
-        st.markdown("*Meds we visit often, but fill little.*")
-        
         refills = df[df['is_refill']].copy()
         mask_exclude = refills['med_desc'].str.lower().str.contains('keys|cassette', na=False)
         refills = refills[~mask_exclude]
         
         effic_stats = refills.groupby(['device', 'med_desc']).agg(
-            Trips=('pk', 'count'),
-            Avg_Added=('qty', 'mean'),
+            Trips=('pk', 'count'), Avg_Added=('qty', 'mean')
         ).reset_index()
         
         inefficient = effic_stats[ (effic_stats['Trips'] >= 3) & (effic_stats['Avg_Added'] < 3) ]
         inefficient = inefficient.sort_values('Trips', ascending=False).head(15)
         
         if not inefficient.empty:
-            fig_bar = px.bar(
-                inefficient, x='Trips', y='med_desc', orientation='h', color='Avg_Added',
-                labels={'Trips': 'Trips to Machine', 'med_desc': 'Medication', 'Avg_Added': 'Avg Qty'},
-                color_continuous_scale='OrRd'
-            )
+            fig_bar = px.bar(inefficient, x='Trips', y='med_desc', orientation='h', color='Avg_Added', color_continuous_scale='OrRd')
             fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_bar)
+            st.plotly_chart(fig_bar, use_container_width=True)
             
-            # --- MED DETECTIVE DRILL DOWN ---
             st.markdown("#### 🕵️ Med Detective")
             med_list = inefficient['med_desc'].unique().tolist()
-            selected_med = st.selectbox("Select an Inefficient Med to investigate:", ["Select Med..."] + med_list)
+            selected_med = st.selectbox("Select Med:", ["Select..."] + med_list)
             
-            if selected_med != "Select Med...":
+            if selected_med != "Select...":
                 med_df = refills[refills['med_desc'] == selected_med]
-                
-                # Chart 1: WHERE (Device Breakdown)
                 c_dev, c_day = st.columns(2)
-                
                 with c_dev:
-                    med_breakdown = med_df.groupby('device').agg(
-                        Trips=('pk', 'count')
-                    ).reset_index().sort_values('Trips', ascending=False)
-                    
-                    fig_bd = px.bar(med_breakdown, x='Trips', y='device', orientation='h', 
-                                           title=f"Where are we refilling {selected_med}?",
-                                           color_discrete_sequence=['#FF4B4B'])
+                    med_breakdown = med_df.groupby('device').agg(Trips=('pk', 'count')).reset_index().sort_values('Trips', ascending=False)
+                    fig_bd = px.bar(med_breakdown, x='Trips', y='device', orientation='h', title=f"Where?", color_discrete_sequence=['#FF4B4B'])
                     fig_bd.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig_bd)
-                
-                # Chart 2: WHEN (Daily Trend)
+                    st.plotly_chart(fig_bd, use_container_width=True)
                 with c_day:
-                    daily_trend = med_df.groupby('Date').agg(
-                        Trips=('pk', 'count')
-                    ).reset_index()
-                    
-                    fig_trend = px.bar(daily_trend, x='Date', y='Trips', 
-                                       title=f"Daily Trend for {selected_med}",
-                                       color_discrete_sequence=['#3366CC'])
-                    st.plotly_chart(fig_trend)
-
+                    daily_trend = med_df.groupby('Date').agg(Trips=('pk', 'count')).reset_index()
+                    fig_trend = px.bar(daily_trend, x='Date', y='Trips', title=f"When?", color_discrete_sequence=['#3366CC'])
+                    st.plotly_chart(fig_trend, use_container_width=True)
         else:
             st.success("Refill efficiency looks good.")
     
     with c_right:
         st.markdown("### 🚦 Traffic Analysis")
+        traffic_df = df[~df['med_desc'].str.lower().str.contains('keys|cassette', na=False)].copy()
+        traffic_df = traffic_df[~traffic_df['device'].str.lower().str.contains('pharm', na=False)]
         
-        traffic_df = df.copy()
-        mask_exclude_traffic = traffic_df['med_desc'].str.lower().str.contains('keys|cassette', na=False)
-        mask_exclude_pharm = traffic_df['device'].str.lower().str.contains('pharm', na=False)
-        
-        traffic_df = traffic_df[~mask_exclude_traffic & ~mask_exclude_pharm]
-        
-        # Most Visited Devices
-        device_visits = traffic_df.groupby('device')['session_id'].nunique().reset_index(name='Visits')
-        device_visits = device_visits.sort_values('Visits', ascending=False).head(10)
-        
-        fig_dev = px.bar(device_visits, x='Visits', y='device', orientation='h', title="Most Visited Devices")
+        device_visits = traffic_df.groupby('device')['session_id'].nunique().reset_index(name='Visits').sort_values('Visits', ascending=False).head(10)
+        fig_dev = px.bar(device_visits, x='Visits', y='device', orientation='h', title="Most Visited")
         fig_dev.update_layout(yaxis={'categoryorder':'total ascending'})
-        st.plotly_chart(fig_dev)
+        st.plotly_chart(fig_dev, use_container_width=True)
         
-        # Heatmap
         hourly = traffic_df.groupby(['device', 'Hour'])['session_id'].nunique().reset_index(name='Visits')
-        fig_heat = px.density_heatmap(hourly, x='Hour', y='device', z='Visits', title="Heatmap (Hour of Day)", color_continuous_scale='Viridis')
-        st.plotly_chart(fig_heat)
+        fig_heat = px.density_heatmap(hourly, x='Hour', y='device', z='Visits', title="Heatmap", color_continuous_scale='Viridis')
+        st.plotly_chart(fig_heat, use_container_width=True)
 
-# --- TAB 4: DRILL DOWN ---
+# --- TAB 5: DRILL DOWN ---
 with tab_drill:
     st.header("🔍 Interactive Data Explorer")
-    
     c1, c2, c3, c4 = st.columns(4)
-    
-    all_users = sorted([x for x in df['user_name'].unique() if x is not None])
-    all_devices = sorted([x for x in df['device'].unique() if x is not None])
-    all_meds = sorted([x for x in df['med_desc'].unique() if x is not None])
-    all_events = sorted([x for x in df['event_type'].unique() if x is not None])
-    
-    sel_users = c1.multiselect("Technician", all_users)
-    sel_devices = c2.multiselect("Device", all_devices)
-    sel_meds = c3.multiselect("Medication", all_meds)
-    sel_events = c4.multiselect("Event Type", all_events)
+    sel_users = c1.multiselect("Technician", sorted([x for x in df['user_name'].unique() if x is not None]))
+    sel_devices = c2.multiselect("Device", sorted([x for x in df['device'].unique() if x is not None]))
+    sel_meds = c3.multiselect("Medication", sorted([x for x in df['med_desc'].unique() if x is not None]))
+    sel_events = c4.multiselect("Event Type", sorted([x for x in df['event_type'].unique() if x is not None]))
     
     filtered = df.copy()
-    
     if sel_users: filtered = filtered[filtered['user_name'].isin(sel_users)]
     if sel_devices: filtered = filtered[filtered['device'].isin(sel_devices)]
     if sel_meds: filtered = filtered[filtered['med_desc'].isin(sel_meds)]
     if sel_events: filtered = filtered[filtered['event_type'].isin(sel_events)]
         
     st.markdown(f"**Showing {len(filtered):,} records**")
-    
-    display_cols = [
-        'Timestamp', 'Walk Time', 'Machine Time',   
-        'user_name', 'device', 'event_type', 
-        'med_desc', 'qty', 'beginning_qty', 'ending_qty'
-    ]
-    
-    valid_cols = [c for c in display_cols if c in filtered.columns]
-    
-    st.dataframe(
-        filtered[valid_cols].sort_values('Timestamp', ascending=False), 
-        hide_index=True
-    )
+    cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty']
+    # Check if cols exist before displaying (safe mode)
+    valid_cols = [c for c in cols if c in filtered.columns]
+    st.dataframe(filtered[valid_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
