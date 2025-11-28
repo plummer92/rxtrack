@@ -1,6 +1,6 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL)
-# Fixes: Filters Keys/Cassettes from Efficiency View
+# Includes Traffic Heatmaps & Device Frequency
 ###############################################
 
 import streamlit as st
@@ -166,7 +166,7 @@ def load_data(start_date, end_date):
         
         df = df.sort_values(['user_name', 'dt'])
         
-        # Look Ahead/Behind logic for Machine vs Walk Time
+        # Look Ahead/Behind logic
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['next_device'] = df.groupby('user_name')['device'].shift(-1)
         
@@ -203,6 +203,7 @@ def load_data(start_date, end_date):
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
+        df['Hour'] = df['dt'].dt.hour
     
     return df
 
@@ -272,7 +273,7 @@ if df.empty:
 tab_over, tab_stock, tab_effic, tab_drill = st.tabs([
     "📊 Overview & Speed",
     "🚨 Stockout Risk", 
-    "⚡ Efficiency", 
+    "⚡ Efficiency & Traffic", 
     "🔍 Drill Down"
 ])
 
@@ -349,16 +350,12 @@ with tab_stock:
     else:
         st.success("✅ Zero stockouts found.")
 
-# --- TAB 3: EFFICIENCY ---
+# --- TAB 3: EFFICIENCY & TRAFFIC ---
 with tab_effic:
+    # 1. Low Yield Matrix
     st.markdown("### 📉 High Effort, Low Yield Refills")
-    st.markdown("These are the meds techs visited the **most often**, but added the **least amount** of stock to.")
-    st.markdown("*(Excluded: 'Keys' and 'Cassettes')*")
     
     refills = df[df['is_refill']].copy()
-    
-    # --- FILTERING LOGIC ---
-    # Filter out Keys and Cassettes (case insensitive)
     mask_exclude = refills['med_desc'].str.lower().str.contains('keys|cassette', na=False)
     refills = refills[~mask_exclude]
     
@@ -367,27 +364,45 @@ with tab_effic:
         Avg_Added=('qty', 'mean'),
     ).reset_index()
     
-    # Logic: High Trips (>3), Low Yield (<3)
     inefficient = effic_stats[ (effic_stats['Trips'] >= 3) & (effic_stats['Avg_Added'] < 3) ]
-    
-    # Sort by 'Trips'
     inefficient = inefficient.sort_values('Trips', ascending=False).head(15)
     
     if not inefficient.empty:
         fig_bar = px.bar(
-            inefficient, 
-            x='Trips', 
-            y='med_desc', 
-            orientation='h',
-            color='Avg_Added',
-            title="Top 15 Most Frequent Visits for Low Quantity (< 3 items)",
-            labels={'Trips': 'Number of Trips to Machine', 'med_desc': 'Medication', 'Avg_Added': 'Avg Qty Added'},
+            inefficient, x='Trips', y='med_desc', orientation='h', color='Avg_Added',
+            title="Top 15 Inefficient Refills (High Visits, Low Quantity)",
             color_continuous_scale='OrRd'
         )
         fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
         st.plotly_chart(fig_bar, use_container_width=True)
-    else:
-        st.success("Refill efficiency looks good.")
+    
+    st.divider()
+    
+    # 2. Traffic Analysis
+    st.markdown("### 🚦 Device Traffic Analysis")
+    
+    # Filter full DF for traffic (excluding keys/cassettes)
+    traffic_df = df.copy()
+    mask_exclude_traffic = traffic_df['med_desc'].str.lower().str.contains('keys|cassette', na=False)
+    traffic_df = traffic_df[~mask_exclude_traffic]
+    
+    c1, c2 = st.columns(2)
+    
+    # Most Visited Devices (Count Unique Sessions per Device)
+    device_visits = traffic_df.groupby('device')['session_id'].nunique().reset_index(name='Visits')
+    device_visits = device_visits.sort_values('Visits', ascending=False).head(10)
+    
+    with c1:
+        fig_dev = px.bar(device_visits, x='Visits', y='device', orientation='h', title="Most Visited Devices (Sessions)")
+        fig_dev.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_dev, use_container_width=True)
+        
+    # Time of Day Heatmap
+    hourly = traffic_df.groupby(['device', 'Hour'])['session_id'].nunique().reset_index(name='Visits')
+    
+    with c2:
+        fig_heat = px.density_heatmap(hourly, x='Hour', y='device', z='Visits', title="Traffic Heatmap (Hour of Day)", color_continuous_scale='Viridis')
+        st.plotly_chart(fig_heat, use_container_width=True)
 
 # --- TAB 4: DRILL DOWN ---
 with tab_drill:
@@ -415,22 +430,10 @@ with tab_drill:
     st.markdown(f"**Showing {len(filtered):,} records**")
     
     display_cols = [
-        'Timestamp', 
-        'Walk Time',      
-        'Machine Time',   
-        'user_name', 
-        'device', 
-        'event_type', 
-        'med_desc', 
-        'qty', 
-        'beginning_qty', 
-        'ending_qty'
+        'Timestamp', 'Walk Time', 'Machine Time',   
+        'user_name', 'device', 'event_type', 
+        'med_desc', 'qty', 'beginning_qty', 'ending_qty'
     ]
-    
     valid_cols = [c for c in display_cols if c in filtered.columns]
     
-    st.dataframe(
-        filtered[valid_cols].sort_values('Timestamp', ascending=False), 
-        use_container_width=True, 
-        hide_index=True
-    )
+    st.dataframe(filtered[valid_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
