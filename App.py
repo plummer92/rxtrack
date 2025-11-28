@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: STEWARDSHIP & DRILL DOWN EDITION
-# Includes Smart File Loader, MM:SS Time, & Burn Rate
+# RXTRACK: EXECUTIVE DASHBOARD
+# Includes Date Slider, Smart Loader, & Time Between Pyxis
 ###############################################
 
 import streamlit as st
@@ -20,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for polished look
+# Custom CSS
 st.markdown("""
     <style>
     .metric-card { background-color: #f9f9f9; padding: 15px; border-radius: 10px; border-left: 5px solid #4CAF50; }
@@ -49,6 +49,25 @@ def get_db_connection():
     except Exception as e:
         st.error(f"❌ DB Connection Error: {e}")
         return None
+
+def get_db_date_range():
+    """Gets the absolute min and max dates from the DB for the slider"""
+    conn = get_db_connection()
+    if not conn: return datetime.today().date(), datetime.today().date()
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT MIN(dt), MAX(dt) FROM events")
+        min_dt, max_dt = cur.fetchone()
+        cur.close()
+        
+        if min_dt and max_dt:
+            return min_dt.date(), max_dt.date()
+    except:
+        pass
+    
+    # Default fallback if DB is empty
+    return datetime.today().date() - timedelta(days=7), datetime.today().date()
 
 ###########################################################
 #                 DATA CLEANING
@@ -137,11 +156,20 @@ def load_data(start_date, end_date):
         df["dt"] = pd.to_datetime(df["dt"])
         df["is_refill"] = df["event_type"].str.lower().str.contains("refill|load", na=False)
         
-        # Gap Times (MM:SS)
+        # --- CALCULATE TIME BETWEEN PYXIS (MM:SS) ---
+        # Sort by User then Time
         df = df.sort_values(['user_name', 'dt'])
+        
+        # Shift time by 1 to compare current row with previous row for same user
         df['prev_time'] = df.groupby('user_name')['dt'].shift(1)
+        
+        # Calculate difference in seconds
         df['gap_seconds'] = (df['dt'] - df['prev_time']).dt.total_seconds()
-        df['Time Since Last (MM:SS)'] = df['gap_seconds'].apply(seconds_to_mmss)
+        
+        # Apply the MM:SS formatter
+        df['Time Between Pyxis'] = df['gap_seconds'].apply(seconds_to_mmss)
+        
+        # Create a pretty timestamp
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
     
     return df
@@ -154,15 +182,27 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
-    end_val = datetime.today().date()
-    start_val = end_val - timedelta(days=7)
+    # 1. Get Min/Max from DB for Slider
+    min_db, max_db = get_db_date_range()
     
-    c1, c2 = st.columns(2)
-    start_date = c1.date_input("Start", start_val)
-    end_date = c2.date_input("End", end_val)
+    st.markdown("### 📅 Date Range")
+    
+    # Slider Logic: Defaults to last 7 days, but allows sliding back to start of data
+    default_start = max(min_db, max_db - timedelta(days=7))
+    
+    date_range = st.slider(
+        "Select Range",
+        min_value=min_db,
+        max_value=max_db,
+        value=(default_start, max_db),
+        format="MM/DD/YY"
+    )
+    
+    start_date, end_date = date_range
     
     st.divider()
     
+    # --- SMART FILE LOADER ---
     uploaded = st.file_uploader("Upload Daily Report", type=["csv","xlsx"])
     if uploaded:
         try:
@@ -179,7 +219,7 @@ with st.sidebar:
                     break
             
             if header_row_idx is None:
-                st.error("❌ Could not find headers (UserName/Device) in first 20 rows.")
+                st.error("❌ Could not find headers (UserName/Device).")
             else:
                 uploaded.seek(0)
                 if uploaded.name.endswith(".xlsx"):
@@ -188,7 +228,7 @@ with st.sidebar:
                     raw = pd.read_csv(uploaded, header=header_row_idx)
                 
                 clean = clean_dataframe(raw)
-                st.success(f"✅ Headers found at row {header_row_idx+1}. {len(clean)} rows ready.")
+                st.success(f"✅ Found {len(clean)} rows.")
                 
                 if st.button("Process & Save to DB"):
                     insert_batch(clean)
@@ -209,46 +249,36 @@ if df.empty:
 tab_stockout, tab_effic, tab_drill = st.tabs([
     "🚨 Stockout Risk", 
     "⚡ Par Level Efficiency", 
-    "🔍 Data Explorer (Drill Down)"
+    "🔍 Drill Down (Time Analysis)"
 ])
 
-# --- TAB 1: STOCKOUTS (WITH BURN RATE) ---
+# --- TAB 1: STOCKOUTS ---
 with tab_stockout:
-    # 1. Prepare Refill Data (ALL refills needed for time calculation)
     all_refills = df[df['is_refill']].copy()
     all_refills = all_refills.sort_values(['device', 'med_desc', 'dt'])
     
-    # 2. Calculate "Burn Duration" (Time since previous refill)
     all_refills['prev_refill_dt'] = all_refills.groupby(['device', 'med_desc'])['dt'].shift(1)
     all_refills['burn_duration'] = all_refills['dt'] - all_refills['prev_refill_dt']
     
-    # 3. Filter for Stockouts (Beg Qty = 0)
     stockouts = all_refills[all_refills['beginning_qty'] == 0].copy()
     
-    # 4. Helper format function
     def format_burn_rate(td):
         if pd.isna(td): return "First Record (N/A)"
         total_seconds = int(td.total_seconds())
-        days, remainder = divmod(total_seconds, 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes, _ = divmod(remainder, 60)
+        days, rem = divmod(total_seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
         if days > 0: return f"{days}d {hours}h"
-        if hours > 0: return f"{hours}h {minutes}m"
-        return f"{minutes}m"
+        return f"{hours}h {minutes}m"
 
     stockouts['Time Since Last Refill'] = stockouts['burn_duration'].apply(format_burn_rate)
     
-    st.markdown(f"### ⚠️ {len(stockouts)} Stockout Events Detected")
-    st.markdown("""
-    **Time Since Last Refill Analysis:**
-    * **Short Time (< 4h):** Par Level is likely **TOO LOW**. It burned out almost immediately.
-    * **Long Time (> 2d):** Routine depletion. Check refill schedule frequency.
-    """)
+    st.markdown(f"### ⚠️ {len(stockouts)} Stockout Events")
     
     if not stockouts.empty:
         c_hot, c_list = st.columns([1, 2])
         with c_hot:
-            st.markdown("#### Top Devices by Stockouts")
+            st.markdown("#### Top Devices")
             hotspots = stockouts['device'].value_counts().reset_index()
             hotspots.columns = ['Device', 'Count']
             fig = px.bar(hotspots.head(10), x='Count', y='Device', orientation='h', color_discrete_sequence=['#FF4B4B'])
@@ -256,23 +286,15 @@ with tab_stockout:
             st.plotly_chart(fig, use_container_width=True)
             
         with c_list:
-            st.markdown("#### Detailed Stockout Log")
-            cols_to_show = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
-            
-            # Sort by DATE (dt) first, THEN filter to show only display columns
-            # This prevents the KeyError
-            st.dataframe(
-                stockouts.sort_values('dt', ascending=False)[cols_to_show], 
-                use_container_width=True,
-                hide_index=True
-            )
+            st.markdown("#### Detailed Log")
+            cols = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
+            st.dataframe(stockouts.sort_values('dt', ascending=False)[cols], use_container_width=True, hide_index=True)
     else:
-        st.success("✅ Zero stockouts found in this period.")
+        st.success("✅ Zero stockouts found.")
 
 # --- TAB 2: EFFICIENCY ---
 with tab_effic:
     st.markdown("### 📉 Low-Yield Refill Matrix")
-    st.markdown("High effort (many trips) vs. Low yield (adding few meds).")
     
     refills = df[df['is_refill']].copy()
     effic_stats = refills.groupby(['device', 'med_desc']).agg(
@@ -291,11 +313,12 @@ with tab_effic:
     else:
         st.success("Refill efficiency looks good.")
 
-# --- TAB 3: DRILL DOWN ---
+# --- TAB 3: DRILL DOWN (TIME ANALYSIS) ---
 with tab_drill:
-    st.header("🔍 Interactive Line-by-Line Analysis")
+    st.header("🔍 Interactive Data Explorer")
     
     c1, c2, c3 = st.columns(3)
+    
     all_users = sorted([x for x in df['user_name'].unique() if x is not None])
     all_devices = sorted([x for x in df['device'].unique() if x is not None])
     all_meds = sorted([x for x in df['med_desc'].unique() if x is not None])
@@ -305,17 +328,32 @@ with tab_drill:
     sel_meds = c3.multiselect("Filter Medication", all_meds)
     
     filtered = df.copy()
+    
+    # Apply Filters
     if sel_users: filtered = filtered[filtered['user_name'].isin(sel_users)]
     if sel_devices: filtered = filtered[filtered['device'].isin(sel_devices)]
     if sel_meds: filtered = filtered[filtered['med_desc'].isin(sel_meds)]
         
     st.markdown(f"**Showing {len(filtered):,} records**")
     
+    # Columns to display
     display_cols = [
-        'Timestamp', 'Time Since Last (MM:SS)', 'user_name', 
-        'device', 'event_type', 'med_desc', 'qty', 
-        'beginning_qty', 'ending_qty'
+        'Timestamp', 
+        'Time Between Pyxis',  # <-- New Name
+        'user_name', 
+        'device', 
+        'event_type', 
+        'med_desc', 
+        'qty', 
+        'beginning_qty', 
+        'ending_qty'
     ]
+    
     valid_cols = [c for c in display_cols if c in filtered.columns]
     
-    st.dataframe(filtered[valid_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
+    # Sort by Timestamp descending
+    st.dataframe(
+        filtered[valid_cols].sort_values('Timestamp', ascending=False), 
+        use_container_width=True, 
+        hide_index=True
+    )
