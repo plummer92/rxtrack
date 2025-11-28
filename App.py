@@ -1,6 +1,6 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL)
-# Includes Med Drill-Down & Pharmacy Filters
+# Includes Daily Trend for Med Detective
 ###############################################
 
 import streamlit as st
@@ -203,6 +203,7 @@ def load_data(start_date, end_date):
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
+        df['Date'] = df['dt'].dt.date
         df['Hour'] = df['dt'].dt.hour
     
     return df
@@ -385,27 +386,41 @@ with tab_effic:
             selected_med = st.selectbox("Select an Inefficient Med to investigate:", ["Select Med..."] + med_list)
             
             if selected_med != "Select Med...":
-                st.markdown(f"**Device Breakdown for: {selected_med}**")
-                med_breakdown = refills[refills['med_desc'] == selected_med].groupby('device').agg(
-                    Trips=('pk', 'count'),
-                    Total_Added=('qty', 'sum')
-                ).reset_index().sort_values('Trips', ascending=False)
+                med_df = refills[refills['med_desc'] == selected_med]
                 
-                fig_breakdown = px.bar(med_breakdown, x='Trips', y='device', orientation='h', 
-                                       title=f"Where are we refilling {selected_med} too often?",
-                                       color_discrete_sequence=['#FF4B4B'])
-                fig_breakdown.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig_breakdown, use_container_width=True)
+                # Chart 1: WHERE (Device Breakdown)
+                c_dev, c_day = st.columns(2)
+                
+                with c_dev:
+                    med_breakdown = med_df.groupby('device').agg(
+                        Trips=('pk', 'count')
+                    ).reset_index().sort_values('Trips', ascending=False)
+                    
+                    fig_bd = px.bar(med_breakdown, x='Trips', y='device', orientation='h', 
+                                           title=f"Where are we refilling {selected_med}?",
+                                           color_discrete_sequence=['#FF4B4B'])
+                    fig_bd.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig_bd, use_container_width=True)
+                
+                # Chart 2: WHEN (Daily Trend)
+                with c_day:
+                    daily_trend = med_df.groupby('Date').agg(
+                        Trips=('pk', 'count')
+                    ).reset_index()
+                    
+                    fig_trend = px.bar(daily_trend, x='Date', y='Trips', 
+                                       title=f"Daily Trend for {selected_med}",
+                                       color_discrete_sequence=['#3366CC'])
+                    st.plotly_chart(fig_trend, use_container_width=True)
+
         else:
             st.success("Refill efficiency looks good.")
     
     with c_right:
         st.markdown("### 🚦 Traffic Analysis")
         
-        # Filter full DF for traffic (excluding keys/cassettes AND pharmacy)
         traffic_df = df.copy()
         mask_exclude_traffic = traffic_df['med_desc'].str.lower().str.contains('keys|cassette', na=False)
-        # Exclude SJSPharm / Pharm
         mask_exclude_pharm = traffic_df['device'].str.lower().str.contains('pharm', na=False)
         
         traffic_df = traffic_df[~mask_exclude_traffic & ~mask_exclude_pharm]
