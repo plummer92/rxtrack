@@ -257,10 +257,10 @@ with tab_stockout:
             
         with c_list:
             st.markdown("#### Detailed Stockout Log")
-            # Show the new "Time Since Last Refill" column first
             cols_to_show = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
             
-            # THE FIX: Sort by 'dt' FIRST, then select columns
+            # Sort by DATE (dt) first, THEN filter to show only display columns
+            # This prevents the KeyError
             st.dataframe(
                 stockouts.sort_values('dt', ascending=False)[cols_to_show], 
                 use_container_width=True,
@@ -318,4 +318,4 @@ with tab_drill:
     ]
     valid_cols = [c for c in display_cols if c in filtered.columns]
     
-    st.dataframe(filtered[valid_cols].sort_values('Timestamp', asce
+    st.dataframe(filtered[valid_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
