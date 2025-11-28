@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
-# Includes "Who & Exact Time" in Med Detective
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL DEBUG)
+# Fixes: Slider Defaults & Date Range Visibility
 ###############################################
 
 import streamlit as st
@@ -52,21 +52,30 @@ def get_db_connection():
 def get_db_date_range():
     """Gets the absolute min and max dates from the DB for the slider"""
     conn = get_db_connection()
+    # Default return if connection fails initially
     if not conn: return datetime.today().date(), datetime.today().date()
     
     try:
         cur = conn.cursor()
         cur.execute("SELECT MIN(dt), MAX(dt) FROM events")
-        min_dt, max_dt = cur.fetchone()
+        result = cur.fetchone()
         cur.close()
         conn.close()
         
-        if min_dt and max_dt:
-            return min_dt.date(), max_dt.date()
-    except:
+        # If DB has data, return the real dates
+        if result and result[0] and result[1]:
+            # Convert timestamp to date object
+            min_d = result[0] if isinstance(result[0], datetime) else pd.to_datetime(result[0])
+            max_d = result[1] if isinstance(result[1], datetime) else pd.to_datetime(result[1])
+            return min_d.date(), max_d.date()
+            
+    except Exception as e:
+        # If query fails, show error so we know why slider is broken
+        st.sidebar.error(f"Date Error: {e}")
         if conn: conn.close()
     
-    return datetime.today().date() - timedelta(days=7), datetime.today().date()
+    # Fallback only if DB is truly empty
+    return datetime.today().date(), datetime.today().date()
 
 ###########################################################
 #                 DATA CLEANING
@@ -226,8 +235,10 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
-    # DB Health Check
+    # --- DB HEALTH CHECK ---
     min_db, max_db = get_db_date_range()
+    
+    # Get row count for key generation
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -240,16 +251,20 @@ with st.sidebar:
         
     with st.expander("💾 Database Stats", expanded=True):
         st.write(f"**Rows:** {total_rows:,}")
-        st.write(f"**Latest:** {max_db}")
+        st.write(f"**Earliest:** {min_db}") # Shows start date
+        st.write(f"**Latest:** {max_db}")   # Shows end date
     
     st.divider()
     
     st.markdown("### 📅 Date Range")
-    default_start = max(min_db, max_db - timedelta(days=7))
     
+    # FIX: Default to FULL range so user sees new data immediately
     date_range = st.slider(
-        "Select Range", min_value=min_db, max_value=max_db,
-        value=(default_start, max_db), format="MM/DD/YY",
+        "Select Range", 
+        min_value=min_db, 
+        max_value=max_db,
+        value=(min_db, max_db), # Set handles to full width
+        format="MM/DD/YY",
         key=f"slider_{min_db}_{max_db}_{total_rows}"
     )
     start_date, end_date = date_range
@@ -421,15 +436,12 @@ with tab_effic:
             fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_bar, use_container_width=True)
             
-            # --- MED DETECTIVE (DRILL DOWN L2) ---
             st.markdown("#### 🕵️ Med Detective")
             med_list = inefficient['med_desc'].unique().tolist()
             selected_med = st.selectbox("Select Med:", ["Select..."] + med_list)
             
             if selected_med != "Select...":
                 med_df = refills[refills['med_desc'] == selected_med]
-                
-                # Chart 1: WHERE (Device)
                 c_dev, c_day = st.columns(2)
                 with c_dev:
                     med_breakdown = med_df.groupby('device').agg(Trips=('pk', 'count')).reset_index().sort_values('Trips', ascending=False)
@@ -441,7 +453,7 @@ with tab_effic:
                     fig_trend = px.bar(daily_trend, x='Date', y='Trips', title=f"When?", color_discrete_sequence=['#3366CC'])
                     st.plotly_chart(fig_trend, use_container_width=True)
                 
-                # Chart 2: WHO (User) + LOG
+                # NEW: WHO Analysis
                 c_who, c_log = st.columns([1, 2])
                 with c_who:
                     who_stats = med_df.groupby('user_name').agg(Trips=('pk', 'count')).reset_index().sort_values('Trips', ascending=False).head(10)
@@ -451,7 +463,6 @@ with tab_effic:
                 with c_log:
                     st.markdown("**Exact Delivery Times**")
                     st.dataframe(med_df[['Timestamp', 'user_name', 'device', 'qty']].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
-
         else:
             st.success("Refill efficiency looks good.")
     
