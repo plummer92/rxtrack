@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
-# Fixes: NameError on Stockout Tab
+# RXTRACK: EXECUTIVE DASHBOARD
+# Includes Overview, Machine vs. Walk Time, & Simplified Charts
 ###############################################
 
 import streamlit as st
@@ -164,31 +164,26 @@ def load_data(start_date, end_date):
         df["dt"] = pd.to_datetime(df["dt"])
         df["is_refill"] = df["event_type"].str.lower().str.contains("refill|load", na=False)
         
-        # --- ADVANCED TIME LOGIC ---
         df = df.sort_values(['user_name', 'dt'])
         
-        # Look Ahead (Next Event) to determine Dwell Time
+        # Look Ahead/Behind logic for Machine vs Walk Time
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['next_device'] = df.groupby('user_name')['device'].shift(-1)
         
-        # Look Behind (Previous Event) to determine Walk Time
         df['prev_dt'] = df.groupby('user_name')['dt'].shift(1)
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
-        # Calculate raw durations (in seconds)
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['walk_seconds'] = (df['dt'] - df['prev_dt']).dt.total_seconds()
         
-        # Machine Time: If next event is SAME device, the duration is "Machine Time"
-        # Capped at 600s (10 min)
+        # Machine Time: Same device, next event < 10 mins
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 
             0
         )
         
-        # Walk Time: If prev event was DIFFERENT device, the gap is "Walk Time"
-        # Capped at 1200s (20 min)
+        # Walk Time: Different device, prev event < 20 mins
         df['walk_time_sec'] = np.where(
             (df['device'] != df['prev_device']) & (df['walk_seconds'] < 1200),
             df['walk_seconds'],
@@ -285,12 +280,9 @@ tab_over, tab_stock, tab_effic, tab_drill = st.tabs([
 with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
     
-    # Calculate Session Stats
+    # Session Stats
     session_stats = df.groupby('session_id').agg(
-        user=('user_name', 'first'),
-        device=('device', 'first'),
         total_machine_time=('machine_time_sec', 'sum'),
-        events=('pk', 'count')
     )
     
     avg_machine_time = session_stats['total_machine_time'].mean()
@@ -304,7 +296,6 @@ with tab_over:
     
     st.divider()
     
-    # Slowest Meds Chart
     st.markdown("#### 🐢 Slowest Meds to Process (Machine Time)")
     
     med_speed = df[df['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().reset_index()
@@ -321,7 +312,6 @@ with tab_over:
     st.plotly_chart(fig_slow, use_container_width=True)
 
 # --- TAB 2: STOCKOUTS ---
-# FIX: Use the correct variable name 'tab_stock'
 with tab_stock:
     all_refills = df[df['is_refill']].copy()
     all_refills = all_refills.sort_values(['device', 'med_desc', 'dt'])
@@ -347,6 +337,7 @@ with tab_stock:
     if not stockouts.empty:
         c_hot, c_list = st.columns([1, 2])
         with c_hot:
+            st.markdown("#### Top Devices")
             hotspots = stockouts['device'].value_counts().reset_index()
             hotspots.columns = ['Device', 'Count']
             fig = px.bar(hotspots.head(10), x='Count', y='Device', orientation='h', color_discrete_sequence=['#FF4B4B'])
@@ -360,22 +351,35 @@ with tab_stock:
 
 # --- TAB 3: EFFICIENCY ---
 with tab_effic:
-    st.markdown("### 📉 Low-Yield Refill Matrix")
+    st.markdown("### 📉 High Effort, Low Yield Refills")
+    st.markdown("These are the meds techs visited the **most often**, but added the **least amount** of stock to. (Target for Par Level Increase).")
     
     refills = df[df['is_refill']].copy()
     effic_stats = refills.groupby(['device', 'med_desc']).agg(
         Trips=('pk', 'count'),
         Avg_Added=('qty', 'mean'),
-        Total_Added=('qty', 'sum')
     ).reset_index()
     
+    # Logic: High Trips (>3), Low Yield (<3)
     inefficient = effic_stats[ (effic_stats['Trips'] >= 3) & (effic_stats['Avg_Added'] < 3) ]
     
+    # Sort by 'Trips' to see the worst offenders at the top
+    inefficient = inefficient.sort_values('Trips', ascending=False).head(15)
+    
     if not inefficient.empty:
-        fig_bub = px.scatter(inefficient, x='Trips', y='Avg_Added', 
-                             size='Total_Added', hover_name='med_desc', color='device',
-                             title="Inefficiency Bubbles (Size = Total Stock Added)")
-        st.plotly_chart(fig_bub, use_container_width=True)
+        # Simple Bar Chart Replacement
+        fig_bar = px.bar(
+            inefficient, 
+            x='Trips', 
+            y='med_desc', 
+            orientation='h',
+            color='Avg_Added',
+            title="Top 15 Most Frequent Visits for Low Quantity (< 3 items)",
+            labels={'Trips': 'Number of Trips to Machine', 'med_desc': 'Medication', 'Avg_Added': 'Avg Qty Added'},
+            color_continuous_scale='OrRd'
+        )
+        fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_bar, use_container_width=True)
     else:
         st.success("Refill efficiency looks good.")
 
