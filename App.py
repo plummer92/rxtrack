@@ -1,6 +1,6 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL)
-# Features: Compliance, Stewardship, Efficiency & Speed
+# Includes "Who & Exact Time" in Med Detective
 ###############################################
 
 import streamlit as st
@@ -79,7 +79,6 @@ def generate_pk(row):
 def clean_dataframe(df):
     df = df.copy()
     
-    # Updated Map to include Discrepancy Columns
     colmap = {
         "UserName": "user_name", "UserID": "user_id", "Device": "device",
         "MedID": "med_id", "MedDescription": "med_desc",
@@ -99,22 +98,18 @@ def clean_dataframe(df):
         "discrepancy_qty", "discrepancy_reason", "resolution_dt"
     ]
     
-    # Ensure columns exist
     for col in required_cols:
         if col not in df.columns:
             df[col] = None
 
-    # Parse Dates
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
     
     df = df.dropna(subset=["dt"]) 
 
-    # Numeric Cleanup
     for c in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    # Convert to string for SQL compat
     df["dt"] = df["dt"].astype(str)
     df["resolution_dt"] = df["resolution_dt"].astype(str).replace('NaT', None)
     
@@ -127,7 +122,6 @@ def insert_batch(df):
     if not conn: return
     cur = conn.cursor()
     
-    # Updated SQL to include new compliance columns
     sql = """
         INSERT INTO events (
             pk, user_name, device, med_id, med_desc, 
@@ -232,7 +226,23 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
+    # DB Health Check
     min_db, max_db = get_db_date_range()
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM events")
+        total_rows = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+    except:
+        total_rows = 0
+        
+    with st.expander("💾 Database Stats", expanded=True):
+        st.write(f"**Rows:** {total_rows:,}")
+        st.write(f"**Latest:** {max_db}")
+    
+    st.divider()
     
     st.markdown("### 📅 Date Range")
     default_start = max(min_db, max_db - timedelta(days=7))
@@ -240,7 +250,7 @@ with st.sidebar:
     date_range = st.slider(
         "Select Range", min_value=min_db, max_value=max_db,
         value=(default_start, max_db), format="MM/DD/YY",
-        key=f"slider_{min_db}_{max_db}"
+        key=f"slider_{min_db}_{max_db}_{total_rows}"
     )
     start_date, end_date = date_range
     
@@ -262,7 +272,7 @@ with st.sidebar:
                     break
             
             if header_row_idx is None:
-                st.error("❌ Could not find headers (UserName/Device).")
+                st.error("❌ Could not find headers (UserName/Device) in first 50 rows.")
             else:
                 uploaded.seek(0)
                 if uploaded.name.endswith(".xlsx"):
@@ -291,7 +301,7 @@ if df.empty:
 # --- TABS ---
 tab_over, tab_compliance, tab_stock, tab_effic, tab_drill = st.tabs([
     "📊 Overview & Speed",
-    "🛡️ Compliance (NEW)", 
+    "🛡️ Compliance", 
     "🚨 Stockouts", 
     "⚡ Efficiency", 
     "🔍 Drill Down"
@@ -300,11 +310,7 @@ tab_over, tab_compliance, tab_stock, tab_effic, tab_drill = st.tabs([
 # --- TAB 1: OVERVIEW ---
 with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
-    
-    session_stats = df.groupby('session_id').agg(
-        total_machine_time=('machine_time_sec', 'sum'),
-    )
-    
+    session_stats = df.groupby('session_id').agg(total_machine_time=('machine_time_sec', 'sum'))
     avg_machine_time = session_stats['total_machine_time'].mean()
     avg_walk_time = df[df['walk_time_sec'] > 0]['walk_time_sec'].mean()
     
@@ -331,12 +337,10 @@ with tab_over:
 with tab_compliance:
     st.markdown("### 🛡️ Count Integrity & Accuracy")
     
-    # Filter for Discrepancies
     if 'discrepancy_qty' in df.columns:
         disc_df = df[df['discrepancy_qty'] != 0].copy()
     else:
         disc_df = pd.DataFrame()
-        st.warning("Discrepancy data not found yet. Upload new reports to populate this tab.")
     
     c1, c2 = st.columns(2)
     c1.metric("Total Count Errors", len(disc_df))
@@ -349,33 +353,19 @@ with tab_compliance:
     
     if not disc_df.empty:
         c_left, c_right = st.columns(2)
-        
         with c_left:
-            st.markdown("#### ⚠️ Top 'Frequent Flyers' (Users)")
-            user_errors = disc_df.groupby('user_name').agg(
-                Errors=('pk', 'count'),
-                Net_Variance=('discrepancy_qty', 'sum')
-            ).reset_index().sort_values('Errors', ascending=False).head(10)
-            
-            fig_user = px.bar(user_errors, x='Errors', y='user_name', orientation='h', 
-                              title="Users with Most Discrepancies", color='Net_Variance',
-                              color_continuous_scale='RdBu')
+            user_errors = disc_df.groupby('user_name').agg(Errors=('pk', 'count'), Net_Variance=('discrepancy_qty', 'sum')).reset_index().sort_values('Errors', ascending=False).head(10)
+            fig_user = px.bar(user_errors, x='Errors', y='user_name', orientation='h', title="Top Users (Discrepancies)", color='Net_Variance', color_continuous_scale='RdBu')
             fig_user.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_user, use_container_width=True)
-            
         with c_right:
-            st.markdown("#### 💊 Problem Meds (Count Errors)")
-            med_errors = disc_df.groupby('med_desc')['pk'].count().reset_index(name='Count')
-            med_errors = med_errors.sort_values('Count', ascending=False).head(10)
-            
-            fig_med = px.bar(med_errors, x='Count', y='med_desc', orientation='h', title="Meds with Most Count Errors")
+            med_errors = disc_df.groupby('med_desc')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
+            fig_med = px.bar(med_errors, x='Count', y='med_desc', orientation='h', title="Top Meds (Errors)")
             fig_med.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_med, use_container_width=True)
-            
-        st.markdown("#### 📝 Detailed Discrepancy Log")
         st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason']], use_container_width=True, hide_index=True)
     elif 'discrepancy_qty' in df.columns:
-        st.success("✅ No discrepancies found in this period! Accuracy is 100%.")
+        st.success("✅ No discrepancies found!")
 
 # --- TAB 3: STOCKOUTS ---
 with tab_stock:
@@ -431,12 +421,15 @@ with tab_effic:
             fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_bar, use_container_width=True)
             
+            # --- MED DETECTIVE (DRILL DOWN L2) ---
             st.markdown("#### 🕵️ Med Detective")
             med_list = inefficient['med_desc'].unique().tolist()
             selected_med = st.selectbox("Select Med:", ["Select..."] + med_list)
             
             if selected_med != "Select...":
                 med_df = refills[refills['med_desc'] == selected_med]
+                
+                # Chart 1: WHERE (Device)
                 c_dev, c_day = st.columns(2)
                 with c_dev:
                     med_breakdown = med_df.groupby('device').agg(Trips=('pk', 'count')).reset_index().sort_values('Trips', ascending=False)
@@ -447,6 +440,18 @@ with tab_effic:
                     daily_trend = med_df.groupby('Date').agg(Trips=('pk', 'count')).reset_index()
                     fig_trend = px.bar(daily_trend, x='Date', y='Trips', title=f"When?", color_discrete_sequence=['#3366CC'])
                     st.plotly_chart(fig_trend, use_container_width=True)
+                
+                # Chart 2: WHO (User) + LOG
+                c_who, c_log = st.columns([1, 2])
+                with c_who:
+                    who_stats = med_df.groupby('user_name').agg(Trips=('pk', 'count')).reset_index().sort_values('Trips', ascending=False).head(10)
+                    fig_who = px.bar(who_stats, x='Trips', y='user_name', orientation='h', title="Who?", color_discrete_sequence=['#00CC96'])
+                    fig_who.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig_who, use_container_width=True)
+                with c_log:
+                    st.markdown("**Exact Delivery Times**")
+                    st.dataframe(med_df[['Timestamp', 'user_name', 'device', 'qty']].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
+
         else:
             st.success("Refill efficiency looks good.")
     
@@ -481,6 +486,5 @@ with tab_drill:
         
     st.markdown(f"**Showing {len(filtered):,} records**")
     cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty']
-    # Check if cols exist before displaying (safe mode)
     valid_cols = [c for c in cols if c in filtered.columns]
     st.dataframe(filtered[valid_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
