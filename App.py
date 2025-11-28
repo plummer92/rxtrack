@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
-# Includes Daily Trend for Med Detective
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
+# Fixes: Slider not updating, Header Scan Depth
 ###############################################
 
 import streamlit as st
@@ -57,12 +57,12 @@ def get_db_date_range():
     try:
         cur = conn.cursor()
         cur.execute("SELECT MIN(dt), MAX(dt) FROM events")
-        min_dt, max_dt = cur.fetchone()
+        result = cur.fetchone()
         cur.close()
         conn.close()
         
-        if min_dt and max_dt:
-            return min_dt.date(), max_dt.date()
+        if result and result[0] and result[1]:
+            return result[0].date(), result[1].date()
     except:
         if conn: conn.close()
     
@@ -220,21 +220,28 @@ with st.sidebar:
     
     st.markdown("### 📅 Date Range")
     default_start = max(min_db, max_db - timedelta(days=7))
+    
+    # FIX: Added 'key' to force slider to reset when DB range changes
     date_range = st.slider(
-        "Select Range", min_value=min_db, max_value=max_db,
-        value=(default_start, max_db), format="MM/DD/YY"
+        "Select Range", 
+        min_value=min_db, 
+        max_value=max_db,
+        value=(default_start, max_db), 
+        format="MM/DD/YY",
+        key=f"slider_{min_db}_{max_db}"
     )
     start_date, end_date = date_range
     
     st.divider()
     
+    # FIX: Increased nrows to 50 to find header deeper in the file
     uploaded = st.file_uploader("Upload Daily Report", type=["csv","xlsx"])
     if uploaded:
         try:
             if uploaded.name.endswith(".xlsx"):
-                preview = pd.read_excel(uploaded, header=None, nrows=20)
+                preview = pd.read_excel(uploaded, header=None, nrows=50)
             else:
-                preview = pd.read_csv(uploaded, header=None, nrows=20)
+                preview = pd.read_csv(uploaded, header=None, nrows=50)
             
             header_row_idx = None
             for idx, row in preview.iterrows():
@@ -244,7 +251,7 @@ with st.sidebar:
                     break
             
             if header_row_idx is None:
-                st.error("❌ Could not find headers (UserName/Device).")
+                st.error("❌ Could not find headers (UserName/Device) in first 50 rows.")
             else:
                 uploaded.seek(0)
                 if uploaded.name.endswith(".xlsx"):
@@ -282,7 +289,6 @@ tab_over, tab_stock, tab_effic, tab_drill = st.tabs([
 with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
     
-    # Session Stats
     session_stats = df.groupby('session_id').agg(
         total_machine_time=('machine_time_sec', 'sum'),
     )
@@ -311,7 +317,7 @@ with tab_over:
                       labels={'machine_time_sec': 'Seconds', 'med_desc': 'Medication'},
                       color='machine_time_sec', color_continuous_scale='RdYlGn_r')
     fig_slow.update_layout(yaxis={'categoryorder':'total ascending'})
-    st.plotly_chart(fig_slow, use_container_width=True)
+    st.plotly_chart(fig_slow) # FIX: Removed deprecated arg
 
 # --- TAB 2: STOCKOUTS ---
 with tab_stock:
@@ -344,10 +350,10 @@ with tab_stock:
             hotspots.columns = ['Device', 'Count']
             fig = px.bar(hotspots.head(10), x='Count', y='Device', orientation='h', color_discrete_sequence=['#FF4B4B'])
             fig.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig)
         with c_list:
             cols = ['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty', 'user_name']
-            st.dataframe(stockouts.sort_values('dt', ascending=False)[cols], use_container_width=True, hide_index=True)
+            st.dataframe(stockouts.sort_values('dt', ascending=False)[cols], hide_index=True)
     else:
         st.success("✅ Zero stockouts found.")
 
@@ -378,7 +384,7 @@ with tab_effic:
                 color_continuous_scale='OrRd'
             )
             fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar)
             
             # --- MED DETECTIVE DRILL DOWN ---
             st.markdown("#### 🕵️ Med Detective")
@@ -400,7 +406,7 @@ with tab_effic:
                                            title=f"Where are we refilling {selected_med}?",
                                            color_discrete_sequence=['#FF4B4B'])
                     fig_bd.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig_bd, use_container_width=True)
+                    st.plotly_chart(fig_bd)
                 
                 # Chart 2: WHEN (Daily Trend)
                 with c_day:
@@ -411,7 +417,7 @@ with tab_effic:
                     fig_trend = px.bar(daily_trend, x='Date', y='Trips', 
                                        title=f"Daily Trend for {selected_med}",
                                        color_discrete_sequence=['#3366CC'])
-                    st.plotly_chart(fig_trend, use_container_width=True)
+                    st.plotly_chart(fig_trend)
 
         else:
             st.success("Refill efficiency looks good.")
@@ -431,12 +437,12 @@ with tab_effic:
         
         fig_dev = px.bar(device_visits, x='Visits', y='device', orientation='h', title="Most Visited Devices")
         fig_dev.update_layout(yaxis={'categoryorder':'total ascending'})
-        st.plotly_chart(fig_dev, use_container_width=True)
+        st.plotly_chart(fig_dev)
         
         # Heatmap
         hourly = traffic_df.groupby(['device', 'Hour'])['session_id'].nunique().reset_index(name='Visits')
         fig_heat = px.density_heatmap(hourly, x='Hour', y='device', z='Visits', title="Heatmap (Hour of Day)", color_continuous_scale='Viridis')
-        st.plotly_chart(fig_heat, use_container_width=True)
+        st.plotly_chart(fig_heat)
 
 # --- TAB 4: DRILL DOWN ---
 with tab_drill:
@@ -473,6 +479,5 @@ with tab_drill:
     
     st.dataframe(
         filtered[valid_cols].sort_values('Timestamp', ascending=False), 
-        use_container_width=True, 
         hide_index=True
     )
