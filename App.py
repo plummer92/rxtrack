@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD
-# Includes Overview, Machine vs. Walk Time, & Simplified Charts
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
+# Fixes: Filters Keys/Cassettes from Efficiency View
 ###############################################
 
 import streamlit as st
@@ -352,9 +352,16 @@ with tab_stock:
 # --- TAB 3: EFFICIENCY ---
 with tab_effic:
     st.markdown("### 📉 High Effort, Low Yield Refills")
-    st.markdown("These are the meds techs visited the **most often**, but added the **least amount** of stock to. (Target for Par Level Increase).")
+    st.markdown("These are the meds techs visited the **most often**, but added the **least amount** of stock to.")
+    st.markdown("*(Excluded: 'Keys' and 'Cassettes')*")
     
     refills = df[df['is_refill']].copy()
+    
+    # --- FILTERING LOGIC ---
+    # Filter out Keys and Cassettes (case insensitive)
+    mask_exclude = refills['med_desc'].str.lower().str.contains('keys|cassette', na=False)
+    refills = refills[~mask_exclude]
+    
     effic_stats = refills.groupby(['device', 'med_desc']).agg(
         Trips=('pk', 'count'),
         Avg_Added=('qty', 'mean'),
@@ -363,11 +370,10 @@ with tab_effic:
     # Logic: High Trips (>3), Low Yield (<3)
     inefficient = effic_stats[ (effic_stats['Trips'] >= 3) & (effic_stats['Avg_Added'] < 3) ]
     
-    # Sort by 'Trips' to see the worst offenders at the top
+    # Sort by 'Trips'
     inefficient = inefficient.sort_values('Trips', ascending=False).head(15)
     
     if not inefficient.empty:
-        # Simple Bar Chart Replacement
         fig_bar = px.bar(
             inefficient, 
             x='Trips', 
