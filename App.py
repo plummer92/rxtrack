@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD
-# Includes Overview, Machine vs. Walk Time, & Drill Down
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
+# Fixes: NameError on Stockout Tab
 ###############################################
 
 import streamlit as st
@@ -139,7 +139,7 @@ def insert_batch(df):
         conn.close()
 
 ###########################################################
-#            ANALYTICS LOGIC (UPDATED)
+#            ANALYTICS LOGIC
 ###########################################################
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
@@ -176,14 +176,11 @@ def load_data(start_date, end_date):
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
         # Calculate raw durations (in seconds)
-        # Duration of CURRENT task (Time until next event)
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
-        # Time taken to GET here (Time since last event)
         df['walk_seconds'] = (df['dt'] - df['prev_dt']).dt.total_seconds()
         
-        # --- LOGIC SEPARATION ---
         # Machine Time: If next event is SAME device, the duration is "Machine Time"
-        # We cap this at 600s (10 min) to filter out lunch breaks/shift ends
+        # Capped at 600s (10 min)
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 
@@ -198,8 +195,7 @@ def load_data(start_date, end_date):
             0
         )
 
-        # --- SESSION IDENTIFICATION ---
-        # Identify start of a new session (Change in user, device, or long gap)
+        # Session ID
         df['is_new_session'] = np.where(
             (df['user_name'] != df['user_name'].shift(1)) | 
             (df['device'] != df['prev_device']) |
@@ -290,7 +286,6 @@ with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
     
     # Calculate Session Stats
-    # Group by session ID to find total time spent at machine per visit
     session_stats = df.groupby('session_id').agg(
         user=('user_name', 'first'),
         device=('device', 'first'),
@@ -311,11 +306,8 @@ with tab_over:
     
     # Slowest Meds Chart
     st.markdown("#### 🐢 Slowest Meds to Process (Machine Time)")
-    st.markdown("Average time spent *after* scanning this med before the next action (at the same machine). High numbers = Hard to handle meds.")
     
-    # Filter for machine time only (>0)
     med_speed = df[df['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().reset_index()
-    # Filter for significant data (at least appeared 5 times)
     med_counts = df['med_desc'].value_counts()
     med_speed = med_speed[med_speed['med_desc'].isin(med_counts[med_counts > 5].index)]
     
@@ -329,7 +321,8 @@ with tab_over:
     st.plotly_chart(fig_slow, use_container_width=True)
 
 # --- TAB 2: STOCKOUTS ---
-with tab_stockout:
+# FIX: Use the correct variable name 'tab_stock'
+with tab_stock:
     all_refills = df[df['is_refill']].copy()
     all_refills = all_refills.sort_values(['device', 'med_desc', 'dt'])
     
@@ -390,7 +383,6 @@ with tab_effic:
 with tab_drill:
     st.header("🔍 Interactive Data Explorer")
     
-    # Filters Row 1
     c1, c2, c3, c4 = st.columns(4)
     
     all_users = sorted([x for x in df['user_name'].unique() if x is not None])
@@ -405,7 +397,6 @@ with tab_drill:
     
     filtered = df.copy()
     
-    # Apply Filters
     if sel_users: filtered = filtered[filtered['user_name'].isin(sel_users)]
     if sel_devices: filtered = filtered[filtered['device'].isin(sel_devices)]
     if sel_meds: filtered = filtered[filtered['med_desc'].isin(sel_meds)]
@@ -415,8 +406,8 @@ with tab_drill:
     
     display_cols = [
         'Timestamp', 
-        'Walk Time',      # Time to get here from previous device
-        'Machine Time',   # Time spent doing this task (before next task at same device)
+        'Walk Time',      
+        'Machine Time',   
         'user_name', 
         'device', 
         'event_type', 
