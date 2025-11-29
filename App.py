@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
-# Features: Process Mining, Financials, Compliance
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
+# Fixes: TypeError in Process Mining Aggregation
 ###############################################
 
 import streamlit as st
@@ -380,7 +380,9 @@ with tab_mine:
         st.markdown("#### 🛣️ Common Paths Taken")
         # Filter out self-loops (Machine A -> Machine A)
         paths = df[df['device'] != df['prev_device']].copy()
-        path_stats = paths.groupby('path_taken')['gap_minutes'].agg(
+        
+        # FIXED: Use DataFrame.agg() syntax correctly
+        path_stats = paths.groupby('path_taken').agg(
             Count=('gap_minutes', 'count'),
             Avg_Min=('gap_minutes', 'mean')
         ).reset_index()
