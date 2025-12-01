@@ -1,5 +1,5 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
 # Features: Daily Reports, Financials, & Activity Logs (Pends)
 ###############################################
 
@@ -91,7 +91,8 @@ def get_db_stats():
 #                 DATA CLEANING
 ###########################################################
 def generate_pk(row):
-    row_str = "|".join(str(v) for v in row.values)
+    subset = [str(x) for x in row.values if pd.notnull(x)]
+    row_str = "|".join(subset)
     return hashlib.sha256(row_str.encode()).hexdigest()
 
 def clean_dataframe(df):
@@ -124,58 +125,54 @@ def clean_dataframe(df):
 
     df["dt"] = df["dt"].astype(str)
     df["resolution_dt"] = df["resolution_dt"].astype(str).replace('NaT', None)
+    
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     return df[required_cols + ["pk"]]
 
 def clean_activity_log(df):
     """
     Parses 'DeviceActivityLog'.
-    Fixes the duplicate row issue (Min vs Max) by aggregating to the MAX qty.
+    DEDUPLICATION FIX: Rounds time to minute to merge rapid-fire Min/Max updates.
     """
     df = df.copy()
-    # Normalize headers
     df.columns = df.columns.str.strip().str.replace(' ', '')
     
-    # Map Columns
     df = df.rename(columns={
         "UserName": "user_name",
         "Device": "device",
         "TransactionDateTime": "dt",
-        "Action": "event_type", # 'Add', 'Pend'
+        "Action": "event_type", 
         "AffectedElement": "raw_element"
     })
     
-    # Parse Date First (Critical for grouping)
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"])
     
-    # Regex Extraction: Look for (MEDID): QTY
     pattern = r'\((.*?)\):\s*(\d+)'
     extracted = df['raw_element'].astype(str).str.extract(pattern)
     df['med_id'] = extracted[0]
     df['qty_extracted'] = pd.to_numeric(extracted[1], errors='coerce').fillna(0)
     
-    # Filter valid meds only
     df = df.dropna(subset=['med_id'])
     
-    # --- DEDUPLICATION LOGIC ---
-    # Group by [Time, User, Device, Med] and take the MAX qty.
-    # This merges the "Min: 2" and "Max: 6" rows into a single row with Qty 6.
-    # We sort by qty_extracted desc first so .first() keeps the description for the Max value.
+    # --- SMART MERGE LOGIC ---
+    # 1. Create a temporary time column rounded to the MINUTE
+    # This treats 01:21:05 and 01:21:07 as the SAME time.
+    df['dedup_time'] = df['dt'].dt.floor('Min')
+    
+    # 2. Sort by Qty Descending (so '6' comes before '2')
     df = df.sort_values('qty_extracted', ascending=False)
     
-    df = df.groupby(['dt', 'user_name', 'device', 'med_id', 'event_type'], as_index=False).agg({
-        'qty_extracted': 'max',
-        'raw_element': 'first' # Keep the text description associated with the max value
-    })
+    # 3. Drop Duplicates based on the ROUNDED time
+    # This keeps only the row with the highest quantity for that minute
+    df = df.drop_duplicates(subset=['dedup_time', 'user_name', 'device', 'med_id'], keep='first')
     
-    # Assign back to main columns
+    # Assign finalized values
     df['qty'] = df['qty_extracted']
     df['med_desc'] = df['raw_element']
     df['beginning_qty'] = 0
     df['ending_qty'] = df['qty']
     
-    # Fill missing standard columns
     required_cols = [
         "user_name", "device", "med_id", "med_desc", 
         "event_type", "dt", "qty", 
@@ -186,6 +183,8 @@ def clean_activity_log(df):
         if col not in df.columns: df[col] = None
         
     df["dt"] = df["dt"].astype(str)
+    
+    # Generate PK *AFTER* deduplication to ensure unique ID for the consolidated row
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     
     return df[required_cols + ["pk"]]
@@ -331,7 +330,7 @@ with st.sidebar:
     
     st.divider()
     
-    uploaded = st.file_uploader("Upload File (Daily Report, Price List, or Activity Log)", type=["csv","xlsx"])
+    uploaded = st.file_uploader("Upload File", type=["csv","xlsx"])
     if uploaded:
         try:
             if uploaded.name.endswith(".xlsx"): preview = pd.read_excel(uploaded, header=None, nrows=50)
