@@ -259,6 +259,7 @@ def load_data(start_date, end_date):
         if "cost_per_unit" not in df.columns: df["cost_per_unit"] = 0
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0)
         
+        # Sort is CRITICAL for time diffs
         df = df.sort_values(['user_name', 'dt'])
         
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
@@ -271,10 +272,13 @@ def load_data(start_date, end_date):
         df['gap_minutes'] = df['walk_seconds'] / 60
         df['path_taken'] = df['prev_device'].fillna('Start') + " ➡️ " + df['device']
         
+        # Machine Time: Same device, next event < 10 mins
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 0
         )
+        
+        # Walk Time: Different device, prev event < 20 mins
         df['walk_time_sec'] = np.where(
             (df['device'] != df['prev_device']) & (df['walk_seconds'] < 1200),
             df['walk_seconds'], 0
@@ -291,9 +295,8 @@ def load_data(start_date, end_date):
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
         
-        # UPDATED TIMESTAMP FORMAT: Includes Seconds (%S)
+        # Timestamp with Seconds
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M:%S %p')
-        
         df['Date'] = df['dt'].dt.date
         df['Hour'] = df['dt'].dt.hour
     
@@ -307,6 +310,7 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
+    # --- 1. COVERAGE CALENDAR ---
     total_rows, min_db, max_db, present_dates = get_db_stats()
     
     with st.expander("💾 Coverage Calendar", expanded=True):
@@ -569,11 +573,8 @@ with tab_drill:
     if m: filt = filt[filt['med_desc'].isin(m)]
     if e: filt = filt[filt['event_type'].isin(e)]
     st.markdown(f"**Showing {len(filt):,} records**")
-    
-    # --- UPDATED DRILL DOWN TABLE ---
-    # Shows Walk Time and Machine Time columns explicitly
     cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty', 'cost_per_unit']
     v_cols = [c for c in cols if c in filt.columns]
     
-    # Sort by time descending so you see the "Path" clearly
-    st.dataframe(filt[v_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
+    # Sort Ascending: Oldest to Newest
+    st.dataframe(filt[v_cols].sort_values('Timestamp', ascending=True), use_container_width=True, hide_index=True)
