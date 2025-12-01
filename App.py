@@ -1,7 +1,7 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
 # Features: Daily Reports, Financials, & Activity Logs
-# Fixes: Clean Columns for Pends (Min/Max/Std Stock)
+# Fixes: Correctly merges Min/Max rows into single event
 ###############################################
 
 import streamlit as st
@@ -155,51 +155,53 @@ def clean_activity_log(df):
     df['med_id'] = df['raw_element'].astype(str).str.extract(pattern)[0]
     df = df.dropna(subset=['med_id'])
 
-    # Extract Qty (Capacity/Max)
-    # Looks for ": 6" at end of string
+    # Extract Qty
     qty_pattern = r':\s*(\d+)$'
     df['qty_extracted'] = df['raw_element'].astype(str).str.extract(qty_pattern)[0]
     df['qty_extracted'] = pd.to_numeric(df['qty_extracted'], errors='coerce').fillna(0)
 
-    # Create grouping key (Round to minute to catch split-second Min/Max entries)
+    # Create grouping key (Round to minute)
     df['dedup_time'] = df['dt'].dt.floor('Min')
+    
+    # Flag for Standard Stock (Pre-calculation)
+    df['is_standard'] = df['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
 
     # --- SMART MERGE LOGIC ---
-    # We want to merge "Min: 2" and "Max: 6" rows into one.
-    # We assume the largest number for a given Med/Time is the MAX capacity.
-    # We assume the smallest non-zero is MIN (simplified for display).
-    
-    grouped = df.groupby(['dedup_time', 'user_name', 'device', 'med_id', 'action_type', 'activity_category'], as_index=False).agg({
-        'qty_extracted': ['max', 'min'],  # Capture both Max (Capacity) and Min
+    # Group ONLY by Time, User, Device, Med. 
+    # We deliberately EXCLUDE 'activity_category' from grouping so "Par Min" and "Par Max" rows merge together.
+    grouped = df.groupby(['dedup_time', 'user_name', 'device', 'med_id'], as_index=False).agg({
+        'qty_extracted': ['max', 'min'],  # Max val goes to Max column, Min val to Min column
+        'is_standard': 'max',             # If True anywhere in group, stays True (1 > 0)
         'raw_element': 'first',           # Keep description
-        'dt': 'first'                     # Keep original timestamp
+        'dt': 'first',                    # Keep timestamp
+        'action_type': 'first',
+        'activity_category': 'first'      # Keep first label found
     })
     
     # Flatten columns
-    grouped.columns = ['dedup_time', 'user_name', 'device', 'med_id', 'action_type', 'activity_category', 'max_qty', 'min_qty', 'raw_element', 'dt']
+    grouped.columns = ['dedup_time', 'user_name', 'device', 'med_id', 'max_qty', 'min_qty', 'is_standard_bool', 'raw_element', 'dt', 'action_type', 'activity_category']
     
-    # Logic for Standard Stock Checkbox
-    # If activity_category contains "Standard Stock", we mark it.
-    grouped['is_standard'] = grouped['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
-    grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
+    # Standard Stock Display
+    grouped['std_stock_display'] = grouped['is_standard_bool'].apply(lambda x: "☑️" if x else "☐")
 
-    # Format the Event Type to show details
-    # e.g. "Add (Standard Stock) [Max: 6, Min: 2]"
+    # Event Type Label
     grouped['event_type'] = (
         grouped['action_type'].astype(str) + " (" + grouped['activity_category'].astype(str) + ")"
     )
     
-    # We store MAX qty as the primary Quantity for charts
-    grouped['qty'] = grouped['max_qty']
+    # Map Columns
+    grouped['qty'] = grouped['max_qty']             # Primary qty is Max capacity
+    grouped['beginning_qty'] = grouped['min_qty']   # Min
+    grouped['ending_qty'] = grouped['max_qty']      # Max
     
-    # Packed Description for Storage: We store the metadata here so we can unpack it later
+    # Clean Med Name
+    grouped['med_clean'] = grouped['raw_element'].str.split(' \(').str[0]
+    
+    # PACKED DATA FOR STORAGE
     grouped['med_desc'] = (
-        grouped['raw_element'].str.split(' \(').str[0] +  # Clean Med Name
+        grouped['med_clean'] + 
         " | StdStock: " + grouped['std_stock_display']
     )
-    
-    grouped['beginning_qty'] = grouped['min_qty'] # Store Min in Beg for storage
-    grouped['ending_qty'] = grouped['max_qty']    # Store Max in End for storage
     
     # Standardize for DB
     required_cols = [
@@ -213,7 +215,6 @@ def clean_activity_log(df):
     for col in required_cols:
         if col not in final_df.columns: final_df[col] = None
     
-    # Ensure numeric defaults
     final_df['discrepancy_qty'] = 0
     final_df['discrepancy_reason'] = None
     final_df['resolution_dt'] = None
@@ -531,18 +532,17 @@ with tab_pends:
         c3.metric("Unique Meds", pends_df['med_id'].nunique())
         st.divider()
         
-        # --- DISPLAY FIX: EXTRACT PACKED DATA FOR CLEAN COLUMNS ---
-        # Logic: If ' | StdStock: ' is in description, we know it's a packed Activity Log entry
-        # We extract the parts back out for the table
+        # --- DISPLAY FIX: UNPACK DATA FOR CLEAN COLUMNS ---
+        # Unpack Min/Max/StdStock from med_desc string if it exists
+        # Safe unpacking with regex
         
-        # 1. Extract Standard Stock (True/False)
-        pends_df['Standard Stock'] = pends_df['med_desc'].astype(str).apply(lambda x: "☑️" if "☑️ Yes" in x else "☐")
+        # 1. Standard Stock
+        pends_df['Standard Stock'] = pends_df['med_desc'].astype(str).apply(lambda x: "☑️" if "☑️" in x else "☐")
         
-        # 2. Extract Clean Med Name (Everything before the packed data)
-        pends_df['Medication'] = pends_df['med_desc'].astype(str).str.split(' | StdStock:').str[0]
+        # 2. Clean Med Name (Part before " | StdStock")
+        pends_df['Medication'] = pends_df['med_desc'].astype(str).str.split(' \| ').str[0]
         
-        # 3. Rename Columns
-        # We stored Min in 'beginning_qty' and Max in 'ending_qty' in clean_activity_log
+        # 3. Rename Qty Columns (Min stored in Beg, Max in End)
         pends_df = pends_df.rename(columns={
             'beginning_qty': 'Min',
             'ending_qty': 'Max',
