@@ -1,6 +1,6 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
-# Fixes: TypeError in Process Mining Aggregation
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL)
+# Features: Daily Reports, Financials, & Activity Logs (Pends)
 ###############################################
 
 import streamlit as st
@@ -10,8 +10,8 @@ import hashlib
 import psycopg2
 from psycopg2.extras import execute_batch
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
+import re
 
 # Page Config
 st.set_page_config(
@@ -127,6 +127,55 @@ def clean_dataframe(df):
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     return df[required_cols + ["pk"]]
 
+def clean_activity_log(df):
+    """
+    Parses the 'DeviceActivityLog' for Adds/Pends.
+    Extracts MedID and Qty from 'AffectedElement' like '... (KEYRX): 1'
+    """
+    df = df.copy()
+    # Normalize headers
+    df.columns = df.columns.str.strip().str.replace(' ', '')
+    
+    # Map Columns
+    df = df.rename(columns={
+        "UserName": "user_name",
+        "Device": "device",
+        "TransactionDateTime": "dt",
+        "Action": "event_type", # 'Add', 'Pend'
+        "AffectedElement": "raw_element"
+    })
+    
+    # Regex Extraction: Look for (MEDID): QTY
+    # Example: "Drawer 1 (TYLENOL): 50" -> ID: TYLENOL, Qty: 50
+    pattern = r'\((.*?)\):\s*(\d+)'
+    extracted = df['raw_element'].astype(str).str.extract(pattern)
+    df['med_id'] = extracted[0]
+    df['qty'] = pd.to_numeric(extracted[1], errors='coerce').fillna(0)
+    
+    # Med Desc isn't in this file, so we use the location/raw info as a placeholder
+    df['med_desc'] = df['raw_element'] 
+    
+    # Fill standard cols
+    df['beginning_qty'] = 0
+    df['ending_qty'] = df['qty'] # Assuming Add means end state is +qty
+    
+    # Required cols structure
+    required_cols = [
+        "user_name", "device", "med_id", "med_desc", 
+        "event_type", "dt", "qty", 
+        "beginning_qty", "ending_qty",
+        "discrepancy_qty", "discrepancy_reason", "resolution_dt"
+    ]
+    for col in required_cols:
+        if col not in df.columns: df[col] = None
+        
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    df = df.dropna(subset=["dt"])
+    df["dt"] = df["dt"].astype(str)
+    
+    df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
+    return df[required_cols + ["pk"]]
+
 def clean_cost_dataframe(df):
     df = df.copy()
     df.columns = df.columns.str.strip().str.lower()
@@ -206,21 +255,17 @@ def load_data(start_date, end_date):
         
         df = df.sort_values(['user_name', 'dt'])
         
-        # --- PROCESS MINING PREP ---
+        # Calculations
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['next_device'] = df.groupby('user_name')['device'].shift(-1)
         df['prev_dt'] = df.groupby('user_name')['dt'].shift(1)
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
-        # Calculations
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['walk_seconds'] = (df['dt'] - df['prev_dt']).dt.total_seconds()
-        
-        # Process Mining: Paths & Gaps
         df['gap_minutes'] = df['walk_seconds'] / 60
         df['path_taken'] = df['prev_device'].fillna('Start') + " ➡️ " + df['device']
         
-        # Machine vs Walk Logic
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 0
@@ -238,7 +283,6 @@ def load_data(start_date, end_date):
         )
         df['session_id'] = df['is_new_session'].cumsum()
 
-        # Display Formats
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
@@ -273,7 +317,7 @@ with st.sidebar:
     
     st.divider()
     
-    uploaded = st.file_uploader("Upload File", type=["csv","xlsx"])
+    uploaded = st.file_uploader("Upload File (Daily Report, Price List, or Activity Log)", type=["csv","xlsx"])
     if uploaded:
         try:
             if uploaded.name.endswith(".xlsx"): preview = pd.read_excel(uploaded, header=None, nrows=50)
@@ -283,10 +327,17 @@ with st.sidebar:
             header_row_idx = 0
             for idx, row in preview.iterrows():
                 row_str = str(row.values).lower()
-                if "username" in row_str and "device" in row_str:
+                # 1. Activity Log (New)
+                if "affectedelement" in row_str and "dispensingdevicename" in row_str:
+                    file_type = "activity_log"
+                    header_row_idx = idx
+                    break
+                # 2. Daily Report
+                if "username" in row_str and "device" in row_str and "affectedelement" not in row_str:
                     file_type = "daily_report"
                     header_row_idx = idx
                     break
+                # 3. Financials
                 if ("med" in row_str or "id" in row_str) and ("cost" in row_str or "price" in row_str) and "username" not in row_str:
                     file_type = "cost_list"
                     header_row_idx = idx
@@ -301,6 +352,12 @@ with st.sidebar:
                 if file_type == "daily_report":
                     clean = clean_dataframe(raw)
                     if st.button(f"Save Report ({len(clean)} rows)"):
+                        insert_batch(clean, "events")
+                        st.cache_data.clear()
+                        st.rerun()
+                elif file_type == "activity_log":
+                    clean = clean_activity_log(raw)
+                    if st.button(f"Save Activity Log ({len(clean)} rows)"):
                         insert_batch(clean, "events")
                         st.cache_data.clear()
                         st.rerun()
@@ -319,11 +376,11 @@ if df.empty:
     st.stop()
 
 # --- TABS ---
-tab_over, tab_mine, tab_comp, tab_stock, tab_effic, tab_drill = st.tabs([
+tab_over, tab_mine, tab_comp, tab_adds, tab_effic, tab_drill = st.tabs([
     "📊 Overview",
     "🚀 Process Mining",
     "🛡️ Compliance", 
-    "🚨 Stockouts", 
+    "📥 Pends & Loads (NEW)",
     "⚡ Efficiency", 
     "🔍 Drill Down"
 ])
@@ -349,76 +406,42 @@ with tab_over:
     fig_slow.update_layout(yaxis={'categoryorder':'total ascending'})
     st.plotly_chart(fig_slow)
 
-# --- TAB 2: PROCESS MINING (NEW) ---
+# --- TAB 2: PROCESS MINING ---
 with tab_mine:
     st.markdown("### 🗺️ Route & Labor Optimization")
-    
     c_idle, c_route = st.columns(2)
-    
-    # 1. IDLE TIME ANALYSIS
     with c_idle:
         st.markdown("#### 🕵️ Idle Time Detector")
         idle_threshold = st.slider("Define 'Idle' Gap (Minutes)", 10, 60, 20)
-        
-        # Filter for gaps > threshold (ignoring overnight/shift change > 8 hours)
         idle_events = df[(df['gap_minutes'] > idle_threshold) & (df['gap_minutes'] < 480)].copy()
-        
         if not idle_events.empty:
             idle_stats = idle_events.groupby('user_name')['gap_minutes'].sum().reset_index().sort_values('gap_minutes', ascending=False).head(10)
             idle_stats['hours'] = idle_stats['gap_minutes'] / 60
-            
-            fig_idle = px.bar(idle_stats, x='hours', y='user_name', orientation='h', 
-                              title=f"Total Idle Hours (Gaps > {idle_threshold}m)",
-                              color='hours', color_continuous_scale='Reds')
+            fig_idle = px.bar(idle_stats, x='hours', y='user_name', orientation='h', title=f"Total Idle Hours (Gaps > {idle_threshold}m)", color='hours', color_continuous_scale='Reds')
             fig_idle.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_idle, use_container_width=True)
-        else:
-            st.success("No significant idle gaps found.")
+        else: st.success("No significant idle gaps found.")
 
-    # 2. ROUTE OPTIMIZATION
     with c_route:
         st.markdown("#### 🛣️ Common Paths Taken")
-        # Filter out self-loops (Machine A -> Machine A)
         paths = df[df['device'] != df['prev_device']].copy()
-        
-        # FIXED: Use DataFrame.agg() syntax correctly
-        path_stats = paths.groupby('path_taken').agg(
-            Count=('gap_minutes', 'count'),
-            Avg_Min=('gap_minutes', 'mean')
-        ).reset_index()
-        
-        # Only show paths taken at least 5 times
+        path_stats = paths.groupby('path_taken').agg(Count=('gap_minutes', 'count'), Avg_Min=('gap_minutes', 'mean')).reset_index()
         common_paths = path_stats[path_stats['Count'] > 5].sort_values('Avg_Min', ascending=True).head(10)
-        
-        st.dataframe(
-            common_paths.style.format({'Avg_Min': '{:.1f} min'}), 
-            use_container_width=True, hide_index=True
-        )
+        st.dataframe(common_paths.style.format({'Avg_Min': '{:.1f} min'}), use_container_width=True, hide_index=True)
 
     st.divider()
-    
-    # 3. NEW HIRE BENCHMARKING
-    st.markdown("#### 📈 New Hire Benchmark (Ramp-Up Curve)")
-    
+    st.markdown("#### 📈 New Hire Benchmark")
     users = sorted(df['user_name'].dropna().unique().tolist())
     target_user = st.selectbox("Select New Hire to Benchmark:", ["Select User..."] + users)
-    
     if target_user != "Select User...":
-        # Calculate Team Avg per Day
         daily_counts = df.groupby(['Date', 'user_name']).size().reset_index(name='count')
         team_avg = daily_counts.groupby('Date')['count'].mean().reset_index(name='Team Avg')
-        
-        # Calculate User Stats
         user_stats = daily_counts[daily_counts['user_name'] == target_user].rename(columns={'count': 'User Performance'})
-        
-        # Merge
         benchmark = pd.merge(team_avg, user_stats[['Date', 'User Performance']], on='Date', how='left').fillna(0)
-        
         fig_bench = go.Figure()
         fig_bench.add_trace(go.Scatter(x=benchmark['Date'], y=benchmark['Team Avg'], name='Team Average', line=dict(color='gray', dash='dot')))
         fig_bench.add_trace(go.Scatter(x=benchmark['Date'], y=benchmark['User Performance'], name=target_user, line=dict(color='blue', width=4)))
-        
-        fig_bench.update_layout(title="Daily Transaction Volume: User vs Team", xaxis_title="Date", yaxis_title="Transactions")
+        fig_bench.update_layout(title="Daily Transaction Volume", xaxis_title="Date", yaxis_title="Transactions")
         st.plotly_chart(fig_bench, use_container_width=True)
 
 # --- TAB 3: COMPLIANCE ---
@@ -427,12 +450,10 @@ with tab_comp:
     if 'discrepancy_qty' in df.columns:
         disc_df = df[df['discrepancy_qty'] != 0].copy()
     else: disc_df = pd.DataFrame()
-    
     loss = (disc_df['discrepancy_qty'] * disc_df['cost_per_unit']).sum() if not disc_df.empty else 0
     c1, c2 = st.columns(2)
     c1.metric("Count Errors", len(disc_df))
     c2.metric("Financial Variance", f"${loss:,.2f}")
-    
     if not disc_df.empty:
         c_left, c_right = st.columns(2)
         with c_left:
@@ -442,63 +463,72 @@ with tab_comp:
             st.plotly_chart(fig_user, use_container_width=True)
         st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason']], use_container_width=True)
 
-# --- TAB 4: STOCKOUTS ---
-with tab_stock:
-    all_refills = df[df['is_refill']].sort_values(['device', 'med_desc', 'dt'])
-    all_refills['prev_refill_dt'] = all_refills.groupby(['device', 'med_desc'])['dt'].shift(1)
-    all_refills['burn_duration'] = all_refills['dt'] - all_refills['prev_refill_dt']
-    stockouts = all_refills[all_refills['beginning_qty'] == 0].copy()
+# --- TAB 4: PENDS & LOADS (NEW) ---
+with tab_adds:
+    st.markdown("### 📥 Inventory Expansion (Adds & Pends)")
     
-    stockouts['Time Since Last Refill'] = stockouts['burn_duration'].apply(lambda x: f"{int(x.total_seconds()//3600)}h {int((x.total_seconds()%3600)//60)}m" if pd.notnull(x) else "N/A")
+    # Filter for Add/Pend events
+    adds_df = df[df['event_type'].astype(str).str.lower().isin(['add', 'pend', 'load'])].copy()
     
-    if not stockouts.empty:
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            hotspots = stockouts['device'].value_counts().reset_index(name='Count')
-            fig = px.bar(hotspots.head(10), x='Count', y='device', orientation='h', title="Top Devices")
-            fig.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig, use_container_width=True)
-        with c2:
-            st.dataframe(stockouts[['Time Since Last Refill', 'Timestamp', 'device', 'med_desc', 'qty']], use_container_width=True)
-    else: st.success("✅ Zero stockouts found.")
+    if not adds_df.empty:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Items Added", f"{len(adds_df):,}")
+        c2.metric("Total Units Loaded", f"{int(adds_df['qty'].sum()):,}")
+        c3.metric("Unique Meds Added", adds_df['med_id'].nunique())
+        
+        st.divider()
+        
+        c_user, c_dev = st.columns(2)
+        
+        with c_user:
+            # Who is doing the work?
+            user_adds = adds_df.groupby('user_name')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
+            fig_u = px.bar(user_adds, x='Count', y='user_name', orientation='h', title="Top Staff (Adds/Pends)", color='Count', color_continuous_scale='Greens')
+            fig_u.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig_u, use_container_width=True)
+            
+        with c_dev:
+            # Where is it happening?
+            dev_adds = adds_df.groupby('device')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
+            fig_d = px.bar(dev_adds, x='Count', y='device', orientation='h', title="Top Devices Receiving Stock", color_discrete_sequence=['#4CAF50'])
+            fig_d.update_layout(yaxis={'categoryorder':'total ascending'})
+            st.plotly_chart(fig_d, use_container_width=True)
+            
+        st.markdown("#### 📝 Detailed Activity Log")
+        st.dataframe(adds_df[['Timestamp', 'user_name', 'device', 'med_id', 'qty', 'med_desc']], use_container_width=True, hide_index=True)
+        
+    else:
+        st.info("No Add/Pend activity found in this date range. Upload a 'DeviceActivityLog' file.")
 
 # --- TAB 5: EFFICIENCY ---
 with tab_effic:
     c_left, c_right = st.columns([2, 1])
     with c_left:
+        st.markdown("### 📉 Inefficient Refill Candidates")
         refills = df[df['is_refill']].copy()
         mask_exclude = refills['med_desc'].str.lower().str.contains('keys|cassette', na=False)
         refills = refills[~mask_exclude]
-        
         effic_stats = refills.groupby(['device', 'med_desc']).agg(Trips=('pk', 'count'), Avg_Added=('qty', 'mean')).reset_index()
         inefficient = effic_stats[(effic_stats['Trips'] >= 3) & (effic_stats['Avg_Added'] < 3)].sort_values('Trips', ascending=False).head(15)
-        
         if not inefficient.empty:
             fig_bar = px.bar(inefficient, x='Trips', y='med_desc', orientation='h', color='Avg_Added', color_continuous_scale='OrRd', title="High Effort, Low Yield")
             fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_bar, use_container_width=True)
-            
-            # Drill Down
             meds = inefficient['med_desc'].unique().tolist()
             sel = st.selectbox("Select Med:", ["Select..."] + meds)
             if sel != "Select...":
-                sub = refills[refills['med_desc'] == sel]
+                med_df = refills[refills['med_desc'] == sel]
                 c_a, c_b = st.columns(2)
                 with c_a:
-                    bd = sub.groupby('device')['pk'].count().reset_index(name='Trips').sort_values('Trips', ascending=False)
-                    f_bd = px.bar(bd, x='Trips', y='device', orientation='h', title="Where?")
-                    f_bd.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(f_bd, use_container_width=True)
+                    bd = med_df.groupby('device')['pk'].count().reset_index(name='Trips').sort_values('Trips', ascending=False)
+                    st.plotly_chart(px.bar(bd, x='Trips', y='device', orientation='h', title="Where?"), use_container_width=True)
                 with c_b:
-                    dt = sub.groupby('Date')['pk'].count().reset_index(name='Trips')
+                    dt = med_df.groupby('Date')['pk'].count().reset_index(name='Trips')
                     st.plotly_chart(px.bar(dt, x='Date', y='Trips', title="When?"), use_container_width=True)
-    
     with c_right:
         traf = df[~df['device'].str.lower().str.contains('pharm', na=False)].copy()
         visits = traf.groupby('device')['session_id'].nunique().reset_index(name='Visits').sort_values('Visits', ascending=False).head(10)
-        f_v = px.bar(visits, x='Visits', y='device', orientation='h', title="Most Visited")
-        f_v.update_layout(yaxis={'categoryorder':'total ascending'})
-        st.plotly_chart(f_v, use_container_width=True)
+        st.plotly_chart(px.bar(visits, x='Visits', y='device', orientation='h', title="Most Visited"), use_container_width=True)
 
 # --- TAB 6: DRILL DOWN ---
 with tab_drill:
@@ -508,13 +538,11 @@ with tab_drill:
     d = c2.multiselect("Device", sorted([x for x in df['device'].unique() if x is not None]))
     m = c3.multiselect("Medication", sorted([x for x in df['med_desc'].unique() if x is not None]))
     e = c4.multiselect("Event Type", sorted([x for x in df['event_type'].unique() if x is not None]))
-    
     filt = df.copy()
     if u: filt = filt[filt['user_name'].isin(u)]
     if d: filt = filt[filt['device'].isin(d)]
     if m: filt = filt[filt['med_desc'].isin(m)]
     if e: filt = filt[filt['event_type'].isin(e)]
-    
     st.markdown(f"**Showing {len(filt):,} records**")
     cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty', 'cost_per_unit']
     v_cols = [c for c in cols if c in filt.columns]
