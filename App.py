@@ -1,7 +1,7 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
 # Features: Daily Reports, Financials, & Activity Logs
-# Fixes: Merged Min/Max for Pends & Clean Display
+# Fixes: Clean Columns for Pends (Min/Max/Std Stock)
 ###############################################
 
 import streamlit as st
@@ -181,9 +181,10 @@ def clean_activity_log(df):
     # Logic for Standard Stock Checkbox
     # If activity_category contains "Standard Stock", we mark it.
     grouped['is_standard'] = grouped['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
-    grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Standard" if x else "☐ Non-Standard")
+    grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
 
     # Format the Event Type to show details
+    # e.g. "Add (Standard Stock) [Max: 6, Min: 2]"
     grouped['event_type'] = (
         grouped['action_type'].astype(str) + " (" + grouped['activity_category'].astype(str) + ")"
     )
@@ -191,7 +192,7 @@ def clean_activity_log(df):
     # We store MAX qty as the primary Quantity for charts
     grouped['qty'] = grouped['max_qty']
     
-    # Store detail string in med_desc for the table
+    # We store the detail string in med_desc so it shows up in the table
     # Format: "MedName [Min: 2 | Max: 6 | ☑️ Standard]"
     grouped['med_desc'] = (
         grouped['raw_element'].str.split(' \(').str[0] +  # Extract just the location/name part before (MEDID)
@@ -377,6 +378,7 @@ with st.sidebar:
     
     st.divider()
     
+    # --- 2. EXPLICIT FILE LOADER ---
     st.subheader("📤 Data Upload")
     upload_type = st.selectbox("Select File Type:", ["Daily Transaction Report", "Device Activity Log (Pends)", "Financial Price List"])
     uploaded = st.file_uploader(f"Upload {upload_type} (CSV/XLSX)", type=["csv","xlsx"])
@@ -524,6 +526,7 @@ with tab_pends:
     if filter_user: pends_df = pends_df[pends_df['user_name'].isin(filter_user)]
     if filter_device: pends_df = pends_df[pends_df['device'].isin(filter_device)]
     if filter_med: pends_df = pends_df[pends_df['med_id'].isin(filter_med)]
+    
     if not pends_df.empty:
         c1, c2, c3 = st.columns(3)
         c1.metric("Items Added", f"{len(pends_df):,}")
@@ -543,9 +546,12 @@ with tab_pends:
             st.plotly_chart(fig_d, use_container_width=True)
         st.markdown("#### 📝 Detailed Config Log")
         
-        # UPDATED TABLE: Shows Min/Max/StandardStock correctly in Med Description (via med_desc trick)
-        # Note: We rely on 'med_desc' here because clean_activity_log packed the info there
-        st.dataframe(pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_desc']], use_container_width=True, hide_index=True)
+        # --- TABLE UPDATE: Use Beg/End columns for Min/Max ---
+        # Rename columns for display clarity
+        display_pends = pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_id', 'beginning_qty', 'ending_qty']].copy()
+        display_pends = display_pends.rename(columns={'beginning_qty': 'Min Qty', 'ending_qty': 'Max Qty (Cap)'})
+        
+        st.dataframe(display_pends, use_container_width=True, hide_index=True)
     else: st.info("No Pends/Adds found.")
 
 # --- TAB 5: LOADS (RESTOCK) ---
