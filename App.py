@@ -1,7 +1,6 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
-# Features: Daily Reports, Financials, Activity Logs
-# Fixes: Clean Code (Removed stray text/logs)
+# Features: Split Tabs for Pends vs Loads
 ###############################################
 
 import streamlit as st
@@ -22,42 +21,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS (FIXED FOR DARK/LIGHT MODE)
+# Custom CSS
 st.markdown("""
     <style>
-    /* Force readable text colors for metric cards */
-    .metric-card { 
-        background-color: #f0f2f6; 
-        padding: 15px; 
-        border-radius: 10px; 
-        border-left: 5px solid #4CAF50;
-        color: #31333F; /* Dark text for contrast */
-    }
+    .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #4CAF50; color: #31333F; }
     .metric-card h3 { color: #31333F; margin: 0; }
     .metric-card p { color: #31333F; margin: 0; }
-    
-    .missing-card { 
-        background-color: #ffebee; 
-        padding: 10px; 
-        border-radius: 5px; 
-        border-left: 5px solid #FF4B4B; 
-        margin-bottom: 10px;
-        color: #b71c1c; /* Dark red text */
-    }
-    
-    /* Calendar Grid Styles */
+    .missing-card { background-color: #ffebee; padding: 10px; border-radius: 5px; border-left: 5px solid #FF4B4B; margin-bottom: 10px; color: #b71c1c; }
     .cal-grid { display: flex; flex-wrap: wrap; gap: 2px; max-width: 100%; }
-    .cal-day { 
-        width: 18px; height: 18px; 
-        border-radius: 2px; 
-        font-size: 8px; 
-        display: flex; align-items: center; justify-content: center;
-        color: white; font-weight: bold;
-    }
-    .cal-present { background-color: #4CAF50; } /* Green */
-    .cal-missing { background-color: #FF4B4B; } /* Red */
-    .cal-empty { background-color: #e0e0e0; }   /* Grey */
-    
+    .cal-day { width: 18px; height: 18px; border-radius: 2px; font-size: 8px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; }
+    .cal-present { background-color: #4CAF50; }
+    .cal-missing { background-color: #FF4B4B; }
+    .cal-empty { background-color: #e0e0e0; }
     .highlight { font-weight: bold; color: #2c3e50; }
     </style>
     """, unsafe_allow_html=True)
@@ -158,7 +133,7 @@ def clean_dataframe(df):
     return df[required_cols + ["pk"]]
 
 def clean_activity_log(df):
-    """Activity Log (Pends/Adds) - Includes Deduplication Logic"""
+    """Activity Log (Pends/Adds) - Captures 'Activity Type'"""
     df = df.copy()
     df.columns = df.columns.str.strip().str.replace(' ', '')
     
@@ -166,7 +141,8 @@ def clean_activity_log(df):
         "UserName": "user_name",
         "Device": "device",
         "TransactionDateTime": "dt",
-        "Action": "event_type", 
+        "Action": "action_type", 
+        "ActivityType": "activity_category",
         "AffectedElement": "raw_element"
     })
     
@@ -180,7 +156,6 @@ def clean_activity_log(df):
     
     df = df.dropna(subset=['med_id'])
     
-    # Deduplication: Group by Minute and Keep Max Qty
     df['dedup_time'] = df['dt'].dt.floor('Min')
     df = df.sort_values('qty_extracted', ascending=False)
     df = df.drop_duplicates(subset=['dedup_time', 'user_name', 'device', 'med_id'], keep='first')
@@ -189,6 +164,8 @@ def clean_activity_log(df):
     df['med_desc'] = df['raw_element']
     df['beginning_qty'] = 0
     df['ending_qty'] = df['qty']
+    
+    df['event_type'] = df['action_type'].astype(str) + " (" + df['activity_category'].astype(str) + ")"
     
     required_cols = [
         "user_name", "device", "med_id", "med_desc", 
@@ -205,7 +182,6 @@ def clean_activity_log(df):
     return df[required_cols + ["pk"]]
 
 def clean_cost_dataframe(df):
-    """Financial Price List"""
     df = df.copy()
     df.columns = df.columns.str.strip().str.lower()
     id_col = next((c for c in df.columns if "id" in c or "med" in c), None)
@@ -332,10 +308,8 @@ with st.sidebar:
     
     with st.expander("💾 Coverage Calendar", expanded=True):
         st.write(f"**Records:** {total_rows:,}")
-        
         delta = (max_db - min_db).days
         calendar_start = max_db - timedelta(days=90) if delta > 90 else min_db
-            
         calendar_html = '<div class="cal-grid">'
         current_day = calendar_start
         while current_day <= max_db:
@@ -361,37 +335,26 @@ with st.sidebar:
     
     # --- 2. EXPLICIT FILE LOADER ---
     st.subheader("📤 Data Upload")
-    
-    # Dropdown to force user to choose type
-    upload_type = st.selectbox(
-        "Select File Type:",
-        ["Daily Transaction Report", "Device Activity Log (Pends)", "Financial Price List"]
-    )
-    
+    upload_type = st.selectbox("Select File Type:", ["Daily Transaction Report", "Device Activity Log (Pends)", "Financial Price List"])
     uploaded = st.file_uploader(f"Upload {upload_type} (CSV/XLSX)", type=["csv","xlsx"])
     
     if uploaded:
         if st.button(f"Process {upload_type}"):
             try:
-                # 1. READ HEADER (Scan 50 rows)
                 if uploaded.name.endswith(".xlsx"): preview = pd.read_excel(uploaded, header=None, nrows=50)
                 else: preview = pd.read_csv(uploaded, header=None, nrows=50)
                 
-                # 2. FIND HEADER ROW
                 header_row_idx = None
                 for idx, row in preview.iterrows():
                     row_str = str(row.values).lower()
-                    
                     if upload_type == "Daily Transaction Report":
                         if "username" in row_str and "device" in row_str and "affectedelement" not in row_str:
                             header_row_idx = idx
                             break
-                            
                     elif upload_type == "Device Activity Log (Pends)":
                         if "affectedelement" in row_str and "dispensingdevicename" in row_str:
                             header_row_idx = idx
                             break
-                            
                     elif upload_type == "Financial Price List":
                         if ("med" in row_str or "id" in row_str) and ("cost" in row_str or "price" in row_str):
                             header_row_idx = idx
@@ -400,31 +363,23 @@ with st.sidebar:
                 if header_row_idx is None:
                     st.error(f"❌ Could not find expected headers for {upload_type}. Please check the file.")
                 else:
-                    # 3. LOAD FULL FILE
                     uploaded.seek(0)
                     if uploaded.name.endswith(".xlsx"): raw = pd.read_excel(uploaded, header=header_row_idx)
                     else: raw = pd.read_csv(uploaded, header=header_row_idx)
                     
-                    # 4. CLEAN BASED ON TYPE
                     if upload_type == "Daily Transaction Report":
                         clean = clean_dataframe(raw)
                         insert_batch(clean, "events")
-                        
                     elif upload_type == "Device Activity Log (Pends)":
                         clean = clean_activity_log(raw)
-                        # Show distinct transaction count after deduplication
                         st.info(f"Deduplicated to {len(clean)} unique transactions.")
                         insert_batch(clean, "events")
-                        
                     elif upload_type == "Financial Price List":
                         clean = clean_cost_dataframe(raw)
                         insert_batch(clean, "med_costs")
-                        
                     st.cache_data.clear()
                     st.rerun()
-                    
-            except Exception as e:
-                st.error(f"Error processing file: {e}")
+            except Exception as e: st.error(f"Error processing file: {e}")
 
 # Load Data
 df = load_data(start_date, end_date)
@@ -433,11 +388,12 @@ if df.empty:
     st.stop()
 
 # --- TABS ---
-tab_over, tab_mine, tab_comp, tab_adds, tab_effic, tab_drill = st.tabs([
+tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.tabs([
     "📊 Overview",
     "🚀 Process Mining",
     "🛡️ Compliance", 
-    "📥 Pends & Loads",
+    "📥 Pends (Config)", 
+    "🚚 Loads/Unloads",
     "⚡ Efficiency", 
     "🔍 Drill Down"
 ])
@@ -447,12 +403,10 @@ with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
     session_stats = df.groupby('session_id').agg(total_machine_time=('machine_time_sec', 'sum'))
     avg_machine_time = session_stats['total_machine_time'].mean()
-    
     c1, c2, c3 = st.columns(3)
     c1.metric("Transactions", f"{len(df):,}")
     c2.metric("Avg Session", f"{seconds_to_mmss(avg_machine_time)}")
     c3.metric("Active Techs", df['user_name'].nunique())
-    
     st.divider()
     st.markdown("#### 🐢 Slowest Meds (Machine Time)")
     med_speed = df[df['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().reset_index()
@@ -478,14 +432,12 @@ with tab_mine:
             fig_idle.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_idle, use_container_width=True)
         else: st.success("No significant idle gaps found.")
-
     with c_route:
         st.markdown("#### 🛣️ Common Paths Taken")
         paths = df[df['device'] != df['prev_device']].copy()
         path_stats = paths.groupby('path_taken').agg(Count=('gap_minutes', 'count'), Avg_Min=('gap_minutes', 'mean')).reset_index()
         common_paths = path_stats[path_stats['Count'] > 5].sort_values('Avg_Min', ascending=True).head(10)
         st.dataframe(common_paths.style.format({'Avg_Min': '{:.1f} min'}), use_container_width=True, hide_index=True)
-
     st.divider()
     st.markdown("#### 📈 New Hire Benchmark")
     users = sorted(df['user_name'].dropna().unique().tolist())
@@ -517,41 +469,70 @@ with tab_comp:
             st.plotly_chart(fig_user, use_container_width=True)
         st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason']], use_container_width=True)
 
-# --- TAB 4: PENDS & LOADS ---
-with tab_adds:
-    st.markdown("### 📥 Inventory Expansion (Adds & Pends)")
-    adds_df = df[df['event_type'].astype(str).str.lower().isin(['add', 'pend', 'load'])].copy()
-    c_f1, c_f2, c_f3 = st.columns(3)
-    filter_user = c_f1.multiselect("Tech", sorted([x for x in adds_df['user_name'].unique() if x is not None]))
-    filter_device = c_f2.multiselect("Device", sorted([x for x in adds_df['device'].unique() if x is not None]))
-    filter_med = c_f3.multiselect("Med ID", sorted([x for x in adds_df['med_id'].unique() if x is not None]))
+# --- TAB 4: PENDS (CONFIG) ---
+with tab_pends:
+    st.markdown("### 📥 Inventory Configuration (Adds & Pends)")
+    pends_df = df[df['event_type'].astype(str).str.lower().str.contains('add|pend')].copy()
     
-    if filter_user: adds_df = adds_df[adds_df['user_name'].isin(filter_user)]
-    if filter_device: adds_df = adds_df[adds_df['device'].isin(filter_device)]
-    if filter_med: adds_df = adds_df[adds_df['med_id'].isin(filter_med)]
-    
-    if not adds_df.empty:
+    if not pends_df.empty:
+        # Filter Controls
+        c_f1, c_f2, c_f3 = st.columns(3)
+        filter_user = c_f1.multiselect("Tech", sorted([x for x in pends_df['user_name'].unique() if x is not None]))
+        filter_device = c_f2.multiselect("Device", sorted([x for x in pends_df['device'].unique() if x is not None]))
+        filter_med = c_f3.multiselect("Med ID", sorted([x for x in pends_df['med_id'].unique() if x is not None]))
+        
+        if filter_user: pends_df = pends_df[pends_df['user_name'].isin(filter_user)]
+        if filter_device: pends_df = pends_df[pends_df['device'].isin(filter_device)]
+        if filter_med: pends_df = pends_df[pends_df['med_id'].isin(filter_med)]
+        
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Items Added", f"{len(adds_df):,}")
-        c2.metric("Total Units Loaded", f"{int(adds_df['qty'].sum()):,}")
-        c3.metric("Unique Meds Added", adds_df['med_id'].nunique())
+        c1.metric("Items Added", f"{len(pends_df):,}")
+        c2.metric("Total Capacity Added", f"{int(pends_df['qty'].sum()):,}")
+        c3.metric("Unique Meds", pends_df['med_id'].nunique())
+        
         st.divider()
         c_user, c_dev = st.columns(2)
         with c_user:
-            user_adds = adds_df.groupby('user_name')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
-            fig_u = px.bar(user_adds, x='Count', y='user_name', orientation='h', title="Top Staff (Adds/Pends)", color='Count', color_continuous_scale='Greens')
+            user_adds = pends_df.groupby('user_name')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
+            fig_u = px.bar(user_adds, x='Count', y='user_name', orientation='h', title="Top Staff (Config Changes)", color='Count', color_continuous_scale='Greens')
             fig_u.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_u, use_container_width=True)
         with c_dev:
-            dev_adds = adds_df.groupby('device')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
-            fig_d = px.bar(dev_adds, x='Count', y='device', orientation='h', title="Top Devices Receiving Stock", color_discrete_sequence=['#4CAF50'])
+            dev_adds = pends_df.groupby('device')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
+            fig_d = px.bar(dev_adds, x='Count', y='device', orientation='h', title="Top Devices Configured", color_discrete_sequence=['#4CAF50'])
             fig_d.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_d, use_container_width=True)
-        st.markdown("#### 📝 Detailed Activity Log")
-        st.dataframe(adds_df[['Timestamp', 'user_name', 'device', 'med_id', 'qty', 'med_desc']], use_container_width=True, hide_index=True)
-    else: st.info("No Add/Pend activity found in this date range.")
+        st.markdown("#### 📝 Detailed Config Log")
+        st.dataframe(pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_id', 'qty']], use_container_width=True, hide_index=True)
+    else: st.info("No Pends/Adds found.")
 
-# --- TAB 5: EFFICIENCY ---
+# --- TAB 5: LOADS (RESTOCK) ---
+with tab_loads:
+    st.markdown("### 🚚 Stock Movement (Loads, Unloads, Refills)")
+    loads_df = df[df['event_type'].astype(str).str.lower().str.contains('load|unload|refill')].copy()
+    
+    if not loads_df.empty:
+        l_c1, l_c2, l_c3 = st.columns(3)
+        l_c1.metric("Restock Events", f"{len(loads_df):,}")
+        l_c2.metric("Units Moved", f"{int(loads_df['qty'].sum()):,}")
+        l_c3.metric("Meds Handled", loads_df['med_id'].nunique())
+        st.divider()
+        
+        c_chart, c_user = st.columns(2)
+        with c_chart:
+             type_counts = loads_df['event_type'].value_counts().reset_index()
+             type_counts.columns = ['Action', 'Count']
+             fig_type = px.pie(type_counts, names='Action', values='Count', title="Activity Breakdown", hole=0.4)
+             st.plotly_chart(fig_type, use_container_width=True)
+        with c_user:
+             top_loaders = loads_df.groupby('user_name')['qty'].sum().reset_index().sort_values('qty', ascending=False).head(10)
+             fig_load_user = px.bar(top_loaders, x='qty', y='user_name', orientation='h', title="Top Staff by Volume Moved", color='qty', color_continuous_scale='Blues')
+             fig_load_user.update_layout(yaxis={'categoryorder':'total ascending'})
+             st.plotly_chart(fig_load_user, use_container_width=True)
+        st.dataframe(loads_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_desc', 'qty']], use_container_width=True)
+    else: st.info("No Load/Unload activity found.")
+
+# --- TAB 6: EFFICIENCY ---
 with tab_effic:
     c_left, c_right = st.columns([2, 1])
     with c_left:
@@ -581,7 +562,7 @@ with tab_effic:
         visits = traf.groupby('device')['session_id'].nunique().reset_index(name='Visits').sort_values('Visits', ascending=False).head(10)
         st.plotly_chart(px.bar(visits, x='Visits', y='device', orientation='h', title="Most Visited"), use_container_width=True)
 
-# --- TAB 6: DRILL DOWN ---
+# --- TAB 7: DRILL DOWN ---
 with tab_drill:
     st.header("🔍 Interactive Data Explorer")
     c1, c2, c3, c4 = st.columns(4)
