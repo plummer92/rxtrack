@@ -340,6 +340,7 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
+    # --- 1. COVERAGE CALENDAR ---
     total_rows, min_db, max_db, present_dates = get_db_stats()
     
     with st.expander("💾 Coverage Calendar", expanded=True):
