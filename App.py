@@ -183,9 +183,6 @@ def clean_activity_log(df):
     grouped['is_standard'] = grouped['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
     grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
 
-    # Create Clean Med Name (remove ID)
-    grouped['med_clean'] = grouped['raw_element'].str.split(' \(').str[0]
-
     # Format the Event Type to show details
     # e.g. "Add (Standard Stock) [Max: 6, Min: 2]"
     grouped['event_type'] = (
@@ -197,7 +194,7 @@ def clean_activity_log(df):
     
     # Packed Description for Storage: We store the metadata here so we can unpack it later
     grouped['med_desc'] = (
-        grouped['med_clean'] + 
+        grouped['raw_element'].str.split(' \(').str[0] +  # Clean Med Name
         " | StdStock: " + grouped['std_stock_display']
     )
     
