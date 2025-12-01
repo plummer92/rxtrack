@@ -1,7 +1,7 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
 # Features: Daily Reports, Financials, & Activity Logs
-# Fixes: Seconds in Timestamps & Walk Time Clarity
+# Fixes: Merged Min/Max for Pends & Clean Display
 ###############################################
 
 import streamlit as st
@@ -134,7 +134,7 @@ def clean_dataframe(df):
     return df[required_cols + ["pk"]]
 
 def clean_activity_log(df):
-    """Activity Log (Pends/Adds) - Captures 'Activity Type'"""
+    """Activity Log (Pends/Adds) - Merges Min/Max rows"""
     df = df.copy()
     df.columns = df.columns.str.strip().str.replace(' ', '')
     
@@ -150,37 +150,73 @@ def clean_activity_log(df):
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"])
     
-    pattern = r'\((.*?)\):\s*(\d+)'
-    extracted = df['raw_element'].astype(str).str.extract(pattern)
-    df['med_id'] = extracted[0]
-    df['qty_extracted'] = pd.to_numeric(extracted[1], errors='coerce').fillna(0)
-    
+    # Extract Med ID
+    pattern = r'\((.*?)\)'
+    df['med_id'] = df['raw_element'].astype(str).str.extract(pattern)[0]
     df = df.dropna(subset=['med_id'])
-    
+
+    # Extract Qty (Capacity/Max)
+    # Looks for ": 6" at end of string
+    qty_pattern = r':\s*(\d+)$'
+    df['qty_extracted'] = df['raw_element'].astype(str).str.extract(qty_pattern)[0]
+    df['qty_extracted'] = pd.to_numeric(df['qty_extracted'], errors='coerce').fillna(0)
+
+    # Create grouping key (Round to minute to catch split-second Min/Max entries)
     df['dedup_time'] = df['dt'].dt.floor('Min')
-    df = df.sort_values('qty_extracted', ascending=False)
-    df = df.drop_duplicates(subset=['dedup_time', 'user_name', 'device', 'med_id'], keep='first')
+
+    # --- SMART MERGE LOGIC ---
+    # We want to merge "Min: 2" and "Max: 6" rows into one.
+    # We assume the largest number for a given Med/Time is the MAX capacity.
+    # We assume the smallest non-zero is MIN (simplified for display).
     
-    df['qty'] = df['qty_extracted']
-    df['med_desc'] = df['raw_element']
-    df['beginning_qty'] = 0
-    df['ending_qty'] = df['qty']
+    grouped = df.groupby(['dedup_time', 'user_name', 'device', 'med_id', 'action_type', 'activity_category'], as_index=False).agg({
+        'qty_extracted': ['max', 'min'],  # Capture both Max (Capacity) and Min
+        'raw_element': 'first',           # Keep description
+        'dt': 'first'                     # Keep original timestamp
+    })
     
-    df['event_type'] = df['action_type'].astype(str) + " (" + df['activity_category'].astype(str) + ")"
+    # Flatten columns
+    grouped.columns = ['dedup_time', 'user_name', 'device', 'med_id', 'action_type', 'activity_category', 'max_qty', 'min_qty', 'raw_element', 'dt']
     
+    # If max == min, likely just one entry or fixed capacity. 
+    # If max > min, we likely found the Min/Max pair.
+    
+    # Format the Event Type to show details
+    # e.g. "Add (Standard Stock) [Max: 6, Min: 2]"
+    grouped['event_type'] = (
+        grouped['action_type'].astype(str) + " (" + grouped['activity_category'].astype(str) + ")"
+    )
+    
+    # We store MAX qty as the primary Quantity for charts
+    grouped['qty'] = grouped['max_qty']
+    
+    # We store the detail string in med_desc so it shows up in the table
+    grouped['med_desc'] = grouped['raw_element'] + " [Max:" + grouped['max_qty'].astype(str) + " Min:" + grouped['min_qty'].astype(str) + "]"
+    
+    grouped['beginning_qty'] = grouped['min_qty'] # Store Min in Beg for storage
+    grouped['ending_qty'] = grouped['max_qty']    # Store Max in End for storage
+    
+    # Standardize for DB
     required_cols = [
         "user_name", "device", "med_id", "med_desc", 
         "event_type", "dt", "qty", 
         "beginning_qty", "ending_qty",
         "discrepancy_qty", "discrepancy_reason", "resolution_dt"
     ]
-    for col in required_cols:
-        if col not in df.columns: df[col] = None
-        
-    df["dt"] = df["dt"].astype(str)
-    df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     
-    return df[required_cols + ["pk"]]
+    final_df = grouped.copy()
+    for col in required_cols:
+        if col not in final_df.columns: final_df[col] = None
+    
+    # Ensure numeric defaults
+    final_df['discrepancy_qty'] = 0
+    final_df['discrepancy_reason'] = None
+    final_df['resolution_dt'] = None
+    
+    final_df["dt"] = final_df["dt"].astype(str)
+    final_df["pk"] = final_df.apply(lambda r: generate_pk(r), axis=1)
+    
+    return final_df[required_cols + ["pk"]]
 
 def clean_cost_dataframe(df):
     df = df.copy()
@@ -259,7 +295,6 @@ def load_data(start_date, end_date):
         if "cost_per_unit" not in df.columns: df["cost_per_unit"] = 0
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0)
         
-        # Sort is CRITICAL for time diffs
         df = df.sort_values(['user_name', 'dt'])
         
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
@@ -272,13 +307,10 @@ def load_data(start_date, end_date):
         df['gap_minutes'] = df['walk_seconds'] / 60
         df['path_taken'] = df['prev_device'].fillna('Start') + " ➡️ " + df['device']
         
-        # Machine Time: Same device, next event < 10 mins
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 0
         )
-        
-        # Walk Time: Different device, prev event < 20 mins
         df['walk_time_sec'] = np.where(
             (df['device'] != df['prev_device']) & (df['walk_seconds'] < 1200),
             df['walk_seconds'], 0
@@ -294,8 +326,6 @@ def load_data(start_date, end_date):
 
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
-        
-        # Timestamp with Seconds
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M:%S %p')
         df['Date'] = df['dt'].dt.date
         df['Hour'] = df['dt'].dt.hour
@@ -310,7 +340,6 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
-    # --- 1. COVERAGE CALENDAR ---
     total_rows, min_db, max_db, present_dates = get_db_stats()
     
     with st.expander("💾 Coverage Calendar", expanded=True):
@@ -480,6 +509,7 @@ with tab_pends:
     st.markdown("### 📥 Inventory Configuration (Adds & Pends)")
     pends_df = df[df['event_type'].astype(str).str.lower().str.contains('add|pend')].copy()
     c_f1, c_f2, c_f3 = st.columns(3)
+    # FIX: Handle None in multiselect sort
     filter_user = c_f1.multiselect("Tech", sorted([x for x in pends_df['user_name'].unique() if x is not None]))
     filter_device = c_f2.multiselect("Device", sorted([x for x in pends_df['device'].unique() if x is not None]))
     filter_med = c_f3.multiselect("Med ID", sorted([x for x in pends_df['med_id'].unique() if x is not None]))
@@ -503,7 +533,9 @@ with tab_pends:
             fig_d = px.bar(dev_adds, x='Count', y='device', orientation='h', title="Top Devices Configured", color_discrete_sequence=['#4CAF50'])
             fig_d.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_d, use_container_width=True)
-        st.dataframe(pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_id', 'qty']], use_container_width=True, hide_index=True)
+        st.markdown("#### 📝 Detailed Config Log")
+        # UPDATED TABLE: Shows Min/Max/StandardStock in one clean row
+        st.dataframe(pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_id', 'beginning_qty', 'ending_qty']], use_container_width=True, hide_index=True)
     else: st.info("No Pends/Adds found.")
 
 # --- TAB 5: LOADS (RESTOCK) ---
@@ -575,6 +607,4 @@ with tab_drill:
     st.markdown(f"**Showing {len(filt):,} records**")
     cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty', 'cost_per_unit']
     v_cols = [c for c in cols if c in filt.columns]
-    
-    # Sort Ascending: Oldest to Newest
     st.dataframe(filt[v_cols].sort_values('Timestamp', ascending=True), use_container_width=True, hide_index=True)
