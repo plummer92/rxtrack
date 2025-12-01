@@ -1,6 +1,7 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
-# Features: Split Tabs for Pends vs Loads
+# Features: Daily Reports, Financials, & Activity Logs
+# Fixes: Seconds in Timestamps & Walk Time Clarity
 ###############################################
 
 import streamlit as st
@@ -289,7 +290,10 @@ def load_data(start_date, end_date):
 
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
-        df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
+        
+        # UPDATED TIMESTAMP FORMAT: Includes Seconds (%S)
+        df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M:%S %p')
+        
         df['Date'] = df['dt'].dt.date
         df['Hour'] = df['dt'].dt.hour
     
@@ -303,7 +307,6 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
-    # --- 1. COVERAGE CALENDAR ---
     total_rows, min_db, max_db, present_dates = get_db_stats()
     
     with st.expander("💾 Coverage Calendar", expanded=True):
@@ -333,7 +336,6 @@ with st.sidebar:
     
     st.divider()
     
-    # --- 2. EXPLICIT FILE LOADER ---
     st.subheader("📤 Data Upload")
     upload_type = st.selectbox("Select File Type:", ["Daily Transaction Report", "Device Activity Log (Pends)", "Financial Price List"])
     uploaded = st.file_uploader(f"Upload {upload_type} (CSV/XLSX)", type=["csv","xlsx"])
@@ -392,8 +394,8 @@ tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.ta
     "📊 Overview",
     "🚀 Process Mining",
     "🛡️ Compliance", 
-    "📥 Pends (Config)", 
-    "🚚 Loads/Unloads",
+    "📥 Pends", 
+    "🚚 Loads",
     "⚡ Efficiency", 
     "🔍 Drill Down"
 ])
@@ -473,23 +475,18 @@ with tab_comp:
 with tab_pends:
     st.markdown("### 📥 Inventory Configuration (Adds & Pends)")
     pends_df = df[df['event_type'].astype(str).str.lower().str.contains('add|pend')].copy()
-    
+    c_f1, c_f2, c_f3 = st.columns(3)
+    filter_user = c_f1.multiselect("Tech", sorted([x for x in pends_df['user_name'].unique() if x is not None]))
+    filter_device = c_f2.multiselect("Device", sorted([x for x in pends_df['device'].unique() if x is not None]))
+    filter_med = c_f3.multiselect("Med ID", sorted([x for x in pends_df['med_id'].unique() if x is not None]))
+    if filter_user: pends_df = pends_df[pends_df['user_name'].isin(filter_user)]
+    if filter_device: pends_df = pends_df[pends_df['device'].isin(filter_device)]
+    if filter_med: pends_df = pends_df[pends_df['med_id'].isin(filter_med)]
     if not pends_df.empty:
-        # Filter Controls
-        c_f1, c_f2, c_f3 = st.columns(3)
-        filter_user = c_f1.multiselect("Tech", sorted([x for x in pends_df['user_name'].unique() if x is not None]))
-        filter_device = c_f2.multiselect("Device", sorted([x for x in pends_df['device'].unique() if x is not None]))
-        filter_med = c_f3.multiselect("Med ID", sorted([x for x in pends_df['med_id'].unique() if x is not None]))
-        
-        if filter_user: pends_df = pends_df[pends_df['user_name'].isin(filter_user)]
-        if filter_device: pends_df = pends_df[pends_df['device'].isin(filter_device)]
-        if filter_med: pends_df = pends_df[pends_df['med_id'].isin(filter_med)]
-        
         c1, c2, c3 = st.columns(3)
         c1.metric("Items Added", f"{len(pends_df):,}")
         c2.metric("Total Capacity Added", f"{int(pends_df['qty'].sum()):,}")
         c3.metric("Unique Meds", pends_df['med_id'].nunique())
-        
         st.divider()
         c_user, c_dev = st.columns(2)
         with c_user:
@@ -502,7 +499,6 @@ with tab_pends:
             fig_d = px.bar(dev_adds, x='Count', y='device', orientation='h', title="Top Devices Configured", color_discrete_sequence=['#4CAF50'])
             fig_d.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_d, use_container_width=True)
-        st.markdown("#### 📝 Detailed Config Log")
         st.dataframe(pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_id', 'qty']], use_container_width=True, hide_index=True)
     else: st.info("No Pends/Adds found.")
 
@@ -510,20 +506,17 @@ with tab_pends:
 with tab_loads:
     st.markdown("### 🚚 Stock Movement (Loads, Unloads, Refills)")
     loads_df = df[df['event_type'].astype(str).str.lower().str.contains('load|unload|refill')].copy()
-    
     if not loads_df.empty:
         l_c1, l_c2, l_c3 = st.columns(3)
         l_c1.metric("Restock Events", f"{len(loads_df):,}")
         l_c2.metric("Units Moved", f"{int(loads_df['qty'].sum()):,}")
         l_c3.metric("Meds Handled", loads_df['med_id'].nunique())
         st.divider()
-        
         c_chart, c_user = st.columns(2)
         with c_chart:
              type_counts = loads_df['event_type'].value_counts().reset_index()
              type_counts.columns = ['Action', 'Count']
-             fig_type = px.pie(type_counts, names='Action', values='Count', title="Activity Breakdown", hole=0.4)
-             st.plotly_chart(fig_type, use_container_width=True)
+             st.plotly_chart(px.pie(type_counts, names='Action', values='Count', title="Activity Breakdown", hole=0.4), use_container_width=True)
         with c_user:
              top_loaders = loads_df.groupby('user_name')['qty'].sum().reset_index().sort_values('qty', ascending=False).head(10)
              fig_load_user = px.bar(top_loaders, x='qty', y='user_name', orientation='h', title="Top Staff by Volume Moved", color='qty', color_continuous_scale='Blues')
@@ -576,6 +569,11 @@ with tab_drill:
     if m: filt = filt[filt['med_desc'].isin(m)]
     if e: filt = filt[filt['event_type'].isin(e)]
     st.markdown(f"**Showing {len(filt):,} records**")
+    
+    # --- UPDATED DRILL DOWN TABLE ---
+    # Shows Walk Time and Machine Time columns explicitly
     cols = ['Timestamp', 'Walk Time', 'Machine Time', 'user_name', 'device', 'event_type', 'med_desc', 'qty', 'discrepancy_qty', 'cost_per_unit']
     v_cols = [c for c in cols if c in filt.columns]
+    
+    # Sort by time descending so you see the "Path" clearly
     st.dataframe(filt[v_cols].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
