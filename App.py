@@ -163,41 +163,47 @@ def clean_activity_log(df):
     # Create grouping key (Round to minute)
     df['dedup_time'] = df['dt'].dt.floor('Min')
     
-    # Flag for Standard Stock (Pre-calculation)
+    # --- INTELLIGENT SPLIT ---
+    # Identify which row is Min and which is Max based on the Activity Description
+    df['is_min_event'] = df['activity_category'].astype(str).str.contains('Min', case=False, na=False)
+    df['is_max_event'] = df['activity_category'].astype(str).str.contains('Max', case=False, na=False)
     df['is_standard'] = df['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
 
-    # --- SMART MERGE LOGIC ---
-    # Group ONLY by Time, User, Device, Med. 
-    # We deliberately EXCLUDE 'activity_category' from grouping so "Par Min" and "Par Max" rows merge together.
+    # Assign values to temp columns based on what they are
+    df['temp_min'] = np.where(df['is_min_event'], df['qty_extracted'], np.nan)
+    df['temp_max'] = np.where(df['is_max_event'], df['qty_extracted'], np.nan)
+    
+    # If neither (e.g. just "Add"), assume it's a Max/Capacity update
+    df['temp_max'] = np.where((~df['is_min_event']) & (~df['is_max_event']), df['qty_extracted'], df['temp_max'])
+
+    # --- MERGE LOGIC ---
+    # Group by Time, User, Device, Med. 
+    # Collapses "Min Row" and "Max Row" into one.
     grouped = df.groupby(['dedup_time', 'user_name', 'device', 'med_id'], as_index=False).agg({
-        'qty_extracted': ['max', 'min'],  # Max val goes to Max column, Min val to Min column
-        'is_standard': 'max',             # If True anywhere in group, stays True (1 > 0)
-        'raw_element': 'first',           # Keep description
-        'dt': 'first',                    # Keep timestamp
-        'action_type': 'first',
-        'activity_category': 'first'      # Keep first label found
+        'temp_min': 'max',    # Grabs the Min value if present (ignores NaNs)
+        'temp_max': 'max',    # Grabs the Max value if present
+        'is_standard': 'max', # Grabs True if any row was Standard Stock
+        'raw_element': 'first',
+        'dt': 'first',
+        'action_type': 'first'
     })
     
-    # Flatten columns
-    grouped.columns = ['dedup_time', 'user_name', 'device', 'med_id', 'max_qty', 'min_qty', 'is_standard_bool', 'raw_element', 'dt', 'action_type', 'activity_category']
-    
-    # Standard Stock Display
-    grouped['std_stock_display'] = grouped['is_standard_bool'].apply(lambda x: "☑️" if x else "☐")
+    # Fill NaNs (if only one row existed)
+    grouped['temp_min'] = grouped['temp_min'].fillna(0)
+    grouped['temp_max'] = grouped['temp_max'].fillna(0)
 
-    # Event Type Label
-    grouped['event_type'] = (
-        grouped['action_type'].astype(str) + " (" + grouped['activity_category'].astype(str) + ")"
-    )
+    # Formatting for Display
+    grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
+    grouped['event_type'] = grouped['action_type'] # Simplified to "Add" or "Pend"
     
-    # Map Columns
-    grouped['qty'] = grouped['max_qty']             # Primary qty is Max capacity
-    grouped['beginning_qty'] = grouped['min_qty']   # Min
-    grouped['ending_qty'] = grouped['max_qty']      # Max
+    grouped['qty'] = grouped['temp_max']            # Primary qty is Max
+    grouped['beginning_qty'] = grouped['temp_min']  # Min stored in Beg
+    grouped['ending_qty'] = grouped['temp_max']     # Max stored in End
     
     # Clean Med Name
     grouped['med_clean'] = grouped['raw_element'].str.split(' \(').str[0]
     
-    # PACKED DATA FOR STORAGE
+    # PACKED DESCRIPTION (for storage persistence)
     grouped['med_desc'] = (
         grouped['med_clean'] + 
         " | StdStock: " + grouped['std_stock_display']
@@ -216,8 +222,6 @@ def clean_activity_log(df):
         if col not in final_df.columns: final_df[col] = None
     
     final_df['discrepancy_qty'] = 0
-    final_df['discrepancy_reason'] = None
-    final_df['resolution_dt'] = None
     
     final_df["dt"] = final_df["dt"].astype(str)
     final_df["pk"] = final_df.apply(lambda r: generate_pk(r), axis=1)
@@ -444,12 +448,40 @@ tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.ta
 # --- TAB 1: OVERVIEW ---
 with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
+    
+    # Calculate Counts for specific transaction types
+    # Note: str.contains handles mixed case via regex. 'Refill', 'Load', 'Unload', 'Outdate'
+    # We treat 'Load' distinctly from 'Unload' by excluding 'unload' from 'load' matches
+    ev_lower = df['event_type'].astype(str).str.lower()
+    
+    cnt_refill = ev_lower[ev_lower.str.contains('refill')].count()
+    cnt_unload = ev_lower[ev_lower.str.contains('unload')].count()
+    # For Load, we want 'load' but not 'unload' (since 'unload' contains 'load')
+    # However, standard Pyxis types are often "Load", "Refill", "Unload".
+    # Some reports use "Load/Refill".
+    cnt_load = ev_lower[(ev_lower.str.contains('load')) & (~ev_lower.str.contains('unload'))].count()
+    cnt_outdate = ev_lower[ev_lower.str.contains('outdate')].count()
+
+    # Row 1: Transaction Breakdown
+    st.markdown("#### Transaction Volume")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Refills", f"{cnt_refill:,}")
+    c2.metric("Loads", f"{cnt_load:,}")
+    c3.metric("Unloads", f"{cnt_unload:,}")
+    c4.metric("Outdates", f"{cnt_outdate:,}")
+    
+    st.divider()
+
+    # Row 2: Operational Speed
     session_stats = df.groupby('session_id').agg(total_machine_time=('machine_time_sec', 'sum'))
     avg_machine_time = session_stats['total_machine_time'].mean()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Transactions", f"{len(df):,}")
-    c2.metric("Avg Session", f"{seconds_to_mmss(avg_machine_time)}")
-    c3.metric("Active Techs", df['user_name'].nunique())
+    avg_walk_time = df[df['walk_time_sec'] > 0]['walk_time_sec'].mean()
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Avg Session Time", f"{seconds_to_mmss(avg_machine_time)}")
+    k2.metric("Avg Walk Time", f"{seconds_to_mmss(avg_walk_time)}")
+    k3.metric("Active Techs", df['user_name'].nunique())
+    
     st.divider()
     st.markdown("#### 🐢 Slowest Meds (Machine Time)")
     med_speed = df[df['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().reset_index()
