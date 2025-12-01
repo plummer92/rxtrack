@@ -129,8 +129,8 @@ def clean_dataframe(df):
 
 def clean_activity_log(df):
     """
-    Parses the 'DeviceActivityLog' for Adds/Pends.
-    Extracts MedID and Qty from 'AffectedElement' like '... (KEYRX): 1'
+    Parses 'DeviceActivityLog'.
+    Fixes the duplicate row issue (Min vs Max) by aggregating to the MAX qty.
     """
     df = df.copy()
     # Normalize headers
@@ -145,21 +145,37 @@ def clean_activity_log(df):
         "AffectedElement": "raw_element"
     })
     
+    # Parse Date First (Critical for grouping)
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    df = df.dropna(subset=["dt"])
+    
     # Regex Extraction: Look for (MEDID): QTY
-    # Example: "Drawer 1 (TYLENOL): 50" -> ID: TYLENOL, Qty: 50
     pattern = r'\((.*?)\):\s*(\d+)'
     extracted = df['raw_element'].astype(str).str.extract(pattern)
     df['med_id'] = extracted[0]
-    df['qty'] = pd.to_numeric(extracted[1], errors='coerce').fillna(0)
+    df['qty_extracted'] = pd.to_numeric(extracted[1], errors='coerce').fillna(0)
     
-    # Med Desc isn't in this file, so we use the location/raw info as a placeholder
-    df['med_desc'] = df['raw_element'] 
+    # Filter valid meds only
+    df = df.dropna(subset=['med_id'])
     
-    # Fill standard cols
+    # --- DEDUPLICATION LOGIC ---
+    # Group by [Time, User, Device, Med] and take the MAX qty.
+    # This merges the "Min: 2" and "Max: 6" rows into a single row with Qty 6.
+    # We sort by qty_extracted desc first so .first() keeps the description for the Max value.
+    df = df.sort_values('qty_extracted', ascending=False)
+    
+    df = df.groupby(['dt', 'user_name', 'device', 'med_id', 'event_type'], as_index=False).agg({
+        'qty_extracted': 'max',
+        'raw_element': 'first' # Keep the text description associated with the max value
+    })
+    
+    # Assign back to main columns
+    df['qty'] = df['qty_extracted']
+    df['med_desc'] = df['raw_element']
     df['beginning_qty'] = 0
-    df['ending_qty'] = df['qty'] # Assuming Add means end state is +qty
+    df['ending_qty'] = df['qty']
     
-    # Required cols structure
+    # Fill missing standard columns
     required_cols = [
         "user_name", "device", "med_id", "med_desc", 
         "event_type", "dt", "qty", 
@@ -169,11 +185,9 @@ def clean_activity_log(df):
     for col in required_cols:
         if col not in df.columns: df[col] = None
         
-    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-    df = df.dropna(subset=["dt"])
     df["dt"] = df["dt"].astype(str)
-    
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
+    
     return df[required_cols + ["pk"]]
 
 def clean_cost_dataframe(df):
@@ -327,17 +341,14 @@ with st.sidebar:
             header_row_idx = 0
             for idx, row in preview.iterrows():
                 row_str = str(row.values).lower()
-                # 1. Activity Log (New)
                 if "affectedelement" in row_str and "dispensingdevicename" in row_str:
                     file_type = "activity_log"
                     header_row_idx = idx
                     break
-                # 2. Daily Report
                 if "username" in row_str and "device" in row_str and "affectedelement" not in row_str:
                     file_type = "daily_report"
                     header_row_idx = idx
                     break
-                # 3. Financials
                 if ("med" in row_str or "id" in row_str) and ("cost" in row_str or "price" in row_str) and "username" not in row_str:
                     file_type = "cost_list"
                     header_row_idx = idx
@@ -357,7 +368,8 @@ with st.sidebar:
                         st.rerun()
                 elif file_type == "activity_log":
                     clean = clean_activity_log(raw)
-                    if st.button(f"Save Activity Log ({len(clean)} rows)"):
+                    # Show distinct transaction count after deduplication
+                    if st.button(f"Save Activity Log ({len(clean)} unique transactions)"):
                         insert_batch(clean, "events")
                         st.cache_data.clear()
                         st.rerun()
