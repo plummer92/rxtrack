@@ -183,8 +183,6 @@ def clean_activity_log(df):
         if col not in df.columns: df[col] = None
         
     df["dt"] = df["dt"].astype(str)
-    
-    # Generate PK *AFTER* deduplication to ensure unique ID for the consolidated row
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     
     return df[required_cols + ["pk"]]
@@ -268,17 +266,19 @@ def load_data(start_date, end_date):
         
         df = df.sort_values(['user_name', 'dt'])
         
-        # Calculations
+        # --- PROCESS MINING PREP ---
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['next_device'] = df.groupby('user_name')['device'].shift(-1)
         df['prev_dt'] = df.groupby('user_name')['dt'].shift(1)
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
+        # Calculations
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['walk_seconds'] = (df['dt'] - df['prev_dt']).dt.total_seconds()
         df['gap_minutes'] = df['walk_seconds'] / 60
         df['path_taken'] = df['prev_device'].fillna('Start') + " ➡️ " + df['device']
         
+        # Machine vs Walk Logic
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 0
@@ -296,6 +296,7 @@ def load_data(start_date, end_date):
         )
         df['session_id'] = df['is_new_session'].cumsum()
 
+        # Display Formats
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
@@ -481,6 +482,16 @@ with tab_adds:
     # Filter for Add/Pend events
     adds_df = df[df['event_type'].astype(str).str.lower().isin(['add', 'pend', 'load'])].copy()
     
+    # NEW: Filter Controls
+    c_f1, c_f2, c_f3 = st.columns(3)
+    filter_user = c_f1.multiselect("Tech", sorted(adds_df['user_name'].unique()))
+    filter_device = c_f2.multiselect("Device", sorted(adds_df['device'].unique()))
+    filter_med = c_f3.multiselect("Med ID", sorted(adds_df['med_id'].unique()))
+    
+    if filter_user: adds_df = adds_df[adds_df['user_name'].isin(filter_user)]
+    if filter_device: adds_df = adds_df[adds_df['device'].isin(filter_device)]
+    if filter_med: adds_df = adds_df[adds_df['med_id'].isin(filter_med)]
+    
     if not adds_df.empty:
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Items Added", f"{len(adds_df):,}")
@@ -492,14 +503,12 @@ with tab_adds:
         c_user, c_dev = st.columns(2)
         
         with c_user:
-            # Who is doing the work?
             user_adds = adds_df.groupby('user_name')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
             fig_u = px.bar(user_adds, x='Count', y='user_name', orientation='h', title="Top Staff (Adds/Pends)", color='Count', color_continuous_scale='Greens')
             fig_u.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_u, use_container_width=True)
             
         with c_dev:
-            # Where is it happening?
             dev_adds = adds_df.groupby('device')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
             fig_d = px.bar(dev_adds, x='Count', y='device', orientation='h', title="Top Devices Receiving Stock", color_discrete_sequence=['#4CAF50'])
             fig_d.update_layout(yaxis={'categoryorder':'total ascending'})
@@ -509,7 +518,7 @@ with tab_adds:
         st.dataframe(adds_df[['Timestamp', 'user_name', 'device', 'med_id', 'qty', 'med_desc']], use_container_width=True, hide_index=True)
         
     else:
-        st.info("No Add/Pend activity found in this date range. Upload a 'DeviceActivityLog' file.")
+        st.info("No Add/Pend activity found in this date range.")
 
 # --- TAB 5: EFFICIENCY ---
 with tab_effic:
