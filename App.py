@@ -178,11 +178,12 @@ def clean_activity_log(df):
     # Flatten columns
     grouped.columns = ['dedup_time', 'user_name', 'device', 'med_id', 'action_type', 'activity_category', 'max_qty', 'min_qty', 'raw_element', 'dt']
     
-    # If max == min, likely just one entry or fixed capacity. 
-    # If max > min, we likely found the Min/Max pair.
-    
+    # Logic for Standard Stock Checkbox
+    # If activity_category contains "Standard Stock", we mark it.
+    grouped['is_standard'] = grouped['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
+    grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Standard" if x else "☐ Non-Standard")
+
     # Format the Event Type to show details
-    # e.g. "Add (Standard Stock) [Max: 6, Min: 2]"
     grouped['event_type'] = (
         grouped['action_type'].astype(str) + " (" + grouped['activity_category'].astype(str) + ")"
     )
@@ -190,8 +191,14 @@ def clean_activity_log(df):
     # We store MAX qty as the primary Quantity for charts
     grouped['qty'] = grouped['max_qty']
     
-    # We store the detail string in med_desc so it shows up in the table
-    grouped['med_desc'] = grouped['raw_element'] + " [Max:" + grouped['max_qty'].astype(str) + " Min:" + grouped['min_qty'].astype(str) + "]"
+    # Store detail string in med_desc for the table
+    # Format: "MedName [Min: 2 | Max: 6 | ☑️ Standard]"
+    grouped['med_desc'] = (
+        grouped['raw_element'].str.split(' \(').str[0] +  # Extract just the location/name part before (MEDID)
+        " [Min: " + grouped['min_qty'].astype(str) + 
+        " | Max: " + grouped['max_qty'].astype(str) + 
+        " | " + grouped['std_stock_display'] + "]"
+    )
     
     grouped['beginning_qty'] = grouped['min_qty'] # Store Min in Beg for storage
     grouped['ending_qty'] = grouped['max_qty']    # Store Max in End for storage
@@ -535,8 +542,10 @@ with tab_pends:
             fig_d.update_layout(yaxis={'categoryorder':'total ascending'})
             st.plotly_chart(fig_d, use_container_width=True)
         st.markdown("#### 📝 Detailed Config Log")
-        # UPDATED TABLE: Shows Min/Max/StandardStock in one clean row
-        st.dataframe(pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_id', 'beginning_qty', 'ending_qty']], use_container_width=True, hide_index=True)
+        
+        # UPDATED TABLE: Shows Min/Max/StandardStock correctly in Med Description (via med_desc trick)
+        # Note: We rely on 'med_desc' here because clean_activity_log packed the info there
+        st.dataframe(pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_desc']], use_container_width=True, hide_index=True)
     else: st.info("No Pends/Adds found.")
 
 # --- TAB 5: LOADS (RESTOCK) ---
