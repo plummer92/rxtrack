@@ -1,6 +1,7 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
-# Features: Daily Reports, Financials, & Activity Logs (Pends)
+# Features: Daily Reports, Financials, Activity Logs
+# Fixes: Dark Mode Colors & Visual Calendar for Gaps
 ###############################################
 
 import streamlit as st
@@ -21,11 +22,42 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS (FIXED FOR DARK/LIGHT MODE)
 st.markdown("""
     <style>
-    .metric-card { background-color: #f9f9f9; padding: 15px; border-radius: 10px; border-left: 5px solid #4CAF50; }
-    .missing-card { background-color: #ffebee; padding: 10px; border-radius: 5px; border-left: 5px solid #FF4B4B; margin-bottom: 10px;}
+    /* Force readable text colors for metric cards */
+    .metric-card { 
+        background-color: #f0f2f6; 
+        padding: 15px; 
+        border-radius: 10px; 
+        border-left: 5px solid #4CAF50;
+        color: #31333F; /* Dark text for contrast */
+    }
+    .metric-card h3 { color: #31333F; margin: 0; }
+    .metric-card p { color: #31333F; margin: 0; }
+    
+    .missing-card { 
+        background-color: #ffebee; 
+        padding: 10px; 
+        border-radius: 5px; 
+        border-left: 5px solid #FF4B4B; 
+        margin-bottom: 10px;
+        color: #b71c1c; /* Dark red text */
+    }
+    
+    /* Calendar Grid Styles */
+    .cal-grid { display: flex; flex-wrap: wrap; gap: 2px; max-width: 100%; }
+    .cal-day { 
+        width: 18px; height: 18px; 
+        border-radius: 2px; 
+        font-size: 8px; 
+        display: flex; align-items: center; justify-content: center;
+        color: white; font-weight: bold;
+    }
+    .cal-present { background-color: #4CAF50; } /* Green */
+    .cal-missing { background-color: #FF4B4B; } /* Red */
+    .cal-empty { background-color: #e0e0e0; }   /* Grey */
+    
     .highlight { font-weight: bold; color: #2c3e50; }
     </style>
     """, unsafe_allow_html=True)
@@ -69,23 +101,18 @@ def get_db_stats():
         max_dt = safe_to_date(result[1]) if result else datetime.today().date()
         total_rows = result[2] if result else 0
         
-        missing_dates = []
+        present_dates = set()
         if total_rows > 0:
-            delta = (max_dt - min_dt).days
-            if delta < 0: delta = 0
-            all_dates = {min_dt + timedelta(days=x) for x in range(delta + 1)}
-            
             cur.execute("SELECT DISTINCT DATE(dt) FROM events")
             present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
-            missing_dates = sorted(list(all_dates - present_dates))
             
         cur.close()
         conn.close()
-        return total_rows, min_dt, max_dt, missing_dates
+        return total_rows, min_dt, max_dt, present_dates
         
     except Exception as e:
         if conn: conn.close()
-        return 0, datetime.today().date(), datetime.today().date(), []
+        return 0, datetime.today().date(), datetime.today().date(), set()
 
 ###########################################################
 #                 DATA CLEANING
@@ -130,10 +157,6 @@ def clean_dataframe(df):
     return df[required_cols + ["pk"]]
 
 def clean_activity_log(df):
-    """
-    Parses 'DeviceActivityLog'.
-    DEDUPLICATION FIX: Rounds time to minute to merge rapid-fire Min/Max updates.
-    """
     df = df.copy()
     df.columns = df.columns.str.strip().str.replace(' ', '')
     
@@ -155,19 +178,11 @@ def clean_activity_log(df):
     
     df = df.dropna(subset=['med_id'])
     
-    # --- SMART MERGE LOGIC ---
-    # 1. Create a temporary time column rounded to the MINUTE
-    # This treats 01:21:05 and 01:21:07 as the SAME time.
+    # Deduplication Logic
     df['dedup_time'] = df['dt'].dt.floor('Min')
-    
-    # 2. Sort by Qty Descending (so '6' comes before '2')
     df = df.sort_values('qty_extracted', ascending=False)
-    
-    # 3. Drop Duplicates based on the ROUNDED time
-    # This keeps only the row with the highest quantity for that minute
     df = df.drop_duplicates(subset=['dedup_time', 'user_name', 'device', 'med_id'], keep='first')
     
-    # Assign finalized values
     df['qty'] = df['qty_extracted']
     df['med_desc'] = df['raw_element']
     df['beginning_qty'] = 0
@@ -266,19 +281,16 @@ def load_data(start_date, end_date):
         
         df = df.sort_values(['user_name', 'dt'])
         
-        # --- PROCESS MINING PREP ---
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['next_device'] = df.groupby('user_name')['device'].shift(-1)
         df['prev_dt'] = df.groupby('user_name')['dt'].shift(1)
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
-        # Calculations
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['walk_seconds'] = (df['dt'] - df['prev_dt']).dt.total_seconds()
         df['gap_minutes'] = df['walk_seconds'] / 60
         df['path_taken'] = df['prev_device'].fillna('Start') + " ➡️ " + df['device']
         
-        # Machine vs Walk Logic
         df['machine_time_sec'] = np.where(
             (df['device'] == df['next_device']) & (df['duration_seconds'] < 600), 
             df['duration_seconds'], 0
@@ -296,7 +308,6 @@ def load_data(start_date, end_date):
         )
         df['session_id'] = df['is_new_session'].cumsum()
 
-        # Display Formats
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
         df['Walk Time'] = df['walk_time_sec'].apply(seconds_to_mmss)
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M %p')
@@ -313,15 +324,35 @@ with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
     
-    total_rows, min_db, max_db, missing_dates = get_db_stats()
+    # --- 1. VISUAL CALENDAR (NEW) ---
+    total_rows, min_db, max_db, present_dates = get_db_stats()
     
-    with st.expander("💾 Database Coverage", expanded=True):
+    with st.expander("💾 Coverage Calendar", expanded=True):
         st.write(f"**Records:** {total_rows:,}")
-        st.write(f"**Range:** {min_db} to {max_db}")
-        if missing_dates:
-            st.markdown(f"""<div class="missing-card">⚠️ <b>Missing Data ({len(missing_dates)} Days)</b></div>""", unsafe_allow_html=True)
+        
+        # Generate the calendar HTML
+        delta = (max_db - min_db).days
+        if delta > 90: # Only show last 90 days if range is huge
+            calendar_start = max_db - timedelta(days=90)
         else:
-            st.success("✅ Complete Coverage")
+            calendar_start = min_db
+            
+        calendar_html = '<div class="cal-grid">'
+        current_day = calendar_start
+        while current_day <= max_db:
+            if current_day in present_dates:
+                color_class = "cal-present"
+                tooltip = f"{current_day}: Data Found"
+            else:
+                color_class = "cal-missing"
+                tooltip = f"{current_day}: MISSING"
+            
+            calendar_html += f'<div class="cal-day {color_class}" title="{tooltip}">{current_day.day}</div>'
+            current_day += timedelta(days=1)
+        calendar_html += '</div>'
+        
+        st.markdown(calendar_html, unsafe_allow_html=True)
+        st.caption("Green = Data Found | Red = Missing")
     
     st.divider()
     
@@ -368,7 +399,6 @@ with st.sidebar:
                         st.rerun()
                 elif file_type == "activity_log":
                     clean = clean_activity_log(raw)
-                    # Show distinct transaction count after deduplication
                     if st.button(f"Save Activity Log ({len(clean)} unique transactions)"):
                         insert_batch(clean, "events")
                         st.cache_data.clear()
@@ -518,7 +548,7 @@ with tab_adds:
         st.dataframe(adds_df[['Timestamp', 'user_name', 'device', 'med_id', 'qty', 'med_desc']], use_container_width=True, hide_index=True)
         
     else:
-        st.info("No Add/Pend activity found in this date range.")
+        st.info("No Add/Pend activity found in this date range. Upload a 'DeviceActivityLog' file.")
 
 # --- TAB 5: EFFICIENCY ---
 with tab_effic:
