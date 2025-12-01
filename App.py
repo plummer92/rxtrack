@@ -183,6 +183,9 @@ def clean_activity_log(df):
     grouped['is_standard'] = grouped['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
     grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
 
+    # Create Clean Med Name (remove ID)
+    grouped['med_clean'] = grouped['raw_element'].str.split(' \(').str[0]
+
     # Format the Event Type to show details
     # e.g. "Add (Standard Stock) [Max: 6, Min: 2]"
     grouped['event_type'] = (
@@ -192,13 +195,10 @@ def clean_activity_log(df):
     # We store MAX qty as the primary Quantity for charts
     grouped['qty'] = grouped['max_qty']
     
-    # We store the detail string in med_desc so it shows up in the table
-    # Format: "MedName [Min: 2 | Max: 6 | ☑️ Standard]"
+    # Packed Description for Storage: We store the metadata here so we can unpack it later
     grouped['med_desc'] = (
-        grouped['raw_element'].str.split(' \(').str[0] +  # Extract just the location/name part before (MEDID)
-        " [Min: " + grouped['min_qty'].astype(str) + 
-        " | Max: " + grouped['max_qty'].astype(str) + 
-        " | " + grouped['std_stock_display'] + "]"
+        grouped['med_clean'] + 
+        " | StdStock: " + grouped['std_stock_display']
     )
     
     grouped['beginning_qty'] = grouped['min_qty'] # Store Min in Beg for storage
@@ -533,25 +533,33 @@ with tab_pends:
         c2.metric("Total Capacity Added", f"{int(pends_df['qty'].sum()):,}")
         c3.metric("Unique Meds", pends_df['med_id'].nunique())
         st.divider()
-        c_user, c_dev = st.columns(2)
-        with c_user:
-            user_adds = pends_df.groupby('user_name')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
-            fig_u = px.bar(user_adds, x='Count', y='user_name', orientation='h', title="Top Staff (Config Changes)", color='Count', color_continuous_scale='Greens')
-            fig_u.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_u, use_container_width=True)
-        with c_dev:
-            dev_adds = pends_df.groupby('device')['pk'].count().reset_index(name='Count').sort_values('Count', ascending=False).head(10)
-            fig_d = px.bar(dev_adds, x='Count', y='device', orientation='h', title="Top Devices Configured", color_discrete_sequence=['#4CAF50'])
-            fig_d.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_d, use_container_width=True)
+        
+        # --- DISPLAY FIX: EXTRACT PACKED DATA FOR CLEAN COLUMNS ---
+        # Logic: If ' | StdStock: ' is in description, we know it's a packed Activity Log entry
+        # We extract the parts back out for the table
+        
+        # 1. Extract Standard Stock (True/False)
+        pends_df['Standard Stock'] = pends_df['med_desc'].astype(str).apply(lambda x: "☑️" if "☑️ Yes" in x else "☐")
+        
+        # 2. Extract Clean Med Name (Everything before the packed data)
+        pends_df['Medication'] = pends_df['med_desc'].astype(str).str.split(' | StdStock:').str[0]
+        
+        # 3. Rename Columns
+        # We stored Min in 'beginning_qty' and Max in 'ending_qty' in clean_activity_log
+        pends_df = pends_df.rename(columns={
+            'beginning_qty': 'Min',
+            'ending_qty': 'Max',
+            'user_name': 'User',
+            'device': 'Device',
+            'event_type': 'Activity'
+        })
+        
         st.markdown("#### 📝 Detailed Config Log")
-        
-        # --- TABLE UPDATE: Use Beg/End columns for Min/Max ---
-        # Rename columns for display clarity
-        display_pends = pends_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_id', 'beginning_qty', 'ending_qty']].copy()
-        display_pends = display_pends.rename(columns={'beginning_qty': 'Min Qty', 'ending_qty': 'Max Qty (Cap)'})
-        
-        st.dataframe(display_pends, use_container_width=True, hide_index=True)
+        st.dataframe(
+            pends_df[['Timestamp', 'User', 'Device', 'Activity', 'Medication', 'Min', 'Max', 'Standard Stock']], 
+            use_container_width=True, 
+            hide_index=True
+        )
     else: st.info("No Pends/Adds found.")
 
 # --- TAB 5: LOADS (RESTOCK) ---
