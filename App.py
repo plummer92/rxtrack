@@ -136,11 +136,12 @@ def clean_dataframe(df):
 def clean_activity_log(df):
     """
     Clean Device Activity Log (Add/Pend) using AffectedElement and ActivityType.
-    Follows Option A = Standard Stock only toggles the flag, does NOT affect min/max.
+    Implements robust parsing and Min/Max merging logic with proper normalization.
+    Option A: Standard Stock ONLY toggles flag, does NOT modify min/max.
     """
     df = df.copy()
 
-    # Normalize column names
+    # Normalize columns
     df.columns = df.columns.str.strip().str.replace(" ", "")
 
     df = df.rename(columns={
@@ -152,7 +153,7 @@ def clean_activity_log(df):
         "AffectedElement": "raw_element"
     })
 
-    # Ensure timestamp
+    # Ensure timestamps
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"])
 
@@ -165,46 +166,44 @@ def clean_activity_log(df):
     # Location = everything before "("
     df["location"] = raw.str.extract(r"^(.*?)\s*\(")[0].fillna(raw)
 
-    # Med ID = inside parentheses
+    # Med ID = text inside parentheses
     df["med_id"] = raw.str.extract(r"\((.*?)\)")[0]
 
     # Qty = number after colon
-    df["qty_extracted"] = raw.str.extract(r":\s*([0-9]+)")[0].astype(float).fillna(0)
+    df["qty_extracted"] = (
+        raw.str.extract(r":\s*([0-9]+)")[0]
+        .astype(float)
+        .fillna(0)
+    )
 
-    # Drop rows with no med ID (not med config rows)
+    # Filter non-med rows
     df = df.dropna(subset=["med_id"])
 
     # --------------------------------------------
-    # 2. Min / Max assignment based on ActivityType
+    # 2. Normalize ActivityType → detect Min / Max / Standard Stock
     # --------------------------------------------
 
-    atype = df["activity_type"].astype(str)
-
-    # Min Qty
-    df["temp_min"] = np.where(
-        atype.str.contains("Min", case=False, na=False),
-        df["qty_extracted"],
-        np.nan
+    atype = (
+        df["activity_type"]
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\s+", " ", regex=True)
+        .str.lower()
     )
 
-    # Max Qty
-    df["temp_max"] = np.where(
-        atype.str.contains("Max", case=False, na=False),
-        df["qty_extracted"],
-        np.nan
-    )
+    df["is_min"] = atype.str.contains("min")
+    df["is_max"] = atype.str.contains("max")
+    df["is_standard"] = atype.str.contains("standard")
 
-    # Standard Stock — ONLY toggles checkbox (Option A)
-    df["is_standard"] = atype.str.contains("Standard", case=False, na=False)
+    # Assign values
+    df["temp_min"] = np.where(df["is_min"], df["qty_extracted"], np.nan)
+    df["temp_max"] = np.where(df["is_max"], df["qty_extracted"], np.nan)
 
-    # Non-Min/Max rows (capacity changes or generic events) → treat as Max only
-    df.loc[
-        (~atype.str.contains("Min|Max", case=False, na=False)),
-        "temp_max"
-    ] = df["qty_extracted"]
+    # Non-Min/Max events (ex: Add, Capacity, Pend) → treat qty as Max
+    df.loc[(~df["is_min"]) & (~df["is_max"]), "temp_max"] = df["qty_extracted"]
 
     # --------------------------------------------
-    # 3. Merge Min + Max rows within 2 minutes (same tech + device + med)
+    # 3. Merge Min + Max rows within 2 minutes (same tech+device+med)
     # --------------------------------------------
     df = df.sort_values(["user_name", "device", "med_id", "dt"])
 
@@ -218,13 +217,13 @@ def clean_activity_log(df):
         ["user_name", "device", "med_id", "location", "group_id"],
         as_index=False
     ).agg({
-        "dt": "min",
-        "temp_min": "max",
-        "temp_max": "max",
-        "is_standard": "max"
+        "dt": "min",           # Use earliest timestamp
+        "temp_min": "max",     # Combine Min
+        "temp_max": "max",     # Combine Max
+        "is_standard": "max"   # Checkbox flag
     })
 
-    # Final fill
+    # Final numeric cleanup
     merged["temp_min"] = merged["temp_min"].fillna(0).astype(int)
     merged["temp_max"] = merged["temp_max"].fillna(0).astype(int)
 
@@ -260,7 +259,6 @@ def clean_activity_log(df):
             "resolution_dt", "pk"
         ]
     ]
-
 
 def clean_cost_dataframe(df):
     df = df.copy()
