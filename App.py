@@ -1,7 +1,7 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
 # Features: Daily Reports, Financials, & Activity Logs
-# Fixes: Removed Duplicate 'Timestamp' Column
+# Fixes: Duplicate Column Error & Smarter Deduplication
 ###############################################
 
 import streamlit as st
@@ -160,27 +160,39 @@ def clean_activity_log(df):
     df['qty_extracted'] = df['raw_element'].astype(str).str.extract(qty_pattern)[0]
     df['qty_extracted'] = pd.to_numeric(df['qty_extracted'], errors='coerce').fillna(0)
 
-    # Create grouping key (Round to minute to catch split-second Min/Max entries)
-    df['dedup_time'] = df['dt'].dt.floor('Min')
-
-    # --- SMART MERGE LOGIC ---
+    # --- ADVANCED DEDUPLICATION (TIME WINDOW) ---
+    # Instead of simple minute floor, we use a 2-minute rolling window to group
+    # similar events for the same user/device/med.
+    
+    df = df.sort_values(['user_name', 'device', 'med_id', 'dt'])
+    
     # Identify row types
     df['is_min_event'] = df['activity_category'].astype(str).str.contains('Min', case=False, na=False)
     df['is_max_event'] = df['activity_category'].astype(str).str.contains('Max', case=False, na=False)
     df['is_standard'] = df['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
 
-    # Map to temp cols
+    # Assign temp values
     df['temp_min'] = np.where(df['is_min_event'], df['qty_extracted'], np.nan)
     df['temp_max'] = np.where(df['is_max_event'], df['qty_extracted'], np.nan)
-    # If neither (e.g. just "Add"), assume it's a Max/Capacity update
+    # If neither, treat as Max/Capacity
     df['temp_max'] = np.where((~df['is_min_event']) & (~df['is_max_event']), df['qty_extracted'], df['temp_max'])
 
-    # Group/Merge
-    grouped = df.groupby(['dedup_time', 'user_name', 'device', 'med_id'], as_index=False).agg({
-        'temp_min': 'max',      
-        'temp_max': 'max',      
-        'is_standard': 'max',   
-        'raw_element': 'first', 
+    # Grouping Key:
+    # We calculate the time difference from the previous row. 
+    # If diff > 120 seconds, it's a new "Session ID".
+    df['prev_time'] = df.groupby(['user_name', 'device', 'med_id'])['dt'].shift(1)
+    df['time_diff'] = (df['dt'] - df['prev_time']).dt.total_seconds().fillna(0)
+    
+    # New group if time gap > 2 mins
+    df['is_new_group'] = (df['time_diff'] > 120).astype(int)
+    df['group_id'] = df.groupby(['user_name', 'device', 'med_id'])['is_new_group'].cumsum()
+
+    # MERGE
+    grouped = df.groupby(['user_name', 'device', 'med_id', 'group_id'], as_index=False).agg({
+        'temp_min': 'max',
+        'temp_max': 'max',
+        'is_standard': 'max',
+        'raw_element': 'first',
         'dt': 'first',
         'action_type': 'first'
     })
@@ -193,11 +205,13 @@ def clean_activity_log(df):
     grouped['event_type'] = "Config Change"
     
     grouped['qty'] = grouped['temp_max']
-    grouped['beginning_qty'] = grouped['temp_min'] # Min in Beg
-    grouped['ending_qty'] = grouped['temp_max']    # Max in End
+    grouped['beginning_qty'] = grouped['temp_min'] # Min
+    grouped['ending_qty'] = grouped['temp_max']    # Max
+    
+    # Clean Med Name
+    grouped['med_clean'] = grouped['raw_element'].str.split(' \(').str[0]
     
     # Packed Description
-    grouped['med_clean'] = grouped['raw_element'].str.split(' \(').str[0]
     grouped['med_desc'] = (
         grouped['med_clean'] + 
         " | StdStock: " + grouped['std_stock_display']
@@ -533,30 +547,33 @@ with tab_pends:
         st.divider()
         
         # --- DISPLAY FIX: UNPACK DATA FOR CLEAN COLUMNS ---
-        # Unpack Min/Max/StdStock from med_desc string
-        
-        # 1. Standard Stock Checkbox
-        pends_df['Standard Stock'] = pends_df['med_desc'].astype(str).apply(lambda x: "☑️" if "☑️ Yes" in x else "☐")
-        
-        # 2. Clean Med Name (Part before " | StdStock")
-        pends_df['Medication'] = pends_df['med_desc'].astype(str).str.split(' \| ').str[0]
-        
-        # 3. Rename Qty Columns (Min stored in Beg, Max in End)
-        # NO 'Timestamp' duplicate creation here.
+        # Helper to extract if pipe exists, else use fallback
+        def unpack_std_stock(val):
+            if " | " in str(val):
+                return "☑️" if "☑️" in str(val) else "☐"
+            return "-" # Legacy data has no std stock flag
+
+        def unpack_location(val):
+            if " | " in str(val):
+                return str(val).split(' | ')[0]
+            return str(val).split(' (')[0]
+
+        pends_df['Standard Stock'] = pends_df['med_desc'].apply(unpack_std_stock)
+        pends_df['Medication'] = pends_df['med_id'] 
+        pends_df['Location'] = pends_df['med_desc'].apply(unpack_location)
+
+        # Rename Qty Columns
         rename_map = {
             'beginning_qty': 'Min Qty',
             'ending_qty': 'Max Qty',
             'user_name': 'User',
             'device': 'Device'
         }
-            
         pends_df = pends_df.rename(columns=rename_map)
         
         st.markdown("#### 📝 Detailed Config Log")
         
-        # Show clean columns
-        display_cols = ['Timestamp', 'User', 'Device', 'Medication', 'Min Qty', 'Max Qty', 'Standard Stock']
-        # Fallback if any col missing
+        display_cols = ['Timestamp', 'User', 'Device', 'Location', 'Medication', 'Min Qty', 'Max Qty', 'Standard Stock']
         valid_cols = [c for c in display_cols if c in pends_df.columns]
         
         st.dataframe(
