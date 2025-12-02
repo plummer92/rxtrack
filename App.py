@@ -1,7 +1,7 @@
 ###############################################
 # RXTRACK: EXECUTIVE DASHBOARD (FINAL STABLE)
 # Features: Daily Reports, Financials, & Activity Logs
-# Fixes: Correctly merges Min/Max rows into single event
+# Fixes: Clean Columns for Pends (Split Location/Med/Std Stock)
 ###############################################
 
 import streamlit as st
@@ -150,66 +150,67 @@ def clean_activity_log(df):
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"])
     
-    # Extract Med ID
-    pattern = r'\((.*?)\)'
-    df['med_id'] = df['raw_element'].astype(str).str.extract(pattern)[0]
+    # Extract Med ID and Location from raw_element
+    # Pattern matches: "Location string (MEDID): Qty"
+    # Group 1: Location (everything before parenthesis)
+    # Group 2: Med ID (inside parenthesis)
+    # Group 3: Quantity (after colon)
+    pattern = r'^(.*?) \((.*?)\):\s*(\d+)$'
+    extracted = df['raw_element'].astype(str).str.extract(pattern)
+    
+    df['location_part'] = extracted[0].str.strip()
+    df['med_id'] = extracted[1].str.strip()
+    df['qty_extracted'] = pd.to_numeric(extracted[2], errors='coerce').fillna(0)
+    
     df = df.dropna(subset=['med_id'])
-
-    # Extract Qty
-    qty_pattern = r':\s*(\d+)$'
-    df['qty_extracted'] = df['raw_element'].astype(str).str.extract(qty_pattern)[0]
-    df['qty_extracted'] = pd.to_numeric(df['qty_extracted'], errors='coerce').fillna(0)
 
     # Create grouping key (Round to minute)
     df['dedup_time'] = df['dt'].dt.floor('Min')
     
-    # --- INTELLIGENT SPLIT ---
-    # Identify which row is Min and which is Max based on the Activity Description
+    # Identify Event Types for Smart Merge
     df['is_min_event'] = df['activity_category'].astype(str).str.contains('Min', case=False, na=False)
     df['is_max_event'] = df['activity_category'].astype(str).str.contains('Max', case=False, na=False)
     df['is_standard'] = df['activity_category'].astype(str).str.contains('Standard Stock', case=False, na=False)
 
-    # Assign values to temp columns based on what they are
+    # Map values to temporary columns
     df['temp_min'] = np.where(df['is_min_event'], df['qty_extracted'], np.nan)
     df['temp_max'] = np.where(df['is_max_event'], df['qty_extracted'], np.nan)
     
-    # If neither (e.g. just "Add"), assume it's a Max/Capacity update
+    # Fallback: If neither min/max keyword, assume it's a capacity update (Max)
     df['temp_max'] = np.where((~df['is_min_event']) & (~df['is_max_event']), df['qty_extracted'], df['temp_max'])
 
     # --- MERGE LOGIC ---
-    # Group by Time, User, Device, Med. 
-    # Collapses "Min Row" and "Max Row" into one.
+    # Group by [Time, User, Device, Med ID] to collapse Min/Max rows into one
     grouped = df.groupby(['dedup_time', 'user_name', 'device', 'med_id'], as_index=False).agg({
-        'temp_min': 'max',    # Grabs the Min value if present (ignores NaNs)
-        'temp_max': 'max',    # Grabs the Max value if present
-        'is_standard': 'max', # Grabs True if any row was Standard Stock
-        'raw_element': 'first',
+        'temp_min': 'max',      # Get the Min value
+        'temp_max': 'max',      # Get the Max value
+        'is_standard': 'max',   # If ANY row was Std Stock, this becomes True (1)
+        'location_part': 'first', # Keep the location string
         'dt': 'first',
         'action_type': 'first'
     })
     
-    # Fill NaNs (if only one row existed)
+    # Fill NaNs
     grouped['temp_min'] = grouped['temp_min'].fillna(0)
     grouped['temp_max'] = grouped['temp_max'].fillna(0)
 
-    # Formatting for Display
+    # Format Display Columns
     grouped['std_stock_display'] = grouped['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
-    grouped['event_type'] = grouped['action_type'] # Simplified to "Add" or "Pend"
+    grouped['event_type'] = "Config Change" # Generic label for the merged event
     
-    grouped['qty'] = grouped['temp_max']            # Primary qty is Max
-    grouped['beginning_qty'] = grouped['temp_min']  # Min stored in Beg
-    grouped['ending_qty'] = grouped['temp_max']     # Max stored in End
+    grouped['qty'] = grouped['temp_max']
+    grouped['beginning_qty'] = grouped['temp_min']
+    grouped['ending_qty'] = grouped['temp_max']
     
-    # Clean Med Name
-    grouped['med_clean'] = grouped['raw_element'].str.split(' \(').str[0]
-    
-    # PACKED DESCRIPTION (for storage persistence)
+    # PACK DATA INTO med_desc FOR STORAGE
+    # Format: "LocationPart | MedID | StdStock: X"
+    # We use a delimiter so we can split it back out in the UI
     grouped['med_desc'] = (
-        grouped['med_clean'] + 
+        grouped['location_part'] + 
+        " | " + grouped['med_id'] + 
         " | StdStock: " + grouped['std_stock_display']
     )
     
-    # Standardize for DB
     required_cols = [
         "user_name", "device", "med_id", "med_desc", 
         "event_type", "dt", "qty", 
@@ -222,6 +223,8 @@ def clean_activity_log(df):
         if col not in final_df.columns: final_df[col] = None
     
     final_df['discrepancy_qty'] = 0
+    final_df['discrepancy_reason'] = None
+    final_df['resolution_dt'] = None
     
     final_df["dt"] = final_df["dt"].astype(str)
     final_df["pk"] = final_df.apply(lambda r: generate_pk(r), axis=1)
@@ -301,6 +304,7 @@ def load_data(start_date, end_date):
     
     if not df.empty:
         df["dt"] = pd.to_datetime(df["dt"])
+        # Treat both 'refill' and 'config change' (our new label) as relevant activity
         df["is_refill"] = df["event_type"].str.lower().str.contains("refill|load", na=False)
         if "cost_per_unit" not in df.columns: df["cost_per_unit"] = 0
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0)
@@ -448,40 +452,12 @@ tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.ta
 # --- TAB 1: OVERVIEW ---
 with tab_over:
     st.markdown("### ⏱️ Operational Speed Analysis")
-    
-    # Calculate Counts for specific transaction types
-    # Note: str.contains handles mixed case via regex. 'Refill', 'Load', 'Unload', 'Outdate'
-    # We treat 'Load' distinctly from 'Unload' by excluding 'unload' from 'load' matches
-    ev_lower = df['event_type'].astype(str).str.lower()
-    
-    cnt_refill = ev_lower[ev_lower.str.contains('refill')].count()
-    cnt_unload = ev_lower[ev_lower.str.contains('unload')].count()
-    # For Load, we want 'load' but not 'unload' (since 'unload' contains 'load')
-    # However, standard Pyxis types are often "Load", "Refill", "Unload".
-    # Some reports use "Load/Refill".
-    cnt_load = ev_lower[(ev_lower.str.contains('load')) & (~ev_lower.str.contains('unload'))].count()
-    cnt_outdate = ev_lower[ev_lower.str.contains('outdate')].count()
-
-    # Row 1: Transaction Breakdown
-    st.markdown("#### Transaction Volume")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Refills", f"{cnt_refill:,}")
-    c2.metric("Loads", f"{cnt_load:,}")
-    c3.metric("Unloads", f"{cnt_unload:,}")
-    c4.metric("Outdates", f"{cnt_outdate:,}")
-    
-    st.divider()
-
-    # Row 2: Operational Speed
     session_stats = df.groupby('session_id').agg(total_machine_time=('machine_time_sec', 'sum'))
     avg_machine_time = session_stats['total_machine_time'].mean()
-    avg_walk_time = df[df['walk_time_sec'] > 0]['walk_time_sec'].mean()
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Avg Session Time", f"{seconds_to_mmss(avg_machine_time)}")
-    k2.metric("Avg Walk Time", f"{seconds_to_mmss(avg_walk_time)}")
-    k3.metric("Active Techs", df['user_name'].nunique())
-    
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Transactions", f"{len(df):,}")
+    c2.metric("Avg Session", f"{seconds_to_mmss(avg_machine_time)}")
+    c3.metric("Active Techs", df['user_name'].nunique())
     st.divider()
     st.markdown("#### 🐢 Slowest Meds (Machine Time)")
     med_speed = df[df['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().reset_index()
@@ -547,48 +523,65 @@ with tab_comp:
 # --- TAB 4: PENDS (CONFIG) ---
 with tab_pends:
     st.markdown("### 📥 Inventory Configuration (Adds & Pends)")
-    pends_df = df[df['event_type'].astype(str).str.lower().str.contains('add|pend')].copy()
+    # Filter for our custom "Config Change" event type from clean_activity_log
+    # OR fall back to 'Add/Pend' check if legacy data exists
+    pends_df = df[
+        (df['event_type'] == "Config Change") | 
+        (df['event_type'].astype(str).str.lower().str.contains('add|pend'))
+    ].copy()
+    
     c_f1, c_f2, c_f3 = st.columns(3)
-    # FIX: Handle None in multiselect sort
     filter_user = c_f1.multiselect("Tech", sorted([x for x in pends_df['user_name'].unique() if x is not None]))
     filter_device = c_f2.multiselect("Device", sorted([x for x in pends_df['device'].unique() if x is not None]))
     filter_med = c_f3.multiselect("Med ID", sorted([x for x in pends_df['med_id'].unique() if x is not None]))
+    
     if filter_user: pends_df = pends_df[pends_df['user_name'].isin(filter_user)]
     if filter_device: pends_df = pends_df[pends_df['device'].isin(filter_device)]
     if filter_med: pends_df = pends_df[pends_df['med_id'].isin(filter_med)]
     
     if not pends_df.empty:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Items Added", f"{len(pends_df):,}")
+        c1.metric("Config Changes", f"{len(pends_df):,}")
         c2.metric("Total Capacity Added", f"{int(pends_df['qty'].sum()):,}")
         c3.metric("Unique Meds", pends_df['med_id'].nunique())
         st.divider()
         
         # --- DISPLAY FIX: UNPACK DATA FOR CLEAN COLUMNS ---
-        # Unpack Min/Max/StdStock from med_desc string if it exists
-        # Safe unpacking with regex
+        # Split out the packed med_desc: "Location | MedID | StdStock: ☑️"
         
-        # 1. Standard Stock
-        pends_df['Standard Stock'] = pends_df['med_desc'].astype(str).apply(lambda x: "☑️" if "☑️" in x else "☐")
+        # 1. Standard Stock Checkbox
+        pends_df['Standard Stock'] = pends_df['med_desc'].astype(str).apply(lambda x: "☑️" if "☑️ Yes" in x else "☐")
         
-        # 2. Clean Med Name (Part before " | StdStock")
-        pends_df['Medication'] = pends_df['med_desc'].astype(str).str.split(' \| ').str[0]
+        # 2. Location & Med ID
+        # Logic: The packed string starts with Location, then Med ID, then StdStock
+        # We split by " | "
+        split_data = pends_df['med_desc'].astype(str).str.split(' \| ', expand=True)
         
-        # 3. Rename Qty Columns (Min stored in Beg, Max in End)
+        if len(split_data.columns) >= 2:
+            pends_df['Location'] = split_data[0]
+            # Sometimes regex misses the Med ID in 'med_desc' if pattern varied, fall back to 'med_id' column
+            pends_df['Medication'] = pends_df['med_id'] 
+        else:
+            pends_df['Location'] = pends_df['med_desc']
+            pends_df['Medication'] = pends_df['med_id']
+
+        # 3. Rename for Table
         pends_df = pends_df.rename(columns={
-            'beginning_qty': 'Min',
-            'ending_qty': 'Max',
+            'beginning_qty': 'Min Qty',
+            'ending_qty': 'Max Qty',
             'user_name': 'User',
             'device': 'Device',
-            'event_type': 'Activity'
+            'dt': 'Timestamp'
         })
         
         st.markdown("#### 📝 Detailed Config Log")
-        st.dataframe(
-            pends_df[['Timestamp', 'User', 'Device', 'Activity', 'Medication', 'Min', 'Max', 'Standard Stock']], 
-            use_container_width=True, 
-            hide_index=True
-        )
+        
+        # Show clean columns
+        display_cols = ['Timestamp', 'User', 'Device', 'Location', 'Medication', 'Min Qty', 'Max Qty', 'Standard Stock']
+        # Fallback if any col missing
+        valid_cols = [c for c in display_cols if c in pends_df.columns]
+        
+        st.dataframe(pends_df[valid_cols], use_container_width=True, hide_index=True)
     else: st.info("No Pends/Adds found.")
 
 # --- TAB 5: LOADS (RESTOCK) ---
