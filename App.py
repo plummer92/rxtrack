@@ -135,130 +135,146 @@ def clean_dataframe(df):
 
 def clean_activity_log(df):
     """
-    Clean Device Activity Log (Add/Pend) using AffectedElement and ActivityType.
-    Implements robust parsing and Min/Max merging logic with proper normalization.
-    Option A: Standard Stock ONLY toggles flag, does NOT modify min/max.
+    Full Device Activity Log parser.
+    Matches TAB-12 behavior exactly.
+    Extracts (Location, Med ID, Qty) and merges Min/Max rows.
     """
+
     df = df.copy()
 
-    # Normalize columns
-    df.columns = df.columns.str.strip().str.replace(" ", "")
+    # Normalize headers
+    df.columns = df.columns.str.strip()
 
-    df = df.rename(columns={
+    # Required columns based on your CSV
+    colmap = {
         "UserName": "user_name",
-        "Device": "device",
+        "DispensingDeviceName": "device",
         "TransactionDateTime": "dt",
-        "Action": "action_type",
         "ActivityType": "activity_type",
         "AffectedElement": "raw_element"
-    })
+    }
 
-    # Ensure timestamps
+    # Rename columns safely
+    for k, v in colmap.items():
+        if k in df.columns:
+            df.rename(columns={k: v}, inplace=True)
+
+    # Ensure timestamp column exists
+    if "dt" not in df.columns:
+        raise ValueError("Missing TransactionDateTime / dt column in Activity Log")
+
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"])
 
+    # Ensure raw_element is string
     raw = df["raw_element"].astype(str)
 
-    # --------------------------------------------
-    # 1. Extract LOCATION, MED_ID, and QTY
-    # --------------------------------------------
-
-    # Location = everything before "("
+    # ----------------------------------------------------
+    # 1) Extract LOCATION (drawer text)
+    # ----------------------------------------------------
     df["location"] = raw.str.extract(r"^(.*?)\s*\(")[0].fillna(raw)
 
-    # Med ID = text inside parentheses
+    # ----------------------------------------------------
+    # 2) Extract MED ID inside parentheses
+    # ----------------------------------------------------
     df["med_id"] = raw.str.extract(r"\((.*?)\)")[0]
+    df = df.dropna(subset=["med_id"])
 
-    # Qty = number after colon
+    # ----------------------------------------------------
+    # 3) Extract QTY -> value after colon
+    # ----------------------------------------------------
     df["qty_extracted"] = (
         raw.str.extract(r":\s*([0-9]+)")[0]
         .astype(float)
         .fillna(0)
     )
 
-    # Filter non-med rows
-    df = df.dropna(subset=["med_id"])
+    # ----------------------------------------------------
+    # 4) Identify MIN / MAX
+    # ----------------------------------------------------
+    at = df["activity_type"].astype(str)
 
-    # --------------------------------------------
-    # 2. Normalize ActivityType → detect Min / Max / Standard Stock
-    # --------------------------------------------
-
-    atype = (
-        df["activity_type"]
-        .astype(str)
-        .str.strip()
-        .str.replace(r"\s+", " ", regex=True)
-        .str.lower()
+    df["temp_min"] = np.where(
+        at.str.contains("Refill Point Min", case=False),
+        df["qty_extracted"],
+        np.nan
     )
 
-    df["is_min"] = atype.str.contains("min")
-    df["is_max"] = atype.str.contains("max")
-    df["is_standard"] = atype.str.contains("standard")
+    df["temp_max"] = np.where(
+        at.str.contains("Par Max Quantity", case=False),
+        df["qty_extracted"],
+        np.nan
+    )
 
-    # Assign values
-    df["temp_min"] = np.where(df["is_min"], df["qty_extracted"], np.nan)
-    df["temp_max"] = np.where(df["is_max"], df["qty_extracted"], np.nan)
+    # Standard Stock toggle
+    df["is_standard"] = at.str.contains("Standard", case=False)
 
-    # Non-Min/Max events (ex: Add, Capacity, Pend) → treat qty as Max
-    df.loc[(~df["is_min"]) & (~df["is_max"]), "temp_max"] = df["qty_extracted"]
+    # Generic Add events count as Max
+    df.loc[
+        (~at.str.contains("Min", case=False)) &
+        (~at.str.contains("Max", case=False)),
+        "temp_max"
+    ] = df["qty_extracted"]
 
-    # --------------------------------------------
-    # 3. Merge Min + Max rows within 2 minutes (same tech+device+med)
-    # --------------------------------------------
+    # ----------------------------------------------------
+    # 5) Merge events (Min + Max in same drawer & same med)
+    # ----------------------------------------------------
     df = df.sort_values(["user_name", "device", "med_id", "dt"])
 
-    df["prev_dt"] = df.groupby(["user_name", "device", "med_id"])["dt"].shift(1)
-    df["time_gap"] = (df["dt"] - df["prev_dt"]).dt.total_seconds().fillna(999)
+    df["prev_dt"] = df.groupby(
+        ["user_name", "device", "med_id"]
+    )["dt"].shift(1)
 
-    df["new_group"] = (df["time_gap"] > 120).astype(int)
-    df["group_id"] = df.groupby(["user_name", "device", "med_id"])["new_group"].cumsum()
+    df["gap"] = (df["dt"] - df["prev_dt"]).dt.total_seconds().fillna(999)
+
+    df["new_group"] = (df["gap"] > 120).astype(int)
+    df["group_id"] = df.groupby(
+        ["user_name", "device", "med_id"]
+    )["new_group"].cumsum()
 
     merged = df.groupby(
         ["user_name", "device", "med_id", "location", "group_id"],
         as_index=False
     ).agg({
-        "dt": "min",           # Use earliest timestamp
-        "temp_min": "max",     # Combine Min
-        "temp_max": "max",     # Combine Max
-        "is_standard": "max"   # Checkbox flag
+        "dt": "min",
+        "temp_min": "max",
+        "temp_max": "max",
+        "is_standard": "max"
     })
 
-    # Final numeric cleanup
     merged["temp_min"] = merged["temp_min"].fillna(0).astype(int)
     merged["temp_max"] = merged["temp_max"].fillna(0).astype(int)
 
-    # --------------------------------------------
-    # 4. Build DB row format
-    # --------------------------------------------
-
+    # ----------------------------------------------------
+    # 6) Build the med_desc field exactly like your UI expects
+    # ----------------------------------------------------
     merged["med_desc"] = (
-        merged["location"]
-        + " | StdStock: "
-        + merged["is_standard"].apply(lambda x: "☑️" if x else "☐")
+        merged["location"] +
+        " | StdStock: " +
+        merged["is_standard"].apply(lambda x: "☑️" if x else "☐")
     )
 
+    # Database-ready fields
     merged["event_type"] = "Config Change"
-
     merged["qty"] = merged["temp_max"]
     merged["beginning_qty"] = merged["temp_min"]
     merged["ending_qty"] = merged["temp_max"]
-
     merged["discrepancy_qty"] = 0
     merged["discrepancy_reason"] = None
     merged["resolution_dt"] = None
 
     merged["dt"] = merged["dt"].astype(str)
+
     merged["pk"] = merged.apply(lambda r: generate_pk(r), axis=1)
 
-    return merged[
-        [
-            "user_name", "device", "med_id", "med_desc",
-            "event_type", "dt", "qty",
-            "beginning_qty", "ending_qty",
-            "discrepancy_qty", "discrepancy_reason",
-            "resolution_dt", "pk"
-        ]
-    ]
+    return merged[[
+        "user_name", "device", "med_id", "med_desc",
+        "event_type", "dt", "qty",
+        "beginning_qty", "ending_qty",
+        "discrepancy_qty", "discrepancy_reason",
+        "resolution_dt", "pk"
+    ]]
+
 
 def clean_cost_dataframe(df):
     df = df.copy()
