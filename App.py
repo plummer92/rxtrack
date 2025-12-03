@@ -1,7 +1,7 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (REVAMPED)
+# RXTRACK: EXECUTIVE DASHBOARD (REVAMPED v2)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Clean separation of Transactional vs Configuration data
+# Features: Sankey Flow, Financial Trends, Config Analyzer
 ###############################################
 
 import streamlit as st
@@ -11,6 +11,7 @@ import hashlib
 import psycopg2
 from psycopg2.extras import execute_batch
 import plotly.express as px
+import plotly.graph_objects as go  # Added for Sankey
 from datetime import datetime, timedelta, date
 import re
 
@@ -229,7 +230,7 @@ def insert_batch(df, table_name):
         conn.close()
 
 ###########################################################
-#            ANALYTICS LOGIC (DUAL LOADERS)
+#             ANALYTICS LOGIC (DUAL LOADERS)
 ###########################################################
 @st.cache_data(ttl=300)
 def load_events_data(start_date, end_date):
@@ -293,6 +294,7 @@ def load_config_data(start_date, end_date):
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M:%S %p')
         df['Standard Stock'] = df['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
         df['Activity'] = df['action_type'] + " (" + df['activity_category'] + ")"
+        df['Hour'] = df['dt'].dt.hour
     return df
 
 ###########################################################
@@ -351,7 +353,7 @@ with st.sidebar:
                         insert_batch(clean, "events")
                     elif upload_type == "Device Activity Log (Pends)":
                         clean = clean_activity_log(raw)
-                        insert_batch(clean, "config_events") # SAVES TO NEW TABLE
+                        insert_batch(clean, "config_events")
                     elif upload_type == "Financial Price List":
                         clean = clean_cost_dataframe(raw)
                         insert_batch(clean, "med_costs")
@@ -369,7 +371,7 @@ if df.empty and df_config.empty:
 
 # --- TABS ---
 tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.tabs([
-    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends", "🚚 Loads", "⚡ Efficiency", "🔍 Drill Down"
+    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Loads", "⚡ Efficiency", "🔍 Drill Down"
 ])
 
 # --- TAB 1: OVERVIEW ---
@@ -389,56 +391,124 @@ with tab_over:
         top_slow = med_speed.sort_values('machine_time_sec', ascending=False).head(10)
         st.plotly_chart(px.bar(top_slow, x='machine_time_sec', y='med_desc', orientation='h', title="Slowest Meds (Avg Sec)"))
 
-# --- TAB 2: PROCESS MINING ---
+# --- TAB 2: PROCESS MINING (SANKEY UPDATED) ---
 with tab_mine:
     if not df.empty:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("#### 🕵️ Idle Time")
-            idle_events = df[(df['gap_minutes'] > 20) & (df['gap_minutes'] < 480)].copy()
-            if not idle_events.empty:
-                idle_stats = idle_events.groupby('user_name')['gap_minutes'].sum().reset_index().sort_values('gap_minutes', ascending=False).head(10)
-                st.plotly_chart(px.bar(idle_stats, x='gap_minutes', y='user_name', orientation='h', title="Total Idle Minutes"))
-        with c2:
-            st.markdown("#### 🛣️ Common Paths")
-            paths = df[df['device'] != df['prev_device']].copy()
-            path_stats = paths.groupby('path_taken').agg(Count=('gap_minutes', 'count'), Avg_Min=('gap_minutes', 'mean')).reset_index()
-            st.dataframe(path_stats.sort_values('Count', ascending=False).head(10), hide_index=True, use_container_width=True)
+        st.markdown("### 🔄 Workflow Visualization")
+        
+        # Filter for movements between DIFFERENT devices only
+        moves = df[df['device'] != df['prev_device']].dropna(subset=['prev_device', 'device']).copy()
+        
+        if not moves.empty:
+            # Count the frequency of each path
+            path_counts = moves.groupby(['prev_device', 'device']).size().reset_index(name='count')
+            
+            # Create a list of all unique nodes (devices/locations)
+            all_nodes = list(pd.concat([path_counts['prev_device'], path_counts['device']]).unique())
+            node_map = {node: i for i, node in enumerate(all_nodes)}
+            
+            # Map source/target to indices
+            path_counts['source_idx'] = path_counts['prev_device'].map(node_map)
+            path_counts['target_idx'] = path_counts['device'].map(node_map)
+            
+            # Build the Sankey Figure
+            fig_sankey = go.Figure(data=[go.Sankey(
+                node=dict(
+                    pad=15,
+                    thickness=20,
+                    line=dict(color="black", width=0.5),
+                    label=all_nodes,
+                    color="blue"
+                ),
+                link=dict(
+                    source=path_counts['source_idx'],
+                    target=path_counts['target_idx'],
+                    value=path_counts['count'],
+                    color='rgba(0,0,0, 0.2)'  # Translucent gray links
+                )
+            )])
+            
+            fig_sankey.update_layout(title_text="Technician Movement Flow", font_size=10, height=600)
+            st.plotly_chart(fig_sankey, use_container_width=True)
+            
+            with st.expander("View Raw Path Data"):
+                 st.dataframe(path_counts.sort_values('count', ascending=False), use_container_width=True)
+        else:
+            st.info("Not enough movement data to generate a flow chart.")
 
-# --- TAB 3: COMPLIANCE ---
+# --- TAB 3: COMPLIANCE (FINANCIALS ADDED) ---
 with tab_comp:
     if not df.empty:
         disc_df = df[df['discrepancy_qty'] != 0].copy() if 'discrepancy_qty' in df.columns else pd.DataFrame()
+        
         c1, c2 = st.columns(2)
         c1.metric("Count Errors", len(disc_df))
-        loss = (disc_df['discrepancy_qty'] * disc_df['cost_per_unit']).sum() if not disc_df.empty else 0
-        c2.metric("Financial Variance", f"${loss:,.2f}")
+        
+        # Financial Logic
         if not disc_df.empty:
-            st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty']], use_container_width=True)
+            disc_df['abs_variance'] = disc_df['discrepancy_qty'].abs() * disc_df['cost_per_unit']
+            total_loss = disc_df['abs_variance'].sum()
+            c2.metric("Variance Value (Risk)", f"${total_loss:,.2f}")
+            
+            st.divider()
+            
+            # Financial Trend Chart
+            st.markdown("#### 💸 Cost of Variance Over Time")
+            daily_loss = disc_df.groupby('Date')['abs_variance'].sum().reset_index()
+            fig_fin = px.bar(daily_loss, x='Date', y='abs_variance', title="Daily Financial Risk (Absolute Variance)")
+            st.plotly_chart(fig_fin, use_container_width=True)
+            
+            st.markdown("#### 📝 Discrepancy Details")
+            st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'cost_per_unit', 'abs_variance']], use_container_width=True)
 
-# --- TAB 4: PENDS (CONFIG) - READS NEW TABLE ---
+# --- TAB 4: PENDS ANALYZER (UPDATED) ---
 with tab_pends:
-    st.markdown("### 📥 Inventory Configuration (Adds & Pends)")
+    st.markdown("### 📥 Inventory Configuration (Analyzer)")
     if not df_config.empty:
-        c_f1, c_f2, c_f3 = st.columns(3)
-        filter_user = c_f1.multiselect("Tech", sorted([x for x in df_config['user_name'].unique() if x is not None]))
-        filter_device = c_f2.multiselect("Device", sorted([x for x in df_config['device'].unique() if x is not None]))
+        c_f1, c_f2 = st.columns(2)
+        filter_user = c_f1.multiselect("Filter Tech", sorted([x for x in df_config['user_name'].unique() if x is not None]))
+        filter_device = c_f2.multiselect("Filter Device", sorted([x for x in df_config['device'].unique() if x is not None]))
         
         pends_view = df_config.copy()
         if filter_user: pends_view = pends_view[pends_view['user_name'].isin(filter_user)]
         if filter_device: pends_view = pends_view[pends_view['device'].isin(filter_device)]
         
+        # KPIs
         c1, c2, c3 = st.columns(3)
         c1.metric("Config Changes", f"{len(pends_view):,}")
-        c2.metric("Max Capacity Added", f"{int(pends_view['max_qty'].sum()):,}")
-        c3.metric("Unique Meds", pends_view['med_id'].nunique())
+        c2.metric("Capacity Added", f"{int(pends_view['max_qty'].sum()):,}")
+        c3.metric("Unique Meds Touched", pends_view['med_id'].nunique())
         
-        st.markdown("#### 📝 Detailed Config Log")
-        # CLEAN COLUMNS ARE NATIVE NOW
-        st.dataframe(
-            pends_view[['Timestamp', 'user_name', 'device', 'location', 'med_id', 'min_qty', 'max_qty', 'Standard Stock', 'Activity']], 
-            use_container_width=True, hide_index=True
-        )
+        st.divider()
+        
+        # 1. Top Meds Chart
+        c_chart1, c_chart2 = st.columns(2)
+        with c_chart1:
+            st.markdown("#### 💊 Top Configured Meds")
+            top_meds = pends_view['med_id'].value_counts().head(10).reset_index()
+            top_meds.columns = ['Med ID', 'Count']
+            st.plotly_chart(px.bar(top_meds, x='Count', y='Med ID', orientation='h'), use_container_width=True)
+            
+        # 2. Top Devices Chart
+        with c_chart2:
+            st.markdown("#### 📟 High Traffic Devices (Pends)")
+            top_dev = pends_view['device'].value_counts().head(10).reset_index()
+            top_dev.columns = ['Device', 'Count']
+            st.plotly_chart(px.bar(top_dev, x='Count', y='Device', orientation='h'), use_container_width=True)
+            
+        # 3. Time of Day Heatmap/Bar
+        st.markdown("#### 🕒 Configuration Activity by Hour")
+        hourly_counts = pends_view.groupby('Hour').size().reset_index(name='Events')
+        fig_time = px.bar(hourly_counts, x='Hour', y='Events', title="When are pends happening?", 
+                          labels={'Hour': 'Hour of Day (24h)'})
+        fig_time.update_layout(xaxis=dict(tickmode='linear', dtick=1))
+        st.plotly_chart(fig_time, use_container_width=True)
+
+        with st.expander("See Raw Config Data"):
+            st.dataframe(
+                pends_view[['Timestamp', 'user_name', 'device', 'location', 'med_id', 'min_qty', 'max_qty', 'Standard Stock', 'Activity']], 
+                use_container_width=True, hide_index=True
+            )
     else:
         st.info("No Config Data found in this date range. Upload 'Device Activity Log'.")
 
