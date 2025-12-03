@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v4)
+# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v5)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Tab 7 Added User/Device Filters.
-#        Added 'Activity Type' column to explain "Scans".
+# Fixes: Tab 7 now displays DETAILED rows (one per scan) 
+#        instead of grouping them, while keeping Dwell/Walk metrics.
 ###############################################
 
 import streamlit as st
@@ -546,76 +546,74 @@ with tab_effic:
         inefficient = effic_stats[(effic_stats['Trips'] >= 3) & (effic_stats['Avg_Added'] < 3)].sort_values('Trips', ascending=False).head(15)
         st.plotly_chart(px.bar(inefficient, x='Trips', y='med_desc', orientation='h', title="High Effort, Low Yield"))
 
-# --- TAB 7: DRILL DOWN (SESSION EXPLORER) ---
+# --- TAB 7: DRILL DOWN (SESSION EXPLORER - DETAILED ROWS) ---
 with tab_drill:
     if not df.empty:
         st.header("🔍 Session Explorer (Dwell & Walk Times)")
         
-        # 1. Aggregate Transactions into Sessions
-        # Group by session_id to get Start/End times per visit
-        sessions = df.groupby('session_id').agg({
+        # 1. Calculate Session Metrics (Aggregated Level)
+        # We perform aggregation solely to calculate Start/End times, Dwell, and Walk metrics.
+        session_metrics = df.groupby('session_id').agg({
             'user_name': 'first',
             'device': 'first',
-            'dt': ['min', 'max'],
-            'pk': 'count',
-            'med_desc': lambda x: ", ".join(sorted(list(set(str(v) for v in x.dropna().unique())))),
-            'event_type': lambda x: ", ".join(sorted(list(set(str(v) for v in x.dropna().unique()))))
+            'dt': ['min', 'max']
         }).reset_index()
+        session_metrics.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time']
         
-        # Flatten columns
-        sessions.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Meds Scanned', 'Activity Type']
+        # Calculate Dwell Time
+        session_metrics['dwell_seconds'] = (session_metrics['End Time'] - session_metrics['Start Time']).dt.total_seconds()
         
-        # Calculate Dwell Time (Duration on machine)
-        sessions['dwell_seconds'] = (sessions['End Time'] - sessions['Start Time']).dt.total_seconds()
+        # Calculate Walk Time (Next Session Start - Current Session End)
+        session_metrics = session_metrics.sort_values(['User', 'Start Time'])
+        session_metrics['next_start'] = session_metrics.groupby('User')['Start Time'].shift(-1)
+        session_metrics['walk_seconds'] = (session_metrics['next_start'] - session_metrics['End Time']).dt.total_seconds()
         
-        # Calculate Walk Time (Gap to next session)
-        sessions = sessions.sort_values(['User', 'Start Time'])
-        sessions['next_start'] = sessions.groupby('User')['Start Time'].shift(-1)
-        
-        # Walk time is valid only if moving to a different session (implies gap or new device)
-        # User asked: "walking time would be the time that they finished on it and the time between that and when they move to a new machine"
-        sessions['walk_seconds'] = (sessions['next_start'] - sessions['End Time']).dt.total_seconds()
-        
-        # Filter Logic
+        # 2. Filter Interface
         with st.expander("⏳ Session Filters (Time & Attributes)", expanded=True):
             c_fill1, c_fill2, c_fill3, c_fill4 = st.columns(4)
             
-            # Attribute Filters
-            all_users = sorted(sessions['User'].unique())
-            all_devices = sorted(sessions['Device'].unique())
+            all_users = sorted(session_metrics['User'].unique())
+            all_devices = sorted(session_metrics['Device'].unique())
             
             sel_users = c_fill1.multiselect("Filter User", all_users)
             sel_devices = c_fill2.multiselect("Filter Device", all_devices)
-
-            # Time Filters
-            dwell_range = c_fill3.slider("Dwell Time (sec)", 0, 3600, (0, 3600), step=10, help="Time spent standing at the machine.")
-            walk_range = c_fill4.slider("Walk Time (sec)", 0, 7200, (0, 7200), step=60, help="Time taken to move to the next machine (or break).")
-        
-        # Apply Filters
-        if sel_users:
-            sessions = sessions[sessions['User'].isin(sel_users)]
-        if sel_devices:
-            sessions = sessions[sessions['Device'].isin(sel_devices)]
             
-        filtered_sessions = sessions[
-            (sessions['dwell_seconds'] >= dwell_range[0]) & 
-            (sessions['dwell_seconds'] <= dwell_range[1]) & 
-            (sessions['walk_seconds'] >= walk_range[0]) &
-            (sessions['walk_seconds'] <= walk_range[1])
-        ].copy()
+            dwell_range = c_fill3.slider("Dwell Time (sec)", 0, 3600, (0, 3600), step=10, help="Time spent standing at the machine.")
+            walk_range = c_fill4.slider("Walk Time (sec)", 0, 7200, (0, 7200), step=60, help="Time taken to move to the next machine.")
         
-        # Formatting for Display
-        filtered_sessions['Dwell Time'] = filtered_sessions['dwell_seconds'].apply(seconds_to_mmss)
-        filtered_sessions['Walk Time'] = filtered_sessions['walk_seconds'].apply(seconds_to_mmss)
+        # 3. Apply Filters to Metrics
+        if sel_users:
+            session_metrics = session_metrics[session_metrics['User'].isin(sel_users)]
+        if sel_devices:
+            session_metrics = session_metrics[session_metrics['Device'].isin(sel_devices)]
+            
+        valid_sessions = session_metrics[
+            (session_metrics['dwell_seconds'] >= dwell_range[0]) & 
+            (session_metrics['dwell_seconds'] <= dwell_range[1]) & 
+            (session_metrics['walk_seconds'] >= walk_range[0]) &
+            (session_metrics['walk_seconds'] <= walk_range[1])
+        ]['session_id']
         
+        # 4. Join Metrics back to Detailed Data
+        # Filter original DF to only include rows belonging to valid (filtered) sessions
+        detailed_view = df[df['session_id'].isin(valid_sessions)].copy()
+        
+        # Merge the calculated Dwell/Walk times onto the detailed rows
+        detailed_view = detailed_view.merge(session_metrics[['session_id', 'dwell_seconds', 'walk_seconds']], on='session_id', how='left')
+        
+        # Formatting
+        detailed_view['Dwell Time'] = detailed_view['dwell_seconds'].apply(seconds_to_mmss)
+        detailed_view['Walk Time'] = detailed_view['walk_seconds'].apply(seconds_to_mmss)
+        
+        # Display Detailed Rows
         st.dataframe(
-            filtered_sessions[['User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Activity Type', 'Meds Scanned', 'Dwell Time', 'Walk Time']],
+            detailed_view[['user_name', 'device', 'dt', 'event_type', 'med_desc', 'qty', 'Dwell Time', 'Walk Time']].sort_values('dt', ascending=False),
             column_config={
-                "Start Time": st.column_config.DatetimeColumn("Start", format="MMM DD, HH:mm:ss"),
-                "End Time": st.column_config.DatetimeColumn("End", format="MMM DD, HH:mm:ss"),
-                "Transactions": st.column_config.NumberColumn("Scans", help="Number of items scanned in this session"),
-                "Meds Scanned": st.column_config.TextColumn("Meds Scanned", width="medium"),
-                "Activity Type": st.column_config.TextColumn("Activity Type", width="medium")
+                "dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"),
+                "qty": st.column_config.NumberColumn("Qty"),
+                "Dwell Time": st.column_config.TextColumn("Session Dwell", help="Total time user spent on machine for this session"),
+                "Walk Time": st.column_config.TextColumn("Walk To Next", help="Time taken to move to the next task")
             },
-            use_container_width=True
+            use_container_width=True,
+            hide_index=True
         )
