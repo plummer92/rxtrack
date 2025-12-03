@@ -1,8 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (SLIDER FIX)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL CONSOLIDATED v6)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Resolved "Slider min_value must be less than max_value" crash
-#        when DB has 0 or 1 day of data.
+# Features: 
+#   1. Slider Crash Fix (Handles single-day data)
+#   2. Pharmacy Workflow (New 'pharmacy_orders' table)
+#   3. Session Analytics (Detailed Drill-down)
 ###############################################
 
 import streamlit as st
