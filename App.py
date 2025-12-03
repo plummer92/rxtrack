@@ -1,7 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (VISUAL FIX)
+# RXTRACK: EXECUTIVE DASHBOARD (SORTING FIX)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Restored Sankey (Top 50) with High Contrast for Dark Mode
+# Fixes: Timestamps now sort chronologically (using datetime objects) 
+#        while displaying in formatted military time.
 ###############################################
 
 import streamlit as st
@@ -441,7 +442,18 @@ with tab_comp:
             st.plotly_chart(fig_fin, use_container_width=True)
             
             st.markdown("#### 📝 Discrepancy Details")
-            st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'cost_per_unit', 'abs_variance']], use_container_width=True)
+            st.dataframe(
+                disc_df[['dt', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'cost_per_unit', 'abs_variance']], 
+                column_config={
+                    "dt": st.column_config.DatetimeColumn(
+                        "Timestamp",
+                        format="MMM DD, HH:mm:ss"
+                    ),
+                    "cost_per_unit": st.column_config.NumberColumn("Cost/Unit", format="$%.2f"),
+                    "abs_variance": st.column_config.NumberColumn("Variance Value", format="$%.2f")
+                },
+                use_container_width=True
+            )
 
 # --- TAB 4: PENDS ANALYZER ---
 with tab_pends:
@@ -488,7 +500,13 @@ with tab_pends:
 
         with st.expander("See Raw Config Data"):
             st.dataframe(
-                pends_view[['Timestamp', 'user_name', 'device', 'location', 'med_id', 'min_qty', 'max_qty', 'Standard Stock', 'Activity']], 
+                pends_view[['dt', 'user_name', 'device', 'location', 'med_id', 'min_qty', 'max_qty', 'Standard Stock', 'Activity']], 
+                column_config={
+                    "dt": st.column_config.DatetimeColumn(
+                        "Timestamp",
+                        format="MMM DD, HH:mm:ss"
+                    )
+                },
                 use_container_width=True, hide_index=True
             )
     else:
@@ -499,7 +517,16 @@ with tab_loads:
     loads_df = df[df['event_type'].astype(str).str.lower().str.contains('load|unload|refill')].copy() if not df.empty else pd.DataFrame()
     if not loads_df.empty:
         st.markdown("### 🚚 Stock Movement")
-        st.dataframe(loads_df[['Timestamp', 'user_name', 'device', 'event_type', 'med_desc', 'qty']], use_container_width=True)
+        st.dataframe(
+            loads_df[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']], 
+            column_config={
+                "dt": st.column_config.DatetimeColumn(
+                    "Timestamp",
+                    format="MMM DD, HH:mm:ss"
+                )
+            },
+            use_container_width=True
+        )
 
 # --- TAB 6: EFFICIENCY ---
 with tab_effic:
@@ -513,4 +540,13 @@ with tab_effic:
 with tab_drill:
     if not df.empty:
         st.header("🔍 Transaction Explorer")
-        st.dataframe(df[['Timestamp', 'user_name', 'device', 'event_type', 'med_desc', 'qty']].sort_values('Timestamp', ascending=False), use_container_width=True, hide_index=True)
+        st.dataframe(
+            df[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']].sort_values('dt', ascending=False), 
+            column_config={
+                "dt": st.column_config.DatetimeColumn(
+                    "Timestamp",
+                    format="MMM DD, HH:mm:ss"
+                )
+            },
+            use_container_width=True, hide_index=True
+        )
