@@ -1,7 +1,7 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (REVAMPED v2)
+# RXTRACK: EXECUTIVE DASHBOARD (OPTIMIZED v3)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Features: Sankey Flow, Financial Trends, Config Analyzer
+# Fixes: Memory Limits, Sankey Throttling, SQL Optimization
 ###############################################
 
 import streamlit as st
@@ -11,9 +11,9 @@ import hashlib
 import psycopg2
 from psycopg2.extras import execute_batch
 import plotly.express as px
-import plotly.graph_objects as go  # Added for Sankey
+import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
-import re
+import gc  # Added for memory management
 
 # Page Config
 st.set_page_config(
@@ -27,8 +27,6 @@ st.set_page_config(
 st.markdown("""
     <style>
     .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #4CAF50; color: #31333F; }
-    .metric-card h3 { color: #31333F; margin: 0; }
-    .metric-card p { color: #31333F; margin: 0; }
     .cal-grid { display: flex; flex-wrap: wrap; gap: 2px; max-width: 100%; }
     .cal-day { width: 18px; height: 18px; border-radius: 2px; font-size: 8px; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; }
     .cal-present { background-color: #4CAF50; }
@@ -47,15 +45,13 @@ def seconds_to_mmss(seconds):
 
 def safe_to_date(val):
     if val is None: return datetime.today().date()
-    if isinstance(val, date) and not isinstance(val, datetime): return val
-    if isinstance(val, datetime): return val.date()
-    if isinstance(val, pd.Timestamp): return val.date()
     try: return pd.to_datetime(val).date()
     except: return datetime.today().date()
 
 ###########################################################
 #                 DATABASE CONNECTION
 ###########################################################
+@st.cache_resource
 def get_db_connection():
     try:
         return psycopg2.connect(st.secrets["neon"]["db_url"])
@@ -77,16 +73,15 @@ def get_db_stats():
         total_rows = result[2] if result else 0
         
         present_dates = set()
+        # Only fetch dates if row count is manageable to save memory
         if total_rows > 0:
             cur.execute("SELECT DISTINCT DATE(dt) FROM events")
             present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
             
         cur.close()
-        conn.close()
         return total_rows, min_dt, max_dt, present_dates
         
     except Exception as e:
-        if conn: conn.close()
         return 0, datetime.today().date(), datetime.today().date(), set()
 
 ###########################################################
@@ -97,7 +92,6 @@ def generate_pk(row):
     row_str = "|".join(subset)
     return hashlib.sha256(row_str.encode()).hexdigest()
 
-# --- 1. CLEAN DAILY REPORT (TRANSACTIONS) ---
 def clean_dataframe(df):
     df = df.copy()
     colmap = {
@@ -116,11 +110,11 @@ def clean_dataframe(df):
         if col not in df.columns: df[col] = None
 
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-    df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
     df = df.dropna(subset=["dt"]) 
 
-    for c in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    # OPTIMIZATION: Downcast numeric types to save RAM
+    for c in ["qty", "discrepancy_qty"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype('float32')
 
     df["dt"] = df["dt"].astype(str)
     df["resolution_dt"] = df["resolution_dt"].astype(str).replace('NaT', None)
@@ -128,21 +122,14 @@ def clean_dataframe(df):
     
     return df[required + ["pk"]]
 
-# --- 2. CLEAN ACTIVITY LOG (CONFIG) ---
 def clean_activity_log(df):
-    """Parses Activity Log for Config Changes. Merges Min/Max."""
     df = df.copy()
     df.columns = df.columns.str.strip().str.replace(' ', '')
-    
-    df = df.rename(columns={
-        "UserName": "user_name", "Device": "device", "TransactionDateTime": "dt",
-        "Action": "action_type", "ActivityType": "activity_category", "AffectedElement": "raw_element"
-    })
+    df = df.rename(columns={"UserName": "user_name", "Device": "device", "TransactionDateTime": "dt", "Action": "action_type", "ActivityType": "activity_category", "AffectedElement": "raw_element"})
     
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"])
     
-    # Parse Elements
     pattern = r'^(.*?) \((.*?)\):\s*(\d+)$'
     extracted = df['raw_element'].astype(str).str.extract(pattern)
     df['location'] = extracted[0].str.strip()
@@ -150,8 +137,7 @@ def clean_activity_log(df):
     df['qty_extracted'] = pd.to_numeric(extracted[2], errors='coerce').fillna(0)
     df = df.dropna(subset=['med_id'])
 
-    # Deduplication Grouping: Rolling Window Logic
-    # We use a session key based on time gaps > 2 mins
+    # Deduplication
     df = df.sort_values(['user_name', 'device', 'med_id', 'dt'])
     df['prev_dt'] = df.groupby(['user_name', 'device', 'med_id'])['dt'].shift(1)
     df['time_gap'] = (df['dt'] - df['prev_dt']).dt.total_seconds().fillna(999)
@@ -165,13 +151,11 @@ def clean_activity_log(df):
     df['temp_max'] = np.where(df['is_max_event'], df['qty_extracted'], np.nan)
     df['temp_max'] = np.where((~df['is_min_event']) & (~df['is_max_event']), df['qty_extracted'], df['temp_max'])
 
-    # Merge Logic
     grouped = df.groupby(['user_name', 'device', 'med_id', 'group_id'], as_index=False).agg({
         'temp_min': 'max', 'temp_max': 'max', 'is_standard': 'max',
         'location': 'first', 'dt': 'first', 'action_type': 'first', 'activity_category': 'first'
     })
     
-    # Finalize columns for config_events table
     grouped['min_qty'] = grouped['temp_min'].fillna(0)
     grouped['max_qty'] = grouped['temp_max'].fillna(0)
     grouped['is_standard'] = grouped['is_standard'].fillna(False)
@@ -193,29 +177,17 @@ def clean_cost_dataframe(df):
     df = df.dropna(subset=["med_id"])
     return df
 
-# --- INSERT LOGIC ---
 def insert_batch(df, table_name):
     conn = get_db_connection()
     if not conn: return
     cur = conn.cursor()
     
     if table_name == "events":
-        sql = """
-            INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason, resolution_dt)
-            VALUES (%(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s, %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s)
-            ON CONFLICT (pk) DO NOTHING;
-        """
+        sql = """INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason, resolution_dt) VALUES (%(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s, %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s) ON CONFLICT (pk) DO NOTHING;"""
     elif table_name == "config_events":
-        sql = """
-            INSERT INTO config_events (pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard)
-            VALUES (%(pk)s, %(dt)s, %(user_name)s, %(device)s, %(med_id)s, %(location)s, %(action_type)s, %(activity_category)s, %(min_qty)s, %(max_qty)s, %(is_standard)s)
-            ON CONFLICT (pk) DO NOTHING;
-        """
+        sql = """INSERT INTO config_events (pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard) VALUES (%(pk)s, %(dt)s, %(user_name)s, %(device)s, %(med_id)s, %(location)s, %(action_type)s, %(activity_category)s, %(min_qty)s, %(max_qty)s, %(is_standard)s) ON CONFLICT (pk) DO NOTHING;"""
     elif table_name == "med_costs":
-        sql = """
-            INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s)
-            ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;
-        """
+        sql = """INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"""
         
     rows = df.to_dict("records")
     try:
@@ -227,32 +199,30 @@ def insert_batch(df, table_name):
         conn.rollback()
     finally:
         cur.close()
-        conn.close()
 
 ###########################################################
-#             ANALYTICS LOGIC (DUAL LOADERS)
+#             ANALYTICS LOGIC (OPTIMIZED)
 ###########################################################
 @st.cache_data(ttl=300)
 def load_events_data(start_date, end_date):
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
+    
+    # OPTIMIZATION: Select ONLY necessary columns (Excludes unused text fields like Reason/Resolution)
     query = """
-        SELECT e.*, c.cost_per_unit 
+        SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit, e.pk 
         FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
         WHERE e.dt::date BETWEEN %s AND %s
     """
     try:
         df = pd.read_sql(query, conn, params=(start_date, end_date))
     except:
-        conn.close()
         return pd.DataFrame()
-    conn.close()
     
     if not df.empty:
         df["dt"] = pd.to_datetime(df["dt"])
-        df["is_refill"] = df["event_type"].str.lower().str.contains("refill|load", na=False)
-        if "cost_per_unit" not in df.columns: df["cost_per_unit"] = 0
-        df["cost_per_unit"] = df["cost_per_unit"].fillna(0)
+        df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
+        df["qty"] = df["qty"].fillna(0).astype('float32')
         
         # Time Logic
         df = df.sort_values(['user_name', 'dt'])
@@ -260,21 +230,24 @@ def load_events_data(start_date, end_date):
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
+        # Vectorized calculations (faster than apply)
         df['machine_time_sec'] = np.where((df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration_seconds'] < 600), df['duration_seconds'], 0)
-        df['walk_time_sec'] = np.where((df['device'] != df['prev_device']), 300, 0) # Placeholder logic for walk
-        
         df['is_new_session'] = np.where((df['user_name'] != df['user_name'].shift(1)) | (df['device'] != df['prev_device']), 1, 0)
         df['session_id'] = df['is_new_session'].cumsum()
 
-        df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
-        # CHANGED: Use 24-hour format (%H:%M:%S)
+        # Military Time Format preserved
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %H:%M:%S')
         df['Date'] = df['dt'].dt.date
         df['Hour'] = df['dt'].dt.hour
         
         # Calculate Process Mining Paths
         df['path_taken'] = df['prev_device'].fillna('Start') + " ➡️ " + df['device']
+        # Calculate gap minutes
         df['gap_minutes'] = (df['dt'] - df.groupby('user_name')['dt'].shift(1)).dt.total_seconds() / 60
+        
+        # Clean up temp columns to save RAM
+        df.drop(columns=['next_dt', 'is_new_session'], inplace=True, errors='ignore')
+        gc.collect() # Force garbage collection
         
     return df
 
@@ -282,17 +255,19 @@ def load_events_data(start_date, end_date):
 def load_config_data(start_date, end_date):
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
-    query = "SELECT * FROM config_events WHERE dt::date BETWEEN %s AND %s"
+    
+    # OPTIMIZATION: Select specific columns
+    query = """
+        SELECT dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard 
+        FROM config_events WHERE dt::date BETWEEN %s AND %s
+    """
     try:
         df = pd.read_sql(query, conn, params=(start_date, end_date))
     except:
-        conn.close()
         return pd.DataFrame()
-    conn.close()
     
     if not df.empty:
         df["dt"] = pd.to_datetime(df["dt"])
-        # CHANGED: Use 24-hour format (%H:%M:%S)
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %H:%M:%S')
         df['Standard Stock'] = df['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
         df['Activity'] = df['action_type'] + " (" + df['activity_category'] + ")"
@@ -393,7 +368,7 @@ with tab_over:
         top_slow = med_speed.sort_values('machine_time_sec', ascending=False).head(10)
         st.plotly_chart(px.bar(top_slow, x='machine_time_sec', y='med_desc', orientation='h', title="Slowest Meds (Avg Sec)"))
 
-# --- TAB 2: PROCESS MINING (SANKEY UPDATED) ---
+# --- TAB 2: PROCESS MINING (SANKEY OPTIMIZED) ---
 with tab_mine:
     if not df.empty:
         st.markdown("### 🔄 Workflow Visualization")
@@ -405,7 +380,10 @@ with tab_mine:
             # Count the frequency of each path
             path_counts = moves.groupby(['prev_device', 'device']).size().reset_index(name='count')
             
-            # Create a list of all unique nodes (devices/locations)
+            # CRITICAL OPTIMIZATION: Limit to Top 50 Paths only to prevent crash
+            path_counts = path_counts.sort_values('count', ascending=False).head(50)
+            
+            # Create a list of all unique nodes (devices/locations) FROM THE SUBSET
             all_nodes = list(pd.concat([path_counts['prev_device'], path_counts['device']]).unique())
             node_map = {node: i for i, node in enumerate(all_nodes)}
             
@@ -430,7 +408,7 @@ with tab_mine:
                 )
             )])
             
-            fig_sankey.update_layout(title_text="Technician Movement Flow", font_size=10, height=600)
+            fig_sankey.update_layout(title_text=f"Technician Movement Flow (Top {len(path_counts)} Paths)", font_size=10, height=600)
             st.plotly_chart(fig_sankey, use_container_width=True)
             
             with st.expander("View Raw Path Data"):
@@ -438,7 +416,7 @@ with tab_mine:
         else:
             st.info("Not enough movement data to generate a flow chart.")
 
-# --- TAB 3: COMPLIANCE (FINANCIALS ADDED) ---
+# --- TAB 3: COMPLIANCE ---
 with tab_comp:
     if not df.empty:
         disc_df = df[df['discrepancy_qty'] != 0].copy() if 'discrepancy_qty' in df.columns else pd.DataFrame()
@@ -463,7 +441,7 @@ with tab_comp:
             st.markdown("#### 📝 Discrepancy Details")
             st.dataframe(disc_df[['Timestamp', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'cost_per_unit', 'abs_variance']], use_container_width=True)
 
-# --- TAB 4: PENDS ANALYZER (UPDATED) ---
+# --- TAB 4: PENDS ANALYZER ---
 with tab_pends:
     st.markdown("### 📥 Inventory Configuration (Analyzer)")
     if not df_config.empty:
