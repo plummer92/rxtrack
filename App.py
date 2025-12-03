@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL CONSOLIDATED v6)
-# Architecture: Dual-Table Strategy (Events vs Config)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL FIX v7)
+# Architecture: Dual-Table Strategy (Events vs Config vs Pharmacy)
 # Features: 
-#   1. Slider Crash Fix (Handles single-day data)
+#   1. CRITICAL FIX: Slider crash protection (min < max check)
 #   2. Pharmacy Workflow (New 'pharmacy_orders' table)
 #   3. Session Analytics (Detailed Drill-down)
 ###############################################
