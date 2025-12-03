@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (DATA CLEANING FIX)
+# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Filters out "Configuration" rows (Drw/Pkt) that were 
-#        polluting the "Slowest Meds" and Efficiency charts.
+# Fixes: Tab 7 now calculates Dwell Time (Time on machine) 
+#        and Walk Time (Time to next machine).
 ###############################################
 
 import streamlit as st
@@ -353,7 +353,7 @@ if df.empty and df_config.empty:
 
 # --- TABS ---
 tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.tabs([
-    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Loads", "⚡ Efficiency", "🔍 Drill Down"
+    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Loads", "⚡ Efficiency", "🔍 Session Explorer"
 ])
 
 # --- TAB 1: OVERVIEW ---
@@ -540,17 +540,59 @@ with tab_effic:
         inefficient = effic_stats[(effic_stats['Trips'] >= 3) & (effic_stats['Avg_Added'] < 3)].sort_values('Trips', ascending=False).head(15)
         st.plotly_chart(px.bar(inefficient, x='Trips', y='med_desc', orientation='h', title="High Effort, Low Yield"))
 
-# --- TAB 7: DRILL DOWN ---
+# --- TAB 7: DRILL DOWN (SESSION EXPLORER) ---
 with tab_drill:
     if not df.empty:
-        st.header("🔍 Transaction Explorer")
+        st.header("🔍 Session Explorer (Dwell & Walk Times)")
+        
+        # 1. Aggregate Transactions into Sessions
+        # Group by session_id to get Start/End times per visit
+        sessions = df.groupby('session_id').agg({
+            'user_name': 'first',
+            'device': 'first',
+            'dt': ['min', 'max'],
+            'pk': 'count'
+        }).reset_index()
+        
+        # Flatten columns
+        sessions.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time', 'Transactions']
+        
+        # Calculate Dwell Time (Duration on machine)
+        sessions['dwell_seconds'] = (sessions['End Time'] - sessions['Start Time']).dt.total_seconds()
+        
+        # Calculate Walk Time (Gap to next session)
+        sessions = sessions.sort_values(['User', 'Start Time'])
+        sessions['next_start'] = sessions.groupby('User')['Start Time'].shift(-1)
+        
+        # Walk time is valid only if moving to a different session (implies gap or new device)
+        # User asked: "walking time would be the time that they finished on it and the time between that and when they move to a new machine"
+        sessions['walk_seconds'] = (sessions['next_start'] - sessions['End Time']).dt.total_seconds()
+        
+        # Filter Logic
+        with st.expander("⏳ Session Filters (Time Filtering)", expanded=True):
+            c_fill1, c_fill2 = st.columns(2)
+            # Default max is large (1 hour dwell, 2 hours walk) to allow exploring outliers
+            dwell_range = c_fill1.slider("Filter by Dwell Time (sec)", 0, 3600, (0, 3600), step=10, help="Time spent standing at the machine.")
+            walk_range = c_fill2.slider("Filter by Walk Time (sec)", 0, 7200, (0, 7200), step=60, help="Time taken to move to the next machine (or break).")
+        
+        # Apply Filters
+        filtered_sessions = sessions[
+            (sessions['dwell_seconds'] >= dwell_range[0]) & 
+            (sessions['dwell_seconds'] <= dwell_range[1]) & 
+            (sessions['walk_seconds'] >= walk_range[0]) &
+            (sessions['walk_seconds'] <= walk_range[1])
+        ].copy()
+        
+        # Formatting for Display
+        filtered_sessions['Dwell Time'] = filtered_sessions['dwell_seconds'].apply(seconds_to_mmss)
+        filtered_sessions['Walk Time'] = filtered_sessions['walk_seconds'].apply(seconds_to_mmss)
+        
         st.dataframe(
-            df[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']].sort_values('dt', ascending=False), 
+            filtered_sessions[['User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Dwell Time', 'Walk Time']],
             column_config={
-                "dt": st.column_config.DatetimeColumn(
-                    "Timestamp",
-                    format="MMM DD, HH:mm:ss"
-                )
+                "Start Time": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
+                "End Time": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
+                "Transactions": st.column_config.NumberColumn("Scans", help="Number of items scanned in this session")
             },
-            use_container_width=True, hide_index=True
+            use_container_width=True
         )
