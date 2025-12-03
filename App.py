@@ -1,7 +1,7 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (STABILITY FIX)
+# RXTRACK: EXECUTIVE DASHBOARD (VISUAL FIX)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: REMOVED SANKEY (Memory Hog), Replaced with lightweight Bar Chart
+# Fixes: Restored Sankey (Top 50) with High Contrast for Dark Mode
 ###############################################
 
 import streamlit as st
@@ -208,7 +208,7 @@ def load_events_data(start_date, end_date):
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
     
-    # OPTIMIZATION: Select ONLY necessary columns (Excludes unused text fields like Reason/Resolution)
+    # OPTIMIZATION: Select ONLY necessary columns
     query = """
         SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit, e.pk 
         FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
@@ -368,7 +368,7 @@ with tab_over:
         top_slow = med_speed.sort_values('machine_time_sec', ascending=False).head(10)
         st.plotly_chart(px.bar(top_slow, x='machine_time_sec', y='med_desc', orientation='h', title="Slowest Meds (Avg Sec)"))
 
-# --- TAB 2: PROCESS MINING (FIXED: BAR CHART ONLY) ---
+# --- TAB 2: PROCESS MINING (SANKEY RESTORED & OPTIMIZED) ---
 with tab_mine:
     if not df.empty:
         st.markdown("### 🔄 Workflow Visualization")
@@ -380,15 +380,38 @@ with tab_mine:
             # Count the frequency of each path
             path_counts = moves.groupby(['prev_device', 'device']).size().reset_index(name='count')
             
-            # STABILITY FIX: Use simple Bar Chart instead of Memory-Heavy Sankey
-            path_counts['Path Name'] = path_counts['prev_device'] + " ➡️ " + path_counts['device']
-            top_paths = path_counts.sort_values('count', ascending=False).head(20)
+            # CRITICAL OPTIMIZATION: Limit to Top 50 Paths to prevent crash
+            path_counts = path_counts.sort_values('count', ascending=False).head(50)
             
-            st.markdown("#### 🏃 Most Frequent Tech Routes")
-            st.plotly_chart(
-                px.bar(top_paths, x='count', y='Path Name', orientation='h', title="Top 20 Common Movements"),
-                use_container_width=True
-            )
+            # Create a list of all unique nodes (devices/locations) FROM THE SUBSET
+            all_nodes = list(pd.concat([path_counts['prev_device'], path_counts['device']]).unique())
+            node_map = {node: i for i, node in enumerate(all_nodes)}
+            
+            # Map source/target to indices
+            path_counts['source_idx'] = path_counts['prev_device'].map(node_map)
+            path_counts['target_idx'] = path_counts['device'].map(node_map)
+            
+            # Build the Sankey Figure
+            fig_sankey = go.Figure(data=[go.Sankey(
+                node=dict(
+                    pad=15,
+                    thickness=20,
+                    line=dict(color="black", width=0.5),
+                    label=all_nodes,
+                    color="#1E90FF"  # Dodger Blue for better node contrast
+                ),
+                link=dict(
+                    source=path_counts['source_idx'],
+                    target=path_counts['target_idx'],
+                    value=path_counts['count'],
+                    # VISIBILITY FIX: Changed from black (0,0,0) to light gray (200,200,200)
+                    # This ensures links are visible in Dark Mode
+                    color='rgba(200, 200, 200, 0.3)' 
+                )
+            )])
+            
+            fig_sankey.update_layout(title_text=f"Technician Movement Flow (Top {len(path_counts)} Paths)", font_size=10, height=600)
+            st.plotly_chart(fig_sankey, use_container_width=True)
             
             with st.expander("View Raw Path Data"):
                  st.dataframe(path_counts.sort_values('count', ascending=False), use_container_width=True)
