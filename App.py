@@ -267,7 +267,8 @@ def load_events_data(start_date, end_date):
         df['session_id'] = df['is_new_session'].cumsum()
 
         df['Machine Time'] = df['machine_time_sec'].apply(seconds_to_mmss)
-        df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M:%S %p')
+        # CHANGED: Use 24-hour format (%H:%M:%S)
+        df['Timestamp'] = df['dt'].dt.strftime('%b %d, %H:%M:%S')
         df['Date'] = df['dt'].dt.date
         df['Hour'] = df['dt'].dt.hour
         
@@ -291,7 +292,8 @@ def load_config_data(start_date, end_date):
     
     if not df.empty:
         df["dt"] = pd.to_datetime(df["dt"])
-        df['Timestamp'] = df['dt'].dt.strftime('%b %d, %I:%M:%S %p')
+        # CHANGED: Use 24-hour format (%H:%M:%S)
+        df['Timestamp'] = df['dt'].dt.strftime('%b %d, %H:%M:%S')
         df['Standard Stock'] = df['is_standard'].apply(lambda x: "☑️ Yes" if x else "☐ No")
         df['Activity'] = df['action_type'] + " (" + df['activity_category'] + ")"
         df['Hour'] = df['dt'].dt.hour
