@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (CENTRAL PHARMACY UPDATE)
+# RXTRACK: EXECUTIVE DASHBOARD (SLIDER FIX)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Added support for 'TransactionDetailReport' (Central Pharmacy Data)
-#        into a new 'pharmacy_orders' table.
+# Fixes: Resolved "Slider min_value must be less than max_value" crash
+#        when DB has 0 or 1 day of data.
 ###############################################
 
 import streamlit as st
@@ -338,9 +338,20 @@ with st.sidebar:
         st.markdown(calendar_html, unsafe_allow_html=True)
     
     st.divider()
-    default_start = max(min_db, max_db - timedelta(days=7))
-    date_range = st.slider("Select Range", min_value=min_db, max_value=max_db, value=(min_db, max_db), format="MM/DD/YY", key=f"slider_{min_db}_{max_db}_{total_rows}")
-    start_date, end_date = date_range
+    
+    # CRITICAL FIX: Prevent slider crash if min_date == max_date (1 day of data or empty DB)
+    if total_rows > 0 and min_db < max_db:
+        default_start = max(min_db, max_db - timedelta(days=7))
+        date_range = st.slider("Select Range", min_value=min_db, max_value=max_db, value=(default_start, max_db), format="MM/DD/YY", key=f"slider_{min_db}_{max_db}_{total_rows}")
+        start_date, end_date = date_range
+    else:
+        # Fallback for single day or empty DB
+        if total_rows > 0:
+             st.info(f"📅 Data available for: {min_db}")
+        else:
+             st.warning("⚠ No Event Data found. Upload 'Daily Transaction Report' to see metrics.")
+        start_date, end_date = min_db, max_db
+        
     st.divider()
     
     st.subheader("📤 Data Upload")
