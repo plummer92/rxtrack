@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (SORTING FIX)
+# RXTRACK: EXECUTIVE DASHBOARD (DATA CLEANING FIX)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Timestamps now sort chronologically (using datetime objects) 
-#        while displaying in formatted military time.
+# Fixes: Filters out "Configuration" rows (Drw/Pkt) that were 
+#        polluting the "Slowest Meds" and Efficiency charts.
 ###############################################
 
 import streamlit as st
@@ -224,6 +224,10 @@ def load_events_data(start_date, end_date):
         df["dt"] = pd.to_datetime(df["dt"])
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
         df["qty"] = df["qty"].fillna(0).astype('float32')
+        
+        # --- DATA CLEANING FIX: Remove Config/Location Rows ---
+        # Filters out rows where 'med_desc' looks like 'Drw 3.2-Pkt A5...'
+        df = df[~df['med_desc'].astype(str).str.contains(r'Drw|Pkt|Cubic', regex=True, case=False, na=False)]
         
         # Time Logic
         df = df.sort_values(['user_name', 'dt'])
