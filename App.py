@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v2)
+# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v3)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Tab 7 Dwell/Walk times now show explicit 'm s' format.
-#        Added 'Meds Scanned' to Session Explorer.
+# Fixes: Tab 7 Session Explorer now shows full dates (MMM DD) 
+#        to allow easier sorting and historical analysis.
 ###############################################
 
 import streamlit as st
@@ -359,7 +359,7 @@ if df.empty and df_config.empty:
 
 # --- TABS ---
 tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.tabs([
-    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Loads", "⚡ Efficiency", "🔍 Session Explorer"
+    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer"
 ])
 
 # --- TAB 1: OVERVIEW ---
@@ -524,9 +524,9 @@ with tab_pends:
 
 # --- TAB 5: LOADS (RESTOCK) ---
 with tab_loads:
-    loads_df = df[df['event_type'].astype(str).str.lower().str.contains('load|unload|refill')].copy() if not df.empty else pd.DataFrame()
+    loads_df = df[df['event_type'].astype(str).str.lower().str.contains('load|unload')].copy() if not df.empty else pd.DataFrame()
     if not loads_df.empty:
-        st.markdown("### 🚚 Stock Movement")
+        st.markdown("### 🚚 Load & Unload Events")
         st.dataframe(
             loads_df[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']], 
             column_config={
@@ -597,8 +597,8 @@ with tab_drill:
         st.dataframe(
             filtered_sessions[['User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Meds Scanned', 'Dwell Time', 'Walk Time']],
             column_config={
-                "Start Time": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
-                "End Time": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
+                "Start Time": st.column_config.DatetimeColumn("Start", format="MMM DD, HH:mm:ss"),
+                "End Time": st.column_config.DatetimeColumn("End", format="MMM DD, HH:mm:ss"),
                 "Transactions": st.column_config.NumberColumn("Scans", help="Number of items scanned in this session"),
                 "Meds Scanned": st.column_config.TextColumn("Meds Scanned", width="medium")
             },
