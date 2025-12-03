@@ -1,10 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.1)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Strict Data Isolation: Pharmacy data ONLY appears in Tab 8.
-#   2. Smart Date Slider: Adapts to range of ALL tables combined.
-#   3. Sidebar: Split counts for Pyxis vs Pharmacy for verification.
+#   1. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
+#   2. Strict Data Isolation: Pharmacy data ONLY appears in Tab 8.
+#   3. Smart Date Slider: Adapts to range of ALL tables combined.
 ###############################################
 
 import streamlit as st
@@ -81,11 +81,12 @@ def get_db_stats():
         
         # 1. Get Date Range (Union of Events + Pharmacy)
         # We use a UNION to find the absolute min/max across both datasets
+        # FIX: Added ::timestamp cast to prevent SQL errors if column types differ (Text vs Timestamp)
         cur.execute("""
             SELECT MIN(dt), MAX(dt) FROM (
-                SELECT dt FROM events
+                SELECT dt::timestamp as dt FROM events
                 UNION ALL
-                SELECT dt FROM pharmacy_orders
+                SELECT dt::timestamp as dt FROM pharmacy_orders
             ) as combined
         """)
         range_result = cur.fetchone()
