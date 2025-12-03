@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v5)
+# RXTRACK: EXECUTIVE DASHBOARD (CENTRAL PHARMACY UPDATE)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Tab 7 now displays DETAILED rows (one per scan) 
-#        instead of grouping them, while keeping Dwell/Walk metrics.
+# Fixes: Added support for 'TransactionDetailReport' (Central Pharmacy Data)
+#        into a new 'pharmacy_orders' table.
 ###############################################
 
 import streamlit as st
@@ -172,6 +172,35 @@ def clean_activity_log(df):
     
     return grouped[['pk', 'dt', 'user_name', 'device', 'med_id', 'location', 'action_type', 'activity_category', 'min_qty', 'max_qty', 'is_standard']]
 
+def clean_pharmacy_report(df):
+    """Cleans the TransactionDetailReport (Central Pharmacy Data)"""
+    df = df.copy()
+    # Map CSV headers to DB columns
+    colmap = {
+        "TranQueueID": "queue_id",
+        "Priority": "priority",
+        "Date / Time": "dt",
+        "Item ID": "med_id",
+        "Description": "med_desc",
+        "Destination": "destination",
+        "User": "user_name",
+        "Quantity": "qty"
+    }
+    df = df.rename(columns=colmap)
+    
+    # Ensure required columns exist
+    for col in colmap.values():
+        if col not in df.columns: df[col] = None
+        
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    df = df.dropna(subset=["dt"])
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+    
+    df["dt"] = df["dt"].astype(str)
+    df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
+    
+    return df[["pk", "queue_id", "priority", "dt", "med_id", "med_desc", "destination", "user_name", "qty"]]
+
 def clean_cost_dataframe(df):
     df = df.copy()
     df.columns = df.columns.str.strip().str.lower()
@@ -195,6 +224,8 @@ def insert_batch(df, table_name):
         sql = """INSERT INTO config_events (pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard) VALUES (%(pk)s, %(dt)s, %(user_name)s, %(device)s, %(med_id)s, %(location)s, %(action_type)s, %(activity_category)s, %(min_qty)s, %(max_qty)s, %(is_standard)s) ON CONFLICT (pk) DO NOTHING;"""
     elif table_name == "med_costs":
         sql = """INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"""
+    elif table_name == "pharmacy_orders":
+        sql = """INSERT INTO pharmacy_orders (pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty) VALUES (%(pk)s, %(queue_id)s, %(priority)s, %(dt)s, %(med_id)s, %(med_desc)s, %(destination)s, %(user_name)s, %(qty)s) ON CONFLICT (pk) DO NOTHING;"""
         
     rows = df.to_dict("records")
     try:
@@ -313,7 +344,8 @@ with st.sidebar:
     st.divider()
     
     st.subheader("📤 Data Upload")
-    upload_type = st.selectbox("Select File Type:", ["Daily Transaction Report", "Device Activity Log (Pends)", "Financial Price List"])
+    # Added new upload type: "Pharmacy Workflow Report"
+    upload_type = st.selectbox("Select File Type:", ["Daily Transaction Report", "Device Activity Log (Pends)", "Financial Price List", "Pharmacy Workflow Report"])
     uploaded = st.file_uploader(f"Upload {upload_type}", type=["csv","xlsx"])
     
     if uploaded:
@@ -329,6 +361,7 @@ with st.sidebar:
                     if upload_type == "Daily Transaction Report" and "username" in row_str and "device" in row_str and "affectedelement" not in row_str: header_row_idx = idx; break
                     if upload_type == "Device Activity Log (Pends)" and "affectedelement" in row_str: header_row_idx = idx; break
                     if upload_type == "Financial Price List" and ("med" in row_str or "id" in row_str) and "cost" in row_str: header_row_idx = idx; break
+                    if upload_type == "Pharmacy Workflow Report" and "tranqueueid" in row_str: header_row_idx = idx; break
                 
                 if header_row_idx is None: st.error("❌ Header not found.")
                 else:
@@ -345,6 +378,9 @@ with st.sidebar:
                     elif upload_type == "Financial Price List":
                         clean = clean_cost_dataframe(raw)
                         insert_batch(clean, "med_costs")
+                    elif upload_type == "Pharmacy Workflow Report":
+                        clean = clean_pharmacy_report(raw)
+                        insert_batch(clean, "pharmacy_orders")
                     st.cache_data.clear()
                     st.rerun()
             except Exception as e: st.error(f"Error: {e}")
