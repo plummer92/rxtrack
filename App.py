@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS)
+# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v2)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Tab 7 now calculates Dwell Time (Time on machine) 
-#        and Walk Time (Time to next machine).
+# Fixes: Tab 7 Dwell/Walk times now show explicit 'm s' format.
+#        Added 'Meds Scanned' to Session Explorer.
 ###############################################
 
 import streamlit as st
@@ -42,7 +42,13 @@ st.markdown("""
 def seconds_to_mmss(seconds):
     if pd.isna(seconds) or seconds < 0: return "-"
     m, s = divmod(int(seconds), 60)
-    return f"{m:02d}:{s:02d}"
+    h, m = divmod(m, 60)
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    elif m > 0:
+        return f"{m}m {s}s"
+    else:
+        return f"{s}s"
 
 def safe_to_date(val):
     if val is None: return datetime.today().date()
@@ -551,11 +557,12 @@ with tab_drill:
             'user_name': 'first',
             'device': 'first',
             'dt': ['min', 'max'],
-            'pk': 'count'
+            'pk': 'count',
+            'med_desc': lambda x: ", ".join(sorted(list(set(str(v) for v in x.dropna().unique()))))
         }).reset_index()
         
         # Flatten columns
-        sessions.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time', 'Transactions']
+        sessions.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Meds Scanned']
         
         # Calculate Dwell Time (Duration on machine)
         sessions['dwell_seconds'] = (sessions['End Time'] - sessions['Start Time']).dt.total_seconds()
@@ -588,11 +595,12 @@ with tab_drill:
         filtered_sessions['Walk Time'] = filtered_sessions['walk_seconds'].apply(seconds_to_mmss)
         
         st.dataframe(
-            filtered_sessions[['User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Dwell Time', 'Walk Time']],
+            filtered_sessions[['User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Meds Scanned', 'Dwell Time', 'Walk Time']],
             column_config={
                 "Start Time": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
                 "End Time": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
-                "Transactions": st.column_config.NumberColumn("Scans", help="Number of items scanned in this session")
+                "Transactions": st.column_config.NumberColumn("Scans", help="Number of items scanned in this session"),
+                "Meds Scanned": st.column_config.TextColumn("Meds Scanned", width="medium")
             },
             use_container_width=True
         )
