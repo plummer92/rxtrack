@@ -1,8 +1,8 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v3)
+# RXTRACK: EXECUTIVE DASHBOARD (SESSION ANALYTICS v4)
 # Architecture: Dual-Table Strategy (Events vs Config)
-# Fixes: Tab 7 Session Explorer now shows full dates (MMM DD) 
-#        to allow easier sorting and historical analysis.
+# Fixes: Tab 7 Added User/Device Filters.
+#        Added 'Activity Type' column to explain "Scans".
 ###############################################
 
 import streamlit as st
@@ -558,11 +558,12 @@ with tab_drill:
             'device': 'first',
             'dt': ['min', 'max'],
             'pk': 'count',
-            'med_desc': lambda x: ", ".join(sorted(list(set(str(v) for v in x.dropna().unique()))))
+            'med_desc': lambda x: ", ".join(sorted(list(set(str(v) for v in x.dropna().unique())))),
+            'event_type': lambda x: ", ".join(sorted(list(set(str(v) for v in x.dropna().unique()))))
         }).reset_index()
         
         # Flatten columns
-        sessions.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Meds Scanned']
+        sessions.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Meds Scanned', 'Activity Type']
         
         # Calculate Dwell Time (Duration on machine)
         sessions['dwell_seconds'] = (sessions['End Time'] - sessions['Start Time']).dt.total_seconds()
@@ -576,13 +577,26 @@ with tab_drill:
         sessions['walk_seconds'] = (sessions['next_start'] - sessions['End Time']).dt.total_seconds()
         
         # Filter Logic
-        with st.expander("⏳ Session Filters (Time Filtering)", expanded=True):
-            c_fill1, c_fill2 = st.columns(2)
-            # Default max is large (1 hour dwell, 2 hours walk) to allow exploring outliers
-            dwell_range = c_fill1.slider("Filter by Dwell Time (sec)", 0, 3600, (0, 3600), step=10, help="Time spent standing at the machine.")
-            walk_range = c_fill2.slider("Filter by Walk Time (sec)", 0, 7200, (0, 7200), step=60, help="Time taken to move to the next machine (or break).")
+        with st.expander("⏳ Session Filters (Time & Attributes)", expanded=True):
+            c_fill1, c_fill2, c_fill3, c_fill4 = st.columns(4)
+            
+            # Attribute Filters
+            all_users = sorted(sessions['User'].unique())
+            all_devices = sorted(sessions['Device'].unique())
+            
+            sel_users = c_fill1.multiselect("Filter User", all_users)
+            sel_devices = c_fill2.multiselect("Filter Device", all_devices)
+
+            # Time Filters
+            dwell_range = c_fill3.slider("Dwell Time (sec)", 0, 3600, (0, 3600), step=10, help="Time spent standing at the machine.")
+            walk_range = c_fill4.slider("Walk Time (sec)", 0, 7200, (0, 7200), step=60, help="Time taken to move to the next machine (or break).")
         
         # Apply Filters
+        if sel_users:
+            sessions = sessions[sessions['User'].isin(sel_users)]
+        if sel_devices:
+            sessions = sessions[sessions['Device'].isin(sel_devices)]
+            
         filtered_sessions = sessions[
             (sessions['dwell_seconds'] >= dwell_range[0]) & 
             (sessions['dwell_seconds'] <= dwell_range[1]) & 
@@ -595,12 +609,13 @@ with tab_drill:
         filtered_sessions['Walk Time'] = filtered_sessions['walk_seconds'].apply(seconds_to_mmss)
         
         st.dataframe(
-            filtered_sessions[['User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Meds Scanned', 'Dwell Time', 'Walk Time']],
+            filtered_sessions[['User', 'Device', 'Start Time', 'End Time', 'Transactions', 'Activity Type', 'Meds Scanned', 'Dwell Time', 'Walk Time']],
             column_config={
                 "Start Time": st.column_config.DatetimeColumn("Start", format="MMM DD, HH:mm:ss"),
                 "End Time": st.column_config.DatetimeColumn("End", format="MMM DD, HH:mm:ss"),
                 "Transactions": st.column_config.NumberColumn("Scans", help="Number of items scanned in this session"),
-                "Meds Scanned": st.column_config.TextColumn("Meds Scanned", width="medium")
+                "Meds Scanned": st.column_config.TextColumn("Meds Scanned", width="medium"),
+                "Activity Type": st.column_config.TextColumn("Activity Type", width="medium")
             },
             use_container_width=True
         )
