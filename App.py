@@ -1,10 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL FIX v7)
-# Architecture: Dual-Table Strategy (Events vs Config vs Pharmacy)
-# Features: 
-#   1. CRITICAL FIX: Slider crash protection (min < max check)
-#   2. Pharmacy Workflow (New 'pharmacy_orders' table)
-#   3. Session Analytics (Detailed Drill-down)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9)
+# Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
+# Fixes: 
+#   1. Strict Data Isolation: Pharmacy data ONLY appears in Tab 8.
+#   2. Smart Date Slider: Adapts to range of ALL tables combined.
+#   3. Sidebar: Split counts for Pyxis vs Pharmacy for verification.
 ###############################################
 
 import streamlit as st
@@ -69,29 +69,48 @@ def get_db_connection():
         return None
 
 def get_db_stats():
+    """
+    Calculates date range across ALL tables so the slider works for everything.
+    Returns separate counts for Pyxis and Pharmacy to ensure data integrity.
+    """
     conn = get_db_connection()
-    if not conn: return 0, datetime.today().date(), datetime.today().date(), set()
+    if not conn: return 0, 0, datetime.today().date(), datetime.today().date(), set()
     
     try:
         cur = conn.cursor()
-        cur.execute("SELECT MIN(dt), MAX(dt), COUNT(*) FROM events")
-        result = cur.fetchone()
         
-        min_dt = safe_to_date(result[0]) if result else datetime.today().date()
-        max_dt = safe_to_date(result[1]) if result else datetime.today().date()
-        total_rows = result[2] if result else 0
+        # 1. Get Date Range (Union of Events + Pharmacy)
+        # We use a UNION to find the absolute min/max across both datasets
+        cur.execute("""
+            SELECT MIN(dt), MAX(dt) FROM (
+                SELECT dt FROM events
+                UNION ALL
+                SELECT dt FROM pharmacy_orders
+            ) as combined
+        """)
+        range_result = cur.fetchone()
+        min_dt = safe_to_date(range_result[0]) if range_result and range_result[0] else datetime.today().date()
+        max_dt = safe_to_date(range_result[1]) if range_result and range_result[1] else datetime.today().date()
         
+        # 2. Get Count for Pyxis Events (Old Data)
+        cur.execute("SELECT COUNT(*) FROM events")
+        rows_events = cur.fetchone()[0]
+        
+        # 3. Get Count for Pharmacy Orders (New Data)
+        cur.execute("SELECT COUNT(*) FROM pharmacy_orders")
+        rows_pharm = cur.fetchone()[0]
+        
+        # 4. Get Calendar Heatmap Data (Focus on Events for now to keep calendar clean)
         present_dates = set()
-        # Only fetch dates if row count is manageable to save memory
-        if total_rows > 0:
+        if rows_events > 0:
             cur.execute("SELECT DISTINCT DATE(dt) FROM events")
             present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
             
         cur.close()
-        return total_rows, min_dt, max_dt, present_dates
+        return rows_events, rows_pharm, min_dt, max_dt, present_dates
         
     except Exception as e:
-        return 0, datetime.today().date(), datetime.today().date(), set()
+        return 0, 0, datetime.today().date(), datetime.today().date(), set()
 
 ###########################################################
 #                 DATA CLEANING & PROCESSING
@@ -241,14 +260,14 @@ def insert_batch(df, table_name):
         cur.close()
 
 ###########################################################
-#             ANALYTICS LOGIC (OPTIMIZED)
+#             ANALYTICS LOGIC (ISOLATED TABLES)
 ###########################################################
 @st.cache_data(ttl=300)
 def load_events_data(start_date, end_date):
+    """ STRICTLY loads only EVENTS table. No Pharmacy data here. """
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
     
-    # OPTIMIZATION: Select ONLY necessary columns
     query = """
         SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit, e.pk 
         FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
@@ -264,8 +283,7 @@ def load_events_data(start_date, end_date):
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
         df["qty"] = df["qty"].fillna(0).astype('float32')
         
-        # --- DATA CLEANING FIX: Remove Config/Location Rows ---
-        # Filters out rows where 'med_desc' looks like 'Drw 3.2-Pkt A5...'
+        # --- DATA CLEANING: Remove Config/Location Rows ---
         df = df[~df['med_desc'].astype(str).str.contains(r'Drw|Pkt|Cubic', regex=True, case=False, na=False)]
         
         # Time Logic
@@ -274,33 +292,28 @@ def load_events_data(start_date, end_date):
         df['duration_seconds'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
-        # Vectorized calculations (faster than apply)
         df['machine_time_sec'] = np.where((df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration_seconds'] < 600), df['duration_seconds'], 0)
         df['is_new_session'] = np.where((df['user_name'] != df['user_name'].shift(1)) | (df['device'] != df['prev_device']), 1, 0)
         df['session_id'] = df['is_new_session'].cumsum()
 
-        # Military Time Format preserved
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %H:%M:%S')
         df['Date'] = df['dt'].dt.date
         df['Hour'] = df['dt'].dt.hour
         
-        # Calculate Process Mining Paths
         df['path_taken'] = df['prev_device'].fillna('Start') + " ➡️ " + df['device']
-        # Calculate gap minutes
         df['gap_minutes'] = (df['dt'] - df.groupby('user_name')['dt'].shift(1)).dt.total_seconds() / 60
         
-        # Clean up temp columns to save RAM
         df.drop(columns=['next_dt', 'is_new_session'], inplace=True, errors='ignore')
-        gc.collect() # Force garbage collection
+        gc.collect() 
         
     return df
 
 @st.cache_data(ttl=300)
 def load_config_data(start_date, end_date):
+    """ STRICTLY loads only CONFIG table. """
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
     
-    # OPTIMIZATION: Select specific columns
     query = """
         SELECT dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard 
         FROM config_events WHERE dt::date BETWEEN %s AND %s
@@ -318,6 +331,28 @@ def load_config_data(start_date, end_date):
         df['Hour'] = df['dt'].dt.hour
     return df
 
+@st.cache_data(ttl=300)
+def load_pharmacy_data(start_date, end_date):
+    """ STRICTLY loads only PHARMACY_ORDERS table. """
+    conn = get_db_connection()
+    if not conn: return pd.DataFrame()
+    
+    query = """
+        SELECT queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+        FROM pharmacy_orders 
+        WHERE dt::date BETWEEN %s AND %s
+    """
+    try:
+        df = pd.read_sql(query, conn, params=(start_date, end_date))
+    except:
+        return pd.DataFrame()
+    
+    if not df.empty:
+        df["dt"] = pd.to_datetime(df["dt"])
+        df['Timestamp'] = df['dt'].dt.strftime('%b %d, %H:%M:%S')
+        df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
+    return df
+
 ###########################################################
 #                 DASHBOARD UI
 ###########################################################
@@ -325,9 +360,15 @@ def load_config_data(start_date, end_date):
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("RxTrack Executive")
-    total_rows, min_db, max_db, present_dates = get_db_stats()
-    with st.expander("💾 Coverage Calendar", expanded=True):
-        st.write(f"**Records:** {total_rows:,}")
+    
+    # 1. Get stats from ALL tables
+    rows_events, rows_pharm, min_db, max_db, present_dates = get_db_stats()
+    
+    with st.expander("💾 Database Status", expanded=True):
+        st.write(f"**Pyxis Events:** {rows_events:,}")
+        st.write(f"**Pharmacy Orders:** {rows_pharm:,}")
+        
+        # Calendar Viz
         delta = (max_db - min_db).days
         calendar_start = max_db - timedelta(days=90) if delta > 90 else min_db
         calendar_html = '<div class="cal-grid">'
@@ -341,23 +382,22 @@ with st.sidebar:
     
     st.divider()
     
-    # CRITICAL FIX: Prevent slider crash if min_date == max_date (1 day of data or empty DB)
-    if total_rows > 0 and min_db < max_db:
+    # 2. Smart Slider (Prevents Crash & Covers ALL data)
+    if min_db < max_db:
         default_start = max(min_db, max_db - timedelta(days=7))
-        date_range = st.slider("Select Range", min_value=min_db, max_value=max_db, value=(default_start, max_db), format="MM/DD/YY", key=f"slider_{min_db}_{max_db}_{total_rows}")
+        date_range = st.slider("Select Range", min_value=min_db, max_value=max_db, value=(default_start, max_db), format="MM/DD/YY")
         start_date, end_date = date_range
     else:
-        # Fallback for single day or empty DB
-        if total_rows > 0:
+        # Fallback if only 1 day of data exists
+        if rows_events > 0 or rows_pharm > 0:
              st.info(f"📅 Data available for: {min_db}")
         else:
-             st.warning("⚠ No Event Data found. Upload 'Daily Transaction Report' to see metrics.")
+             st.warning("⚠ Database Empty.")
         start_date, end_date = min_db, max_db
         
     st.divider()
     
     st.subheader("📤 Data Upload")
-    # Added new upload type: "Pharmacy Workflow Report"
     upload_type = st.selectbox("Select File Type:", ["Daily Transaction Report", "Device Activity Log (Pends)", "Financial Price List", "Pharmacy Workflow Report"])
     uploaded = st.file_uploader(f"Upload {upload_type}", type=["csv","xlsx"])
     
@@ -398,17 +438,18 @@ with st.sidebar:
                     st.rerun()
             except Exception as e: st.error(f"Error: {e}")
 
-# Load BOTH datasets
+# Load ALL datasets
 df = load_events_data(start_date, end_date)
 df_config = load_config_data(start_date, end_date)
+df_pharm = load_pharmacy_data(start_date, end_date)
 
-if df.empty and df_config.empty:
-    st.info("👋 Ready for data.")
+if df.empty and df_config.empty and df_pharm.empty:
+    st.info("👋 Ready for data. Upload files to begin.")
     st.stop()
 
 # --- TABS ---
-tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill = st.tabs([
-    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer"
+tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill, tab_pharm = st.tabs([
+    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow"
 ])
 
 # --- TAB 1: OVERVIEW ---
@@ -601,7 +642,6 @@ with tab_drill:
         st.header("🔍 Session Explorer (Dwell & Walk Times)")
         
         # 1. Calculate Session Metrics (Aggregated Level)
-        # We perform aggregation solely to calculate Start/End times, Dwell, and Walk metrics.
         session_metrics = df.groupby('session_id').agg({
             'user_name': 'first',
             'device': 'first',
@@ -612,7 +652,7 @@ with tab_drill:
         # Calculate Dwell Time
         session_metrics['dwell_seconds'] = (session_metrics['End Time'] - session_metrics['Start Time']).dt.total_seconds()
         
-        # Calculate Walk Time (Next Session Start - Current Session End)
+        # Calculate Walk Time
         session_metrics = session_metrics.sort_values(['User', 'Start Time'])
         session_metrics['next_start'] = session_metrics.groupby('User')['Start Time'].shift(-1)
         session_metrics['walk_seconds'] = (session_metrics['next_start'] - session_metrics['End Time']).dt.total_seconds()
@@ -644,10 +684,7 @@ with tab_drill:
         ]['session_id']
         
         # 4. Join Metrics back to Detailed Data
-        # Filter original DF to only include rows belonging to valid (filtered) sessions
         detailed_view = df[df['session_id'].isin(valid_sessions)].copy()
-        
-        # Merge the calculated Dwell/Walk times onto the detailed rows
         detailed_view = detailed_view.merge(session_metrics[['session_id', 'dwell_seconds', 'walk_seconds']], on='session_id', how='left')
         
         # Formatting
@@ -666,3 +703,46 @@ with tab_drill:
             use_container_width=True,
             hide_index=True
         )
+
+# --- TAB 8: PHARMACY WORKFLOW ---
+with tab_pharm:
+    st.markdown("### 🏥 Central Pharmacy Workflow")
+    if not df_pharm.empty:
+        # KPIs
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Orders", f"{len(df_pharm):,}")
+        critical_count = len(df_pharm[df_pharm['priority'].astype(str).str.contains('STAT|Critical', case=False, na=False)])
+        c2.metric("Critical/STAT Orders", critical_count)
+        top_dest = df_pharm['destination'].mode()[0] if not df_pharm.empty else "N/A"
+        c3.metric("Top Destination", top_dest)
+        
+        st.divider()
+        
+        c_chart1, c_chart2 = st.columns(2)
+        
+        # Chart 1: Priority Breakdown
+        with c_chart1:
+            st.markdown("#### 🚦 Orders by Priority")
+            prio_counts = df_pharm['priority'].value_counts().reset_index()
+            prio_counts.columns = ['Priority', 'Count']
+            st.plotly_chart(px.pie(prio_counts, names='Priority', values='Count', hole=0.4), use_container_width=True)
+            
+        # Chart 2: Top Destinations
+        with c_chart2:
+            st.markdown("#### 📍 Top Delivery Destinations")
+            dest_counts = df_pharm['destination'].value_counts().head(10).reset_index()
+            dest_counts.columns = ['Destination', 'Orders']
+            st.plotly_chart(px.bar(dest_counts, x='Orders', y='Destination', orientation='h'), use_container_width=True)
+            
+        st.markdown("#### 📜 Order Log")
+        st.dataframe(
+            df_pharm[['dt', 'queue_id', 'priority', 'med_desc', 'destination', 'user_name', 'qty']].sort_values('dt', ascending=False),
+            column_config={
+                "dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"),
+                "qty": st.column_config.NumberColumn("Qty"),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("No Pharmacy Workflow data found. Upload 'TransactionDetailReport'.")
