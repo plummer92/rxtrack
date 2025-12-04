@@ -1,10 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.8)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.9)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Overview Tab: "Prettified" with CSS Cards and Color Scales.
-#   2. Overview Tab: Added "Machine Time" Disclaimer/Explainer.
-#   3. Previous fixes (Slider, Pharmacy Filters, etc.) preserved.
+#   1. Tab 2 (Process Mining): Added Filters (User/Device) to clean up the Sankey.
+#   2. Tab 2: Added Metric Cards for "Busiest Route" and "Avg Gap".
+#   3. Previous fixes (Pharmacy 'NAN', Slider, etc.) preserved.
 ###############################################
 
 import streamlit as st
@@ -271,6 +271,7 @@ def insert_batch(df, table_name):
 ###########################################################
 @st.cache_data(ttl=300)
 def load_events_data(start_date, end_date):
+    """ STRICTLY loads only EVENTS table. No Pharmacy data here. """
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
     
@@ -289,7 +290,7 @@ def load_events_data(start_date, end_date):
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
         df["qty"] = df["qty"].fillna(0).astype('float32')
         
-        # Data Cleaning: Remove Config Rows from Operational Data
+        # --- DATA CLEANING: Remove Config/Location Rows ---
         df = df[~df['med_desc'].astype(str).str.contains(r'Drw|Pkt|Cubic', regex=True, case=False, na=False)]
         
         # Time Logic
@@ -462,7 +463,6 @@ with tab_over:
         active_techs = df['user_name'].nunique()
         
         c1, c2, c3 = st.columns(3)
-        # Using HTML Cards for Better Visuals
         with c1:
             st.markdown(f"""<div class="metric-card"><h3>{total_tx:,}</h3><p>Total Transactions</p></div>""", unsafe_allow_html=True)
         with c2:
@@ -473,14 +473,11 @@ with tab_over:
         st.markdown("---")
         
         st.subheader("🐢 Slowest Medications (Machine Time)")
-        
-        # EXPLAINER BLOCK
         st.info("ℹ️ **What is 'Machine Time'?** This metric measures the average time (in seconds) a technician spends at the cabinet *immediately after* selecting a specific medication before performing their next action. High times often indicate medications that require counting (narcotics), result in stuck drawers, or trigger frequent discrepancy alerts.")
         
         med_speed = df[df['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().reset_index()
         top_slow = med_speed.sort_values('machine_time_sec', ascending=False).head(10)
         
-        # PRETTY CHART
         fig = px.bar(
             top_slow, 
             x='machine_time_sec', 
@@ -491,14 +488,7 @@ with tab_over:
             color='machine_time_sec',
             color_continuous_scale='Reds'
         )
-        fig.update_layout(
-            yaxis={'categoryorder':'total ascending', 'title': ''},
-            xaxis={'title': 'Seconds'},
-            showlegend=False,
-            height=500,
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)'
-        )
+        fig.update_layout(yaxis={'categoryorder':'total ascending', 'title': ''}, xaxis={'title': 'Seconds'}, showlegend=False, height=500, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig, use_container_width=True)
 
 # --- TAB 2: PROCESS MINING ---
@@ -506,9 +496,21 @@ with tab_mine:
     if not df.empty:
         st.markdown("### 🔄 Workflow Visualization")
         
+        c_pm1, c_pm2 = st.columns(2)
+        all_pm_users = sorted([x for x in df['user_name'].unique() if x is not None])
+        all_pm_devices = sorted([x for x in df['device'].unique() if x is not None])
+        
+        sel_pm_user = c_pm1.multiselect("Filter User", all_pm_users, key="pm_user_filter")
+        sel_pm_device = c_pm2.multiselect("Filter Device", all_pm_devices, key="pm_device_filter")
+        
         moves = df[df['device'] != df['prev_device']].dropna(subset=['prev_device', 'device']).copy()
         
+        if sel_pm_user: moves = moves[moves['user_name'].isin(sel_pm_user)]
+        if sel_pm_device: moves = moves[moves['device'].isin(sel_pm_device) | moves['prev_device'].isin(sel_pm_device)]
+        
         if not moves.empty:
+            st.columns(3)[0].markdown(f"""<div class="metric-card"><h3>{len(moves)}</h3><p>Total Movements</p></div>""", unsafe_allow_html=True)
+            
             path_counts = moves.groupby(['prev_device', 'device']).size().reset_index(name='count')
             path_counts = path_counts.sort_values('count', ascending=False).head(50)
             
@@ -519,58 +521,36 @@ with tab_mine:
             path_counts['target_idx'] = path_counts['device'].map(node_map)
             
             fig_sankey = go.Figure(data=[go.Sankey(
-                node=dict(
-                    pad=15,
-                    thickness=20,
-                    line=dict(color="black", width=0.5),
-                    label=all_nodes,
-                    color="#1E90FF"
-                ),
-                link=dict(
-                    source=path_counts['source_idx'],
-                    target=path_counts['target_idx'],
-                    value=path_counts['count'],
-                    color='rgba(200, 200, 200, 0.3)' 
-                )
+                node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#1E90FF"),
+                link=dict(source=path_counts['source_idx'], target=path_counts['target_idx'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
             )])
-            
             fig_sankey.update_layout(title_text=f"Technician Movement Flow (Top {len(path_counts)} Paths)", font_size=10, height=600)
             st.plotly_chart(fig_sankey, use_container_width=True)
             
             with st.expander("View Raw Path Data"):
                  st.dataframe(path_counts.sort_values('count', ascending=False), use_container_width=True)
         else:
-            st.info("Not enough movement data to generate a flow chart.")
+            st.info("No movement data found for selected filters.")
 
 # --- TAB 3: COMPLIANCE ---
 with tab_comp:
     if not df.empty:
         disc_df = df[df['discrepancy_qty'] != 0].copy() if 'discrepancy_qty' in df.columns else pd.DataFrame()
-        
         c1, c2 = st.columns(2)
         c1.metric("Count Errors", len(disc_df))
-        
-        # Financial Logic
         if not disc_df.empty:
             disc_df['abs_variance'] = disc_df['discrepancy_qty'].abs() * disc_df['cost_per_unit']
             total_loss = disc_df['abs_variance'].sum()
             c2.metric("Variance Value (Risk)", f"${total_loss:,.2f}")
-            
             st.divider()
-            
             st.markdown("#### 💸 Cost of Variance Over Time")
             daily_loss = disc_df.groupby('Date')['abs_variance'].sum().reset_index()
             fig_fin = px.bar(daily_loss, x='Date', y='abs_variance', title="Daily Financial Risk (Absolute Variance)")
             st.plotly_chart(fig_fin, use_container_width=True)
-            
             st.markdown("#### 📝 Discrepancy Details")
             st.dataframe(
                 disc_df[['dt', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'cost_per_unit', 'abs_variance']], 
-                column_config={
-                    "dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"),
-                    "cost_per_unit": st.column_config.NumberColumn("Cost/Unit", format="$%.2f"),
-                    "abs_variance": st.column_config.NumberColumn("Variance Value", format="$%.2f")
-                },
+                column_config={"dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"), "cost_per_unit": st.column_config.NumberColumn("Cost/Unit", format="$%.2f"), "abs_variance": st.column_config.NumberColumn("Variance Value", format="$%.2f")},
                 use_container_width=True
             )
 
@@ -592,14 +572,12 @@ with tab_pends:
         c3.metric("Unique Meds Touched", pends_view['med_id'].nunique())
         
         st.divider()
-        
         c_chart1, c_chart2 = st.columns(2)
         with c_chart1:
             st.markdown("#### 💊 Top Configured Meds")
             top_meds = pends_view['med_id'].value_counts().head(10).reset_index()
             top_meds.columns = ['Med ID', 'Count']
             st.plotly_chart(px.bar(top_meds, x='Count', y='Med ID', orientation='h'), use_container_width=True)
-            
         with c_chart2:
             st.markdown("#### 📟 High Traffic Devices (Pends)")
             top_dev = pends_view['device'].value_counts().head(10).reset_index()
@@ -625,7 +603,6 @@ with tab_loads:
     loads_df = df[df['event_type'].astype(str).str.lower().str.contains('load|unload')].copy() if not df.empty else pd.DataFrame()
     if not loads_df.empty:
         st.markdown("### 🚚 Load & Unload Events")
-        
         c_l1, c_l2, c_l3 = st.columns(3)
         all_load_users = sorted([x for x in loads_df['user_name'].unique() if x is not None])
         all_load_devices = sorted([x for x in loads_df['device'].unique() if x is not None])
@@ -657,11 +634,9 @@ with tab_effic:
 with tab_drill:
     if not df.empty:
         st.header("🔍 Session Explorer (Dwell & Walk Times)")
-        
         session_metrics = df.groupby('session_id').agg({'user_name': 'first', 'device': 'first', 'dt': ['min', 'max']}).reset_index()
         session_metrics.columns = ['session_id', 'User', 'Device', 'Start Time', 'End Time']
         session_metrics['dwell_seconds'] = (session_metrics['End Time'] - session_metrics['Start Time']).dt.total_seconds()
-        
         session_metrics = session_metrics.sort_values(['User', 'Start Time'])
         session_metrics['next_start'] = session_metrics.groupby('User')['Start Time'].shift(-1)
         session_metrics['walk_seconds'] = (session_metrics['next_start'] - session_metrics['End Time']).dt.total_seconds()
@@ -670,7 +645,6 @@ with tab_drill:
             c_fill1, c_fill2, c_fill3, c_fill4 = st.columns(4)
             all_users = sorted([x for x in session_metrics['User'].unique() if x is not None])
             all_devices = sorted([x for x in session_metrics['Device'].unique() if x is not None])
-            
             sel_users = c_fill1.multiselect("Filter User", all_users)
             sel_devices = c_fill2.multiselect("Filter Device", all_devices)
             dwell_range = c_fill3.slider("Dwell Time (sec)", 0, 3600, (0, 3600), step=10)
@@ -688,18 +662,12 @@ with tab_drill:
         
         detailed_view = df[df['session_id'].isin(valid_sessions)].copy()
         detailed_view = detailed_view.merge(session_metrics[['session_id', 'dwell_seconds', 'walk_seconds']], on='session_id', how='left')
-        
         detailed_view['Dwell Time'] = detailed_view['dwell_seconds'].apply(seconds_to_mmss)
         detailed_view['Walk Time'] = detailed_view['walk_seconds'].apply(seconds_to_mmss)
         
         st.dataframe(
             detailed_view[['user_name', 'device', 'dt', 'event_type', 'med_desc', 'qty', 'Dwell Time', 'Walk Time']].sort_values('dt', ascending=False),
-            column_config={
-                "dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"),
-                "qty": st.column_config.NumberColumn("Qty"),
-                "Dwell Time": st.column_config.TextColumn("Session Dwell"),
-                "Walk Time": st.column_config.TextColumn("Walk To Next")
-            },
+            column_config={"dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"), "qty": st.column_config.NumberColumn("Qty"), "Dwell Time": st.column_config.TextColumn("Session Dwell"), "Walk Time": st.column_config.TextColumn("Walk To Next")},
             use_container_width=True, hide_index=True
         )
 
@@ -747,10 +715,7 @@ with tab_pharm:
         st.markdown("#### 📜 Order Log")
         st.dataframe(
             df_pharm[['dt', 'queue_id', 'priority', 'med_desc', 'destination', 'user_name', 'qty']].sort_values('dt', ascending=False),
-            column_config={
-                "dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"),
-                "qty": st.column_config.NumberColumn("Qty"),
-            },
+            column_config={"dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"), "qty": st.column_config.NumberColumn("Qty")},
             use_container_width=True, hide_index=True
         )
     else:
