@@ -1,10 +1,9 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.12)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.13)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Config Logic: STOPPED defaulting to 0 for missing quantities.
-#      Now uses NaN (Blank) to prevent "Edit" events from looking like 0-stock.
-#   2. Previous fixes (Shift Filters, Pharmacy Logic, etc.) preserved.
+#   1. Rebranding: Changed Sidebar Title to "SJS St. Johns Pharmacy".
+#   2. Previous fixes (Config Logic, Shift Filters, Pharmacy Logic) preserved.
 ###############################################
 
 import streamlit as st
@@ -348,6 +347,7 @@ def load_events_data(start_date, end_date):
 
 @st.cache_data(ttl=300)
 def load_config_data(start_date, end_date):
+    """ STRICTLY loads only CONFIG table. """
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
     
@@ -370,6 +370,7 @@ def load_config_data(start_date, end_date):
 
 @st.cache_data(ttl=300)
 def load_pharmacy_data(start_date, end_date):
+    """ STRICTLY loads only PHARMACY_ORDERS table. """
     conn = get_db_connection()
     if not conn: return pd.DataFrame()
     
@@ -396,7 +397,7 @@ def load_pharmacy_data(start_date, end_date):
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
-    st.title("RxTrack Executive")
+    st.title("SJS St. Johns Pharmacy")
     
     rows_events, rows_pharm, min_db, max_db, present_dates = get_db_stats()
     
