@@ -1,10 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.9)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.12)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 2 (Process Mining): Added Filters (User/Device) to clean up the Sankey.
-#   2. Tab 2: Added Metric Cards for "Busiest Route" and "Avg Gap".
-#   3. Previous fixes (Pharmacy 'NAN', Slider, etc.) preserved.
+#   1. Config Logic: STOPPED defaulting to 0 for missing quantities.
+#      Now uses NaN (Blank) to prevent "Edit" events from looking like 0-stock.
+#   2. Previous fixes (Shift Filters, Pharmacy Logic, etc.) preserved.
 ###############################################
 
 import streamlit as st
@@ -161,19 +161,46 @@ def clean_dataframe(df):
     return df[required + ["pk"]]
 
 def clean_activity_log(df):
+    """
+    Parses Config Data.
+    CRITICAL FIX: 
+    - Check for 'Amount'/'Quantity' column first.
+    - If relying on Regex, default to NaN (not 0) if no number found.
+    This prevents "Edit" events from appearing as "Set to 0".
+    """
     df = df.copy()
     df.columns = df.columns.str.strip().str.replace(' ', '')
-    df = df.rename(columns={"UserName": "user_name", "Device": "device", "TransactionDateTime": "dt", "Action": "action_type", "ActivityType": "activity_category", "AffectedElement": "raw_element"})
+    
+    # Map common column names
+    df = df.rename(columns={
+        "UserName": "user_name", "Device": "device", "TransactionDateTime": "dt", 
+        "Action": "action_type", "ActivityType": "activity_category", "AffectedElement": "raw_element",
+        "Amount": "qty_col", "Quantity": "qty_col" # Map known quantity columns
+    })
     
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"])
     
-    pattern = r'^(.*?) \((.*?)\):\s*(\d+)$'
-    extracted = df['raw_element'].astype(str).str.extract(pattern)
-    df['location'] = extracted[0].str.strip()
-    df['med_id'] = extracted[1].str.strip()
-    df['qty_extracted'] = pd.to_numeric(extracted[2], errors='coerce').fillna(0)
+    # 1. Parse Element String (Location / Med ID)
+    pattern_element = r'^(.*?) \((.*?)\)'
+    extracted_elem = df['raw_element'].astype(str).str.extract(pattern_element)
+    df['location'] = extracted_elem[0].str.strip()
+    df['med_id'] = extracted_elem[1].str.strip()
     df = df.dropna(subset=['med_id'])
+
+    # 2. Determine Quantity
+    # Strategy: Use 'qty_col' if it exists and is valid.
+    # Otherwise, try to extract digits from the END of the raw string (e.g., "...: 10")
+    if 'qty_col' in df.columns:
+        df['qty_extracted'] = pd.to_numeric(df['qty_col'], errors='coerce')
+    else:
+        # Regex to find ": <number>" at end of string
+        pattern_qty = r':\s*(\d+)$' 
+        df['qty_extracted'] = df['raw_element'].astype(str).str.extract(pattern_qty)[0]
+        df['qty_extracted'] = pd.to_numeric(df['qty_extracted'], errors='coerce')
+    
+    # FIX: Do NOT fillna(0) here. Leave as NaN. 
+    # If regex finds nothing, it means no quantity change occurred (or parsing failed), so we shouldn't assume 0.
 
     # Deduplication
     df = df.sort_values(['user_name', 'device', 'med_id', 'dt'])
@@ -187,6 +214,7 @@ def clean_activity_log(df):
 
     df['temp_min'] = np.where(df['is_min_event'], df['qty_extracted'], np.nan)
     df['temp_max'] = np.where(df['is_max_event'], df['qty_extracted'], np.nan)
+    # Only fallback if it's explicitly not min/max event
     df['temp_max'] = np.where((~df['is_min_event']) & (~df['is_max_event']), df['qty_extracted'], df['temp_max'])
 
     grouped = df.groupby(['user_name', 'device', 'med_id', 'group_id'], as_index=False).agg({
@@ -194,12 +222,16 @@ def clean_activity_log(df):
         'location': 'first', 'dt': 'first', 'action_type': 'first', 'activity_category': 'first'
     })
     
-    grouped['min_qty'] = grouped['temp_min'].fillna(0)
-    grouped['max_qty'] = grouped['temp_max'].fillna(0)
+    # Final Assignment
+    grouped['min_qty'] = grouped['temp_min']
+    grouped['max_qty'] = grouped['temp_max']
     grouped['is_standard'] = grouped['is_standard'].fillna(False)
     
     grouped["dt"] = grouped["dt"].astype(str)
     grouped["pk"] = grouped.apply(lambda r: generate_pk(r), axis=1)
+    
+    # Replace NaNs with None for SQL compatibility
+    grouped = grouped.replace({np.nan: None})
     
     return grouped[['pk', 'dt', 'user_name', 'device', 'med_id', 'location', 'action_type', 'activity_category', 'min_qty', 'max_qty', 'is_standard']]
 
@@ -496,17 +528,21 @@ with tab_mine:
     if not df.empty:
         st.markdown("### 🔄 Workflow Visualization")
         
-        c_pm1, c_pm2 = st.columns(2)
+        available_dates = sorted(df['dt'].dt.date.unique(), reverse=True)
+        
+        c_pm1, c_pm2, c_pm3 = st.columns(3)
         all_pm_users = sorted([x for x in df['user_name'].unique() if x is not None])
         all_pm_devices = sorted([x for x in df['device'].unique() if x is not None])
         
         sel_pm_user = c_pm1.multiselect("Filter User", all_pm_users, key="pm_user_filter")
         sel_pm_device = c_pm2.multiselect("Filter Device", all_pm_devices, key="pm_device_filter")
+        sel_pm_date = c_pm3.selectbox("Filter Shift Date", options=["All"] + [d.strftime('%Y-%m-%d') for d in available_dates], key="pm_date_filter")
         
         moves = df[df['device'] != df['prev_device']].dropna(subset=['prev_device', 'device']).copy()
         
         if sel_pm_user: moves = moves[moves['user_name'].isin(sel_pm_user)]
         if sel_pm_device: moves = moves[moves['device'].isin(sel_pm_device) | moves['prev_device'].isin(sel_pm_device)]
+        if sel_pm_date != "All": moves = moves[moves['dt'].dt.date.astype(str) == sel_pm_date]
         
         if not moves.empty:
             st.columns(3)[0].markdown(f"""<div class="metric-card"><h3>{len(moves)}</h3><p>Total Movements</p></div>""", unsafe_allow_html=True)
