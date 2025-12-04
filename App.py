@@ -1,10 +1,12 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.3)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.5)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Pharmacy Logic: 'NAN' Destination mapped to "Carousel Workflow".
-#   2. Tab 7 Sort Fix: Handles NoneType in User/Device filters.
-#   3. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
+#   1. Tab 5 (Load/Unload): Added Drill-down filter for Medication.
+#   2. Tab 5 (Load/Unload): Added Drill-down filters for User and Device.
+#   3. Pharmacy Logic: 'NAN' Destination mapped to "Carousel Workflow".
+#   4. Tab 7 Sort Fix: Handles NoneType in User/Device filters.
+#   5. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
 ###############################################
 
 import streamlit as st
@@ -620,6 +622,27 @@ with tab_loads:
     loads_df = df[df['event_type'].astype(str).str.lower().str.contains('load|unload')].copy() if not df.empty else pd.DataFrame()
     if not loads_df.empty:
         st.markdown("### 🚚 Load & Unload Events")
+        
+        # --- Add Filters ---
+        c_l1, c_l2, c_l3 = st.columns(3)
+        
+        # Get unique values for filters, handling None
+        all_load_users = sorted([x for x in loads_df['user_name'].unique() if x is not None])
+        all_load_devices = sorted([x for x in loads_df['device'].unique() if x is not None])
+        all_load_meds = sorted([x for x in loads_df['med_desc'].unique() if x is not None])
+        
+        filter_load_user = c_l1.multiselect("Filter User", all_load_users, key="load_user_filter")
+        filter_load_device = c_l2.multiselect("Filter Device", all_load_devices, key="load_device_filter")
+        filter_load_med = c_l3.multiselect("Filter Medication", all_load_meds, key="load_med_filter")
+        
+        # Apply filters
+        if filter_load_user:
+            loads_df = loads_df[loads_df['user_name'].isin(filter_load_user)]
+        if filter_load_device:
+            loads_df = loads_df[loads_df['device'].isin(filter_load_device)]
+        if filter_load_med:
+            loads_df = loads_df[loads_df['med_desc'].isin(filter_load_med)]
+            
         st.dataframe(
             loads_df[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']], 
             column_config={
