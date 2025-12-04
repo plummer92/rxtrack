@@ -1,12 +1,11 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.5)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.7)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 5 (Load/Unload): Added Drill-down filter for Medication.
-#   2. Tab 5 (Load/Unload): Added Drill-down filters for User and Device.
-#   3. Pharmacy Logic: 'NAN' Destination mapped to "Carousel Workflow".
-#   4. Tab 7 Sort Fix: Handles NoneType in User/Device filters.
-#   5. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
+#   1. CRITICAL FIX: "nan" Timestamp Error. Added robust cleaning for 'resolution_dt'.
+#   2. Tab 8 (Pharmacy): Added filters for User, Priority, and Queue.
+#   3. Tab 8 (Pharmacy): Excluded 'Carousel Workflow' from Destination Chart.
+#   4. Tab 5 (Load/Unload): Added Drill-down filters.
 ###############################################
 
 import streamlit as st
@@ -82,8 +81,6 @@ def get_db_stats():
         cur = conn.cursor()
         
         # 1. Get Date Range (Union of Events + Pharmacy)
-        # We use a UNION to find the absolute min/max across both datasets
-        # FIX: Added ::timestamp cast to prevent SQL errors if column types differ (Text vs Timestamp)
         cur.execute("""
             SELECT MIN(dt), MAX(dt) FROM (
                 SELECT dt::timestamp as dt FROM events
@@ -140,15 +137,24 @@ def clean_dataframe(df):
     for col in required:
         if col not in df.columns: df[col] = None
 
+    # Handle main datetime (drop rows if missing)
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df = df.dropna(subset=["dt"]) 
+
+    # Handle Resolution datetime (allow nulls)
+    df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
 
     # OPTIMIZATION: Downcast numeric types to save RAM
     for c in ["qty", "discrepancy_qty"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype('float32')
 
+    # Convert DateTimes to String for SQL (Handling NaT/Nan)
     df["dt"] = df["dt"].astype(str)
-    df["resolution_dt"] = df["resolution_dt"].astype(str).replace('NaT', None)
+    
+    # CRITICAL FIX: Robustly clean resolution_dt to avoid "nan" string error in Postgres
+    df["resolution_dt"] = df["resolution_dt"].astype(str)
+    df["resolution_dt"] = df["resolution_dt"].replace(['NaT', 'nan', 'None', ''], None)
+
     df["pk"] = df.apply(lambda r: generate_pk(r), axis=1)
     
     return df[required + ["pk"]]
@@ -734,6 +740,21 @@ with tab_drill:
 with tab_pharm:
     st.markdown("### 🏥 Central Pharmacy Workflow")
     if not df_pharm.empty:
+        # --- Add Filters ---
+        c_ph1, c_ph2, c_ph3 = st.columns(3)
+        all_ph_users = sorted([x for x in df_pharm['user_name'].unique() if x is not None])
+        all_ph_prios = sorted([x for x in df_pharm['priority'].unique() if x is not None])
+        all_ph_queues = sorted([x for x in df_pharm['queue_id'].unique() if x is not None])
+        
+        sel_ph_user = c_ph1.multiselect("Filter User", all_ph_users, key="ph_user_filter")
+        sel_ph_prio = c_ph2.multiselect("Filter Priority", all_ph_prios, key="ph_prio_filter")
+        sel_ph_queue = c_ph3.multiselect("Filter Queue", all_ph_queues, key="ph_queue_filter")
+        
+        # Apply Filters
+        if sel_ph_user: df_pharm = df_pharm[df_pharm['user_name'].isin(sel_ph_user)]
+        if sel_ph_prio: df_pharm = df_pharm[df_pharm['priority'].isin(sel_ph_prio)]
+        if sel_ph_queue: df_pharm = df_pharm[df_pharm['queue_id'].isin(sel_ph_queue)]
+        
         # KPIs
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Orders", f"{len(df_pharm):,}")
@@ -756,7 +777,9 @@ with tab_pharm:
         # Chart 2: Top Destinations
         with c_chart2:
             st.markdown("#### 📍 Top Delivery Destinations")
-            dest_counts = df_pharm['destination'].value_counts().head(10).reset_index()
+            # Exclude 'Carousel Workflow' from the chart as requested
+            chart_df = df_pharm[df_pharm['destination'] != 'Carousel Workflow']
+            dest_counts = chart_df['destination'].value_counts().head(10).reset_index()
             dest_counts.columns = ['Destination', 'Orders']
             st.plotly_chart(px.bar(dest_counts, x='Orders', y='Destination', orientation='h'), use_container_width=True)
             
