@@ -1,10 +1,11 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.1)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.2)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
-#   2. Strict Data Isolation: Pharmacy data ONLY appears in Tab 8.
-#   3. Smart Date Slider: Adapts to range of ALL tables combined.
+#   1. Tab 7 Sort Fix: Handles NoneType in User/Device filters.
+#   2. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
+#   3. Strict Data Isolation: Pharmacy data ONLY appears in Tab 8.
+#   4. Smart Date Slider: Adapts to range of ALL tables combined.
 ###############################################
 
 import streamlit as st
@@ -643,6 +644,7 @@ with tab_drill:
         st.header("🔍 Session Explorer (Dwell & Walk Times)")
         
         # 1. Calculate Session Metrics (Aggregated Level)
+        # We perform aggregation solely to calculate Start/End times, Dwell, and Walk metrics.
         session_metrics = df.groupby('session_id').agg({
             'user_name': 'first',
             'device': 'first',
@@ -653,7 +655,7 @@ with tab_drill:
         # Calculate Dwell Time
         session_metrics['dwell_seconds'] = (session_metrics['End Time'] - session_metrics['Start Time']).dt.total_seconds()
         
-        # Calculate Walk Time
+        # Calculate Walk Time (Next Session Start - Current Session End)
         session_metrics = session_metrics.sort_values(['User', 'Start Time'])
         session_metrics['next_start'] = session_metrics.groupby('User')['Start Time'].shift(-1)
         session_metrics['walk_seconds'] = (session_metrics['next_start'] - session_metrics['End Time']).dt.total_seconds()
@@ -662,8 +664,8 @@ with tab_drill:
         with st.expander("⏳ Session Filters (Time & Attributes)", expanded=True):
             c_fill1, c_fill2, c_fill3, c_fill4 = st.columns(4)
             
-            all_users = sorted(session_metrics['User'].unique())
-            all_devices = sorted(session_metrics['Device'].unique())
+            all_users = sorted([x for x in session_metrics['User'].unique() if x is not None])
+            all_devices = sorted([x for x in session_metrics['Device'].unique() if x is not None])
             
             sel_users = c_fill1.multiselect("Filter User", all_users)
             sel_devices = c_fill2.multiselect("Filter Device", all_devices)
@@ -685,7 +687,10 @@ with tab_drill:
         ]['session_id']
         
         # 4. Join Metrics back to Detailed Data
+        # Filter original DF to only include rows belonging to valid (filtered) sessions
         detailed_view = df[df['session_id'].isin(valid_sessions)].copy()
+        
+        # Merge the calculated Dwell/Walk times onto the detailed rows
         detailed_view = detailed_view.merge(session_metrics[['session_id', 'dwell_seconds', 'walk_seconds']], on='session_id', how='left')
         
         # Formatting
