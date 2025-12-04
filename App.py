@@ -1,11 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.2)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.3)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 7 Sort Fix: Handles NoneType in User/Device filters.
-#   2. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
-#   3. Strict Data Isolation: Pharmacy data ONLY appears in Tab 8.
-#   4. Smart Date Slider: Adapts to range of ALL tables combined.
+#   1. Pharmacy Logic: 'NAN' Destination mapped to "Carousel Workflow".
+#   2. Tab 7 Sort Fix: Handles NoneType in User/Device filters.
+#   3. SQL Fix: Type casting in get_db_stats to prevent "0 Records" error.
 ###############################################
 
 import streamlit as st
@@ -353,6 +352,8 @@ def load_pharmacy_data(start_date, end_date):
         df["dt"] = pd.to_datetime(df["dt"])
         df['Timestamp'] = df['dt'].dt.strftime('%b %d, %H:%M:%S')
         df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
+        # Business Rule: Missing Destination = Carousel/Internal Workflow
+        df['destination'] = df['destination'].fillna('Carousel Workflow').replace('', 'Carousel Workflow')
     return df
 
 ###########################################################
@@ -644,7 +645,6 @@ with tab_drill:
         st.header("🔍 Session Explorer (Dwell & Walk Times)")
         
         # 1. Calculate Session Metrics (Aggregated Level)
-        # We perform aggregation solely to calculate Start/End times, Dwell, and Walk metrics.
         session_metrics = df.groupby('session_id').agg({
             'user_name': 'first',
             'device': 'first',
@@ -655,7 +655,7 @@ with tab_drill:
         # Calculate Dwell Time
         session_metrics['dwell_seconds'] = (session_metrics['End Time'] - session_metrics['Start Time']).dt.total_seconds()
         
-        # Calculate Walk Time (Next Session Start - Current Session End)
+        # Calculate Walk Time
         session_metrics = session_metrics.sort_values(['User', 'Start Time'])
         session_metrics['next_start'] = session_metrics.groupby('User')['Start Time'].shift(-1)
         session_metrics['walk_seconds'] = (session_metrics['next_start'] - session_metrics['End Time']).dt.total_seconds()
@@ -687,10 +687,7 @@ with tab_drill:
         ]['session_id']
         
         # 4. Join Metrics back to Detailed Data
-        # Filter original DF to only include rows belonging to valid (filtered) sessions
         detailed_view = df[df['session_id'].isin(valid_sessions)].copy()
-        
-        # Merge the calculated Dwell/Walk times onto the detailed rows
         detailed_view = detailed_view.merge(session_metrics[['session_id', 'dwell_seconds', 'walk_seconds']], on='session_id', how='left')
         
         # Formatting
