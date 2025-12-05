@@ -1,10 +1,11 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.19)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.20)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 9 (Reconciliation): Added Timestamps for Floor/Pharmacy actions.
-#   2. Tab 9: Added "Gap Time" calculation to show lag between Unload and Return.
-#   3. Previous fixes (Zeroes handling, Filters) preserved.
+#   1. Tab 10 (Tech Comparison): Enhanced Visualization Suite.
+#      - Added "Activity Heatmaps" (Device vs Hour) side-by-side.
+#      - Optimized Sankey to show Top 30 paths only (cleaner view).
+#   2. Previous fixes preserved.
 ###############################################
 
 import streamlit as st
@@ -44,23 +45,15 @@ st.markdown("""
 #                 HELPER FUNCTIONS
 ###########################################################
 def seconds_to_mmss(seconds):
-    if pd.isna(seconds): return "-"
-    # Handle negative gaps (e.g. Pharmacy scanned before Floor recorded on this day group)
-    is_negative = seconds < 0
-    seconds = abs(seconds)
-    
+    if pd.isna(seconds) or seconds < 0: return "-"
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
-    
-    time_str = ""
     if h > 0:
-        time_str = f"{h}h {m}m {s}s"
+        return f"{h}h {m}m {s}s"
     elif m > 0:
-        time_str = f"{m}m {s}s"
+        return f"{m}m {s}s"
     else:
-        time_str = f"{s}s"
-        
-    return f"-{time_str}" if is_negative else time_str
+        return f"{s}s"
 
 def safe_to_date(val):
     if val is None: return datetime.today().date()
@@ -548,22 +541,41 @@ with tab_mine:
         if not moves.empty:
             st.columns(3)[0].markdown(f"""<div class="metric-card"><h3>{len(moves)}</h3><p>Total Movements</p></div>""", unsafe_allow_html=True)
             
+            # --- SANKEY (Top 30 Routes) ---
             path_counts = moves.groupby(['prev_device', 'device']).size().reset_index(name='count')
-            path_counts = path_counts.sort_values('count', ascending=False).head(50)
+            path_counts = path_counts.sort_values('count', ascending=False).head(30) # Top 30
             
             all_nodes = list(pd.concat([path_counts['prev_device'], path_counts['device']]).unique())
             node_map = {node: i for i, node in enumerate(all_nodes)}
-            
-            path_counts['source_idx'] = path_counts['prev_device'].map(node_map)
-            path_counts['target_idx'] = path_counts['device'].map(node_map)
+            path_counts['source'] = path_counts['prev_device'].map(node_map)
+            path_counts['target'] = path_counts['device'].map(node_map)
             
             fig_sankey = go.Figure(data=[go.Sankey(
                 node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#1E90FF"),
-                link=dict(source=path_counts['source_idx'], target=path_counts['target_idx'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
+                link=dict(source=path_counts['source'], target=path_counts['target'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
             )])
-            fig_sankey.update_layout(title_text=f"Technician Movement Flow (Top {len(path_counts)} Paths)", font_size=10, height=600)
+            fig_sankey.update_layout(title_text="Top 30 Workflow Routes", font_size=10, height=500)
             st.plotly_chart(fig_sankey, use_container_width=True)
             
+            st.divider()
+            
+            # --- ACTIVITY HEATMAP (Side-by-Side) ---
+            st.markdown("#### 🔥 Activity Heatmap (Device vs Hour)")
+            # Group by Hour and Device
+            activity = moves.groupby([moves['dt'].dt.hour.rename('Hour'), 'device']).size().reset_index(name='count')
+            
+            fig_heat = px.density_heatmap(
+                activity, 
+                x='Hour', 
+                y='device', 
+                z='count', 
+                nbinsx=24, 
+                color_continuous_scale='Viridis',
+                title="When are devices most active?"
+            )
+            fig_heat.update_layout(xaxis=dict(tickmode='linear', dtick=1))
+            st.plotly_chart(fig_heat, use_container_width=True)
+
             with st.expander("View Raw Path Data"):
                  st.dataframe(path_counts.sort_values('count', ascending=False), use_container_width=True)
         else:
@@ -906,13 +918,17 @@ with tab_compare:
                     st.metric("Avg Dwell Time", seconds_to_mmss(m_b[2]))
 
                 st.divider()
-                st.subheader("🚶 Walk Pattern Comparison")
+                st.subheader("🚶 Walk Pattern & Activity Comparison")
                 
                 # -- SANKEY FUNCTION --
                 def make_sankey(sub_df, title):
                     moves = sub_df[sub_df['device'] != sub_df['prev_device']].dropna(subset=['prev_device', 'device'])
                     if moves.empty: return None
                     path_counts = moves.groupby(['prev_device', 'device']).size().reset_index(name='count')
+                    
+                    # Optimize: Top 30 only
+                    path_counts = path_counts.sort_values('count', ascending=False).head(30)
+                    
                     all_nodes = list(pd.concat([path_counts['prev_device'], path_counts['device']]).unique())
                     node_map = {node: i for i, node in enumerate(all_nodes)}
                     path_counts['source'] = path_counts['prev_device'].map(node_map)
@@ -920,18 +936,37 @@ with tab_compare:
                     
                     return go.Figure(data=[go.Sankey(
                         node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#1E90FF"),
-                        link=dict(source=path_counts['source'], target=path_counts['target'], value=path_counts['count'])
-                    )]).update_layout(title_text=title, height=400)
+                        link=dict(source=path_counts['source'], target=path_counts['target'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
+                    )]).update_layout(title_text=title, height=400, font=dict(size=10))
 
-                fig_a = make_sankey(df_a, f"{user_a} Routes")
-                fig_b = make_sankey(df_b, f"{user_b} Routes")
-                
+                # -- HEATMAP FUNCTION --
+                def make_heatmap(sub_df, title):
+                    activity = sub_df.groupby([sub_df['dt'].dt.hour.rename('Hour'), 'device']).size().reset_index(name='count')
+                    return px.density_heatmap(
+                        activity, x='Hour', y='device', z='count', 
+                        title=title, nbinsx=24, color_continuous_scale='Viridis'
+                    )
+
                 c_san_1, c_san_2 = st.columns(2)
-                if fig_a: c_san_1.plotly_chart(fig_a, use_container_width=True)
-                else: c_san_1.info(f"No movement data for {user_a}")
                 
-                if fig_b: c_san_2.plotly_chart(fig_b, use_container_width=True)
-                else: c_san_2.info(f"No movement data for {user_b}")
+                # Plot A
+                fig_a_sankey = make_sankey(df_a, f"{user_a} Routes")
+                fig_a_heat = make_heatmap(df_a, "Activity")
+                
+                with c_san_1:
+                    if fig_a_sankey: st.plotly_chart(fig_a_sankey, use_container_width=True)
+                    else: st.info("No movement data.")
+                    st.plotly_chart(fig_a_heat, use_container_width=True)
+                
+                # Plot B
+                fig_b_sankey = make_sankey(df_b, f"{user_b} Routes")
+                fig_b_heat = make_heatmap(df_b, "Activity")
+                
+                with c_san_2:
+                    if fig_b_sankey: st.plotly_chart(fig_b_sankey, use_container_width=True)
+                    else: st.info("No movement data.")
+                    st.plotly_chart(fig_b_heat, use_container_width=True)
+
         else:
             st.info("Please select users and dates to compare.")
     else:
