@@ -1,9 +1,12 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.13)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.15)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Rebranding: Changed Sidebar Title to "SJS St. Johns Pharmacy".
-#   2. Previous fixes (Config Logic, Shift Filters, Pharmacy Logic) preserved.
+#   1. Added Tab 10: Tech Comparison Tool.
+#      - Side-by-side selector for User + Date.
+#      - Head-to-head metrics with Delta indicators.
+#      - Dual Sankey diagrams for route comparison.
+#   2. Previous fixes preserved.
 ###############################################
 
 import streamlit as st
@@ -162,10 +165,6 @@ def clean_dataframe(df):
 def clean_activity_log(df):
     """
     Parses Config Data.
-    CRITICAL FIX: 
-    - Check for 'Amount'/'Quantity' column first.
-    - If relying on Regex, default to NaN (not 0) if no number found.
-    This prevents "Edit" events from appearing as "Set to 0".
     """
     df = df.copy()
     df.columns = df.columns.str.strip().str.replace(' ', '')
@@ -188,19 +187,13 @@ def clean_activity_log(df):
     df = df.dropna(subset=['med_id'])
 
     # 2. Determine Quantity
-    # Strategy: Use 'qty_col' if it exists and is valid.
-    # Otherwise, try to extract digits from the END of the raw string (e.g., "...: 10")
     if 'qty_col' in df.columns:
         df['qty_extracted'] = pd.to_numeric(df['qty_col'], errors='coerce')
     else:
-        # Regex to find ": <number>" at end of string
         pattern_qty = r':\s*(\d+)$' 
         df['qty_extracted'] = df['raw_element'].astype(str).str.extract(pattern_qty)[0]
         df['qty_extracted'] = pd.to_numeric(df['qty_extracted'], errors='coerce')
     
-    # FIX: Do NOT fillna(0) here. Leave as NaN. 
-    # If regex finds nothing, it means no quantity change occurred (or parsing failed), so we shouldn't assume 0.
-
     # Deduplication
     df = df.sort_values(['user_name', 'device', 'med_id', 'dt'])
     df['prev_dt'] = df.groupby(['user_name', 'device', 'med_id'])['dt'].shift(1)
@@ -213,7 +206,6 @@ def clean_activity_log(df):
 
     df['temp_min'] = np.where(df['is_min_event'], df['qty_extracted'], np.nan)
     df['temp_max'] = np.where(df['is_max_event'], df['qty_extracted'], np.nan)
-    # Only fallback if it's explicitly not min/max event
     df['temp_max'] = np.where((~df['is_min_event']) & (~df['is_max_event']), df['qty_extracted'], df['temp_max'])
 
     grouped = df.groupby(['user_name', 'device', 'med_id', 'group_id'], as_index=False).agg({
@@ -481,8 +473,8 @@ if df.empty and df_config.empty and df_pharm.empty:
     st.stop()
 
 # --- TABS ---
-tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill, tab_pharm = st.tabs([
-    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow"
+tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill, tab_pharm, tab_recon, tab_compare = st.tabs([
+    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison"
 ])
 
 # --- TAB 1: OVERVIEW (BEAUTIFIED) ---
@@ -757,3 +749,160 @@ with tab_pharm:
         )
     else:
         st.info("No Pharmacy Workflow data found. Upload 'TransactionDetailReport'.")
+
+# --- TAB 9: RETURN RECONCILIATION ---
+with tab_recon:
+    st.markdown("### 🔄 Unload vs. Return Reconciliation")
+    if not df.empty and not df_pharm.empty:
+        # 1. Unloads
+        unloads = df[df['event_type'].astype(str).str.contains('unload', case=False, na=False)].copy()
+        unloads['Date'] = unloads['dt'].dt.date
+        unloads['med_id_clean'] = unloads['med_id'].astype(str).str.strip().str.upper()
+        unloads_agg = unloads.groupby(['Date', 'med_id_clean']).agg({'qty': 'sum', 'med_desc': 'first'}).reset_index()
+        unloads_agg = unloads_agg.rename(columns={'qty': 'qty_unloaded'})
+
+        # 2. Returns
+        returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
+        returns['Date'] = returns['dt'].dt.date
+        returns['med_id_clean'] = returns['med_id'].astype(str).str.strip().str.upper()
+        returns_agg = returns.groupby(['Date', 'med_id_clean']).agg({'qty': 'sum'}).reset_index()
+        returns_agg = returns_agg.rename(columns={'qty': 'qty_returned'})
+
+        # 3. Merge
+        comparison = pd.merge(unloads_agg, returns_agg, on=['Date', 'med_id_clean'], how='outer')
+        comparison.fillna(0, inplace=True)
+        comparison['Variance'] = comparison['qty_returned'] - comparison['qty_unloaded']
+        
+        # 4. Status
+        def get_status(row):
+            if row['Variance'] == 0: return "✅ Match"
+            if row['Variance'] < 0: return "❌ Missing Items"
+            return "❓ Extra Returned"
+        
+        comparison['Status'] = comparison.apply(get_status, axis=1)
+        
+        # 5. Metrics
+        total_unloaded = comparison['qty_unloaded'].sum()
+        total_returned = comparison['qty_returned'].sum()
+        match_rate = len(comparison[comparison['Variance'] == 0]) / len(comparison) * 100 if len(comparison) > 0 else 0
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Items Unloaded", int(total_unloaded))
+        c2.metric("Items Returned", int(total_returned))
+        c3.metric("Match Rate", f"{match_rate:.1f}%")
+        
+        st.divider()
+        
+        # 6. Detailed Table
+        st.dataframe(
+            comparison[['Date', 'med_id_clean', 'med_desc', 'qty_unloaded', 'qty_returned', 'Variance', 'Status']].sort_values('Date', ascending=False),
+            column_config={
+                "Date": st.column_config.DateColumn("Date"),
+                "qty_unloaded": st.column_config.NumberColumn("Unloaded (Floor)"),
+                "qty_returned": st.column_config.NumberColumn("Returned (Pharmacy)"),
+                "Variance": st.column_config.NumberColumn("Difference"),
+            },
+            use_container_width=True
+        )
+    else:
+        st.info("Need both 'Events' (Unloads) and 'Pharmacy Orders' (Returns) to perform reconciliation.")
+
+# --- TAB 10: TECH COMPARISON ---
+with tab_compare:
+    st.markdown("### ⚖️ Technician Performance Comparison")
+    if not df.empty:
+        # Filter out None values for user selection
+        unique_users = sorted([u for u in df['user_name'].unique() if u is not None])
+        
+        c1, c2 = st.columns(2)
+        
+        # Tech A Inputs
+        with c1:
+            st.subheader("Tech A (Baseline)")
+            user_a = st.selectbox("Select User A", unique_users, key="user_a")
+            dates_a = sorted(df[df['user_name'] == user_a]['dt'].dt.date.unique(), reverse=True)
+            date_a = st.selectbox("Select Date A", dates_a, key="date_a") if dates_a else None
+
+        # Tech B Inputs
+        with c2:
+            st.subheader("Tech B (Comparison)")
+            # Default to second user if available, else same as A
+            default_idx_b = 1 if len(unique_users) > 1 else 0
+            user_b = st.selectbox("Select User B", unique_users, index=default_idx_b, key="user_b")
+            dates_b = sorted(df[df['user_name'] == user_b]['dt'].dt.date.unique(), reverse=True)
+            date_b = st.selectbox("Select Date B", dates_b, key="date_b") if dates_b else None
+        
+        if date_a and date_b:
+            # Filter Data for both sides
+            df_a = df[(df['user_name'] == user_a) & (df['dt'].dt.date == date_a)].copy()
+            df_b = df[(df['user_name'] == user_b) & (df['dt'].dt.date == date_b)].copy()
+            
+            if df_a.empty or df_b.empty:
+                st.warning("One of the selected shifts has no data.")
+            else:
+                # -- METRICS FUNCTION --
+                def get_shift_metrics(sub_df):
+                    tx_count = len(sub_df)
+                    # Avg Machine Time (only positive values)
+                    avg_mach = sub_df[sub_df['machine_time_sec'] > 0]['machine_time_sec'].mean()
+                    avg_mach = 0 if pd.isna(avg_mach) else avg_mach
+                    
+                    # Avg Dwell Time (Session based)
+                    sessions = sub_df.groupby('session_id').agg(start=('dt', 'min'), end=('dt', 'max'))
+                    sessions['dwell'] = (sessions['end'] - sessions['start']).dt.total_seconds()
+                    avg_dwell = sessions['dwell'].mean()
+                    avg_dwell = 0 if pd.isna(avg_dwell) else avg_dwell
+                    
+                    return tx_count, avg_mach, avg_dwell
+
+                m_a = get_shift_metrics(df_a)
+                m_b = get_shift_metrics(df_b)
+                
+                st.divider()
+                
+                # -- SIDE-BY-SIDE METRICS --
+                col_a, col_b = st.columns(2)
+                
+                with col_a:
+                    st.markdown(f"**{user_a} ({date_a})**")
+                    st.metric("Transactions", m_a[0])
+                    st.metric("Avg Machine Time", f"{m_a[1]:.1f}s")
+                    st.metric("Avg Dwell Time", seconds_to_mmss(m_a[2]))
+                
+                with col_b:
+                    st.markdown(f"**{user_b} ({date_b})**")
+                    st.metric("Transactions", m_b[0], delta=m_b[0]-m_a[0])
+                    st.metric("Avg Machine Time", f"{m_b[1]:.1f}s", delta=f"{m_b[1]-m_a[1]:.1f}s", delta_color="inverse")
+                    st.metric("Avg Dwell Time", seconds_to_mmss(m_b[2]))
+
+                st.divider()
+                st.subheader("🚶 Walk Pattern Comparison")
+                
+                # -- SANKEY FUNCTION --
+                def make_sankey(sub_df, title):
+                    moves = sub_df[sub_df['device'] != sub_df['prev_device']].dropna(subset=['prev_device', 'device'])
+                    if moves.empty: return None
+                    path_counts = moves.groupby(['prev_device', 'device']).size().reset_index(name='count')
+                    all_nodes = list(pd.concat([path_counts['prev_device'], path_counts['device']]).unique())
+                    node_map = {node: i for i, node in enumerate(all_nodes)}
+                    path_counts['source'] = path_counts['prev_device'].map(node_map)
+                    path_counts['target'] = path_counts['device'].map(node_map)
+                    
+                    return go.Figure(data=[go.Sankey(
+                        node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#1E90FF"),
+                        link=dict(source=path_counts['source'], target=path_counts['target'], value=path_counts['count'])
+                    )]).update_layout(title_text=title, height=400)
+
+                fig_a = make_sankey(df_a, f"{user_a} Routes")
+                fig_b = make_sankey(df_b, f"{user_b} Routes")
+                
+                c_san_1, c_san_2 = st.columns(2)
+                if fig_a: c_san_1.plotly_chart(fig_a, use_container_width=True)
+                else: c_san_1.info(f"No movement data for {user_a}")
+                
+                if fig_b: c_san_2.plotly_chart(fig_b, use_container_width=True)
+                else: c_san_2.info(f"No movement data for {user_b}")
+        else:
+            st.info("Please select users and dates to compare.")
+    else:
+        st.info("No event data available for comparison.")
