@@ -1,10 +1,11 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.25)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.26)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. CRITICAL: Fixed StreamlitDuplicateElementId error on Date Slider.
-#      - Added dynamic key based on row counts/dates to ensure unique ID.
-#   2. Previous fixes (Narcotic Filters, etc.) preserved.
+#   1. Added Tab 11: Tech Progression.
+#      - Individual longitudinal analysis (Trend over time).
+#      - Aggregates by Day/Week/Month.
+#   2. Previous fixes (Slider Key, Filters, etc.) preserved.
 ###############################################
 
 import streamlit as st
@@ -481,8 +482,8 @@ if df.empty and df_config.empty and df_pharm.empty:
     st.stop()
 
 # --- TABS ---
-tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill, tab_pharm, tab_recon, tab_compare = st.tabs([
-    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison"
+tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill, tab_pharm, tab_recon, tab_compare, tab_progress = st.tabs([
+    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", "📈 Tech Progression"
 ])
 
 # --- TAB 1: OVERVIEW (BEAUTIFIED) ---
@@ -995,3 +996,89 @@ with tab_compare:
             st.info("Please select users and dates to compare.")
     else:
         st.info("No event data available for comparison.")
+
+# --- TAB 11: TECH PROGRESSION ---
+with tab_progress:
+    st.markdown("### 📈 Individual Technician Progression")
+    
+    if not df.empty:
+        # 1. Filters
+        c_prog1, c_prog2 = st.columns(2)
+        unique_users = sorted([u for u in df['user_name'].unique() if u is not None])
+        
+        selected_user = c_prog1.selectbox("Select Technician", unique_users, key="prog_user_select")
+        time_freq = c_prog2.selectbox("Time Aggregation", ["Daily", "Weekly", "Monthly"], key="prog_freq_select")
+        
+        # Map selection to Pandas offset aliases
+        freq_map = {"Daily": "D", "Weekly": "W", "Monthly": "M"}
+        freq_code = freq_map[time_freq]
+        
+        # 2. Filter Data
+        user_df = df[df['user_name'] == selected_user].copy()
+        
+        if user_df.empty:
+            st.warning(f"No data found for {selected_user}")
+        else:
+            # 3. Calculate Metrics Over Time
+            # A. Transaction Volume & Errors
+            # Resample needs a datetime index
+            user_df.set_index('dt', inplace=True)
+            
+            # Helper column for transaction count (excluding verify)
+            # Create a boolean series
+            is_valid = ~user_df['event_type'].astype(str).str.contains('verify', case=False, na=False)
+            # Assign it back to the dataframe. Since index is set, alignment is preserved.
+            user_df['is_valid_tx'] = is_valid.astype(int)
+
+            
+            # Basic Counts
+            stats_over_time = user_df.resample(freq_code).agg({
+                'is_valid_tx': 'sum',
+                'discrepancy_qty': lambda x: (x != 0).sum(),
+                'machine_time_sec': 'mean'
+            }).rename(columns={'is_valid_tx': 'Transactions', 'discrepancy_qty': 'Errors', 'machine_time_sec': 'Avg_Speed'})
+            
+            # B. Session Dwell Time (Needs session grouping first)
+            # Reset index to get 'dt' back for session grouping
+            user_df_reset = user_df.reset_index()
+            sessions = user_df_reset.groupby('session_id').agg(
+                start=('dt', 'min'),
+                end=('dt', 'max')
+            )
+            sessions['dwell_seconds'] = (sessions['end'] - sessions['start']).dt.total_seconds()
+            sessions.set_index('start', inplace=True)
+            
+            dwell_over_time = sessions.resample(freq_code)['dwell_seconds'].mean()
+            
+            # Merge
+            stats_over_time['Avg_Dwell_Seconds'] = dwell_over_time
+            stats_over_time['Avg_Dwell_Display'] = stats_over_time['Avg_Dwell_Seconds'].apply(seconds_to_mmss)
+            
+            # Handle NaNs (e.g., weeks with no work)
+            stats_over_time = stats_over_time.fillna(0)
+            
+            # 4. Visualization
+            st.divider()
+            
+            # Speed Trend (Lower is Better)
+            fig_speed = px.line(stats_over_time, x=stats_over_time.index, y='Avg_Speed', title="⚡ Speed Trend (Avg Seconds per Scan)", markers=True)
+            fig_speed.update_layout(yaxis_title="Seconds")
+            st.plotly_chart(fig_speed, use_container_width=True)
+            
+            c_chart1, c_chart2 = st.columns(2)
+            
+            # Volume Trend
+            with c_chart1:
+                fig_vol = px.bar(stats_over_time, x=stats_over_time.index, y='Transactions', title="📊 Work Volume Trend")
+                st.plotly_chart(fig_vol, use_container_width=True)
+                
+            # Error Trend
+            with c_chart2:
+                fig_err = px.bar(stats_over_time, x=stats_over_time.index, y='Errors', title="🛡️ Error/Discrepancy Trend", color_discrete_sequence=['red'])
+                st.plotly_chart(fig_err, use_container_width=True)
+                
+            with st.expander("View Raw Progression Data"):
+                st.dataframe(stats_over_time)
+
+    else:
+        st.info("No data available.")
