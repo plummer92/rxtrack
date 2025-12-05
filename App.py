@@ -1,10 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.17)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.19)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Transaction Counts (Tab 1 & 10): Now EXCLUDE "Verify Inventory" events.
-#      (Time spent verifying is still included in Dwell/Machine time calculations).
-#   2. Previous fixes (Reconciliation logic, Slider safety) preserved.
+#   1. Tab 9 (Reconciliation): Added Timestamps for Floor/Pharmacy actions.
+#   2. Tab 9: Added "Gap Time" calculation to show lag between Unload and Return.
+#   3. Previous fixes (Zeroes handling, Filters) preserved.
 ###############################################
 
 import streamlit as st
@@ -44,15 +44,23 @@ st.markdown("""
 #                 HELPER FUNCTIONS
 ###########################################################
 def seconds_to_mmss(seconds):
-    if pd.isna(seconds) or seconds < 0: return "-"
+    if pd.isna(seconds): return "-"
+    # Handle negative gaps (e.g. Pharmacy scanned before Floor recorded on this day group)
+    is_negative = seconds < 0
+    seconds = abs(seconds)
+    
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
+    
+    time_str = ""
     if h > 0:
-        return f"{h}h {m}m {s}s"
+        time_str = f"{h}h {m}m {s}s"
     elif m > 0:
-        return f"{m}m {s}s"
+        time_str = f"{m}m {s}s"
     else:
-        return f"{s}s"
+        time_str = f"{s}s"
+        
+    return f"-{time_str}" if is_negative else time_str
 
 def safe_to_date(val):
     if val is None: return datetime.today().date()
@@ -483,10 +491,8 @@ with tab_over:
         session_stats = df.groupby('session_id').agg(total_machine_time=('machine_time_sec', 'sum'))
         avg_machine_time = session_stats['total_machine_time'].mean()
         
-        # FIX: Exclude "Verify Inventory" from Transaction Counts
         real_transactions = df[~df['event_type'].astype(str).str.contains('verify', case=False, na=False)]
         total_tx = len(real_transactions)
-        
         active_techs = df['user_name'].nunique()
         
         c1, c2, c3 = st.columns(3)
@@ -760,28 +766,44 @@ with tab_recon:
         unloads = df[df['event_type'].astype(str).str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
         unloads['Date'] = unloads['dt'].dt.date
         unloads['med_id_clean'] = unloads['med_id'].astype(str).str.strip().str.upper()
-        unloads_agg = unloads.groupby(['Date', 'med_id_clean']).agg({'qty': 'sum', 'med_desc': 'first'}).reset_index()
-        unloads_agg = unloads_agg.rename(columns={'qty': 'qty_floor'})
+        # Aggregation Logic with Timestamps
+        unloads_agg = unloads.groupby(['Date', 'med_id_clean']).agg({
+            'qty': 'sum', 
+            'med_desc': 'first',
+            'dt': 'min' # Capture First Unload Time
+        }).reset_index()
+        unloads_agg = unloads_agg.rename(columns={'qty': 'qty_floor', 'dt': 'floor_time'})
 
         # 2. Returns
         returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
         returns['Date'] = returns['dt'].dt.date
         returns['med_id_clean'] = returns['med_id'].astype(str).str.strip().str.upper()
-        returns_agg = returns.groupby(['Date', 'med_id_clean']).agg({'qty': 'sum'}).reset_index()
-        returns_agg = returns_agg.rename(columns={'qty': 'qty_returned'})
+        # Aggregation Logic with Timestamps
+        returns_agg = returns.groupby(['Date', 'med_id_clean']).agg({
+            'qty': 'sum',
+            'dt': 'min' # Capture First Return Time
+        }).reset_index()
+        returns_agg = returns_agg.rename(columns={'qty': 'qty_returned', 'dt': 'pharm_time'})
 
         # 3. Merge
         comparison = pd.merge(unloads_agg, returns_agg, on=['Date', 'med_id_clean'], how='outer')
         comparison.fillna(0, inplace=True)
         comparison['Variance'] = comparison['qty_returned'] - comparison['qty_floor']
         
+        # Calculate Gap (Time to Return)
+        # Note: '0' fills might convert timestamps to int 0, need to handle NaTs
+        comparison['floor_time'] = pd.to_datetime(comparison['floor_time'].replace(0, pd.NaT))
+        comparison['pharm_time'] = pd.to_datetime(comparison['pharm_time'].replace(0, pd.NaT))
+        comparison['gap_seconds'] = (comparison['pharm_time'] - comparison['floor_time']).dt.total_seconds()
+        
         # 4. Status
         def get_status(row):
             if row['Variance'] == 0: return "✅ Match"
-            if row['Variance'] < 0: return "❌ Missing Items"
-            return "❓ Extra Returned"
+            if row['Variance'] < 0: return "❌ Missing Items (Unloaded but not Returned)"
+            return "❓ Extra Returned (No Unload record)"
         
         comparison['Status'] = comparison.apply(get_status, axis=1)
+        comparison['Gap'] = comparison['gap_seconds'].apply(seconds_to_mmss)
         
         # 5. Metrics
         total_floor = comparison['qty_floor'].sum()
@@ -794,15 +816,19 @@ with tab_recon:
         c3.metric("Match Rate", f"{match_rate:.1f}%")
         
         st.divider()
+        st.info("ℹ️ **Gap Time:** Shows how long it took from the first unload on the floor to the first return scan in the pharmacy. Negative values imply items were carried over from a previous shift.")
         
         # 6. Detailed Table
         st.dataframe(
-            comparison[['Date', 'med_id_clean', 'med_desc', 'qty_floor', 'qty_returned', 'Variance', 'Status']].sort_values('Date', ascending=False),
+            comparison[['Date', 'med_id_clean', 'med_desc', 'qty_floor', 'floor_time', 'qty_returned', 'pharm_time', 'Variance', 'Status', 'Gap']].sort_values('Date', ascending=False),
             column_config={
                 "Date": st.column_config.DateColumn("Date"),
-                "qty_floor": st.column_config.NumberColumn("Floor (Unloads/Bins)"),
-                "qty_returned": st.column_config.NumberColumn("Returned (Pharmacy)"),
-                "Variance": st.column_config.NumberColumn("Difference"),
+                "qty_floor": st.column_config.NumberColumn("Floor Qty"),
+                "floor_time": st.column_config.DatetimeColumn("First Unload", format="HH:mm:ss"),
+                "qty_returned": st.column_config.NumberColumn("Pharm Qty"),
+                "pharm_time": st.column_config.DatetimeColumn("First Return", format="HH:mm:ss"),
+                "Variance": st.column_config.NumberColumn("Diff"),
+                "Gap": st.column_config.TextColumn("Time to Return")
             },
             use_container_width=True
         )
