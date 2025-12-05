@@ -1,12 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.15)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.16)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Added Tab 10: Tech Comparison Tool.
-#      - Side-by-side selector for User + Date.
-#      - Head-to-head metrics with Delta indicators.
-#      - Dual Sankey diagrams for route comparison.
-#   2. Previous fixes preserved.
+#   1. Tab 9 (Reconciliation): Now includes 'Empty Return Bin' transactions 
+#      alongside 'Unloads' on the floor side of the equation.
+#   2. Previous fixes (Tech Comparison, Pharmacy Filters) preserved.
 ###############################################
 
 import streamlit as st
@@ -754,12 +752,12 @@ with tab_pharm:
 with tab_recon:
     st.markdown("### 🔄 Unload vs. Return Reconciliation")
     if not df.empty and not df_pharm.empty:
-        # 1. Unloads
-        unloads = df[df['event_type'].astype(str).str.contains('unload', case=False, na=False)].copy()
+        # 1. Unloads + Empty Return Bin
+        unloads = df[df['event_type'].astype(str).str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
         unloads['Date'] = unloads['dt'].dt.date
         unloads['med_id_clean'] = unloads['med_id'].astype(str).str.strip().str.upper()
         unloads_agg = unloads.groupby(['Date', 'med_id_clean']).agg({'qty': 'sum', 'med_desc': 'first'}).reset_index()
-        unloads_agg = unloads_agg.rename(columns={'qty': 'qty_unloaded'})
+        unloads_agg = unloads_agg.rename(columns={'qty': 'qty_floor'})
 
         # 2. Returns
         returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
@@ -771,7 +769,7 @@ with tab_recon:
         # 3. Merge
         comparison = pd.merge(unloads_agg, returns_agg, on=['Date', 'med_id_clean'], how='outer')
         comparison.fillna(0, inplace=True)
-        comparison['Variance'] = comparison['qty_returned'] - comparison['qty_unloaded']
+        comparison['Variance'] = comparison['qty_returned'] - comparison['qty_floor']
         
         # 4. Status
         def get_status(row):
@@ -782,12 +780,12 @@ with tab_recon:
         comparison['Status'] = comparison.apply(get_status, axis=1)
         
         # 5. Metrics
-        total_unloaded = comparison['qty_unloaded'].sum()
+        total_floor = comparison['qty_floor'].sum()
         total_returned = comparison['qty_returned'].sum()
         match_rate = len(comparison[comparison['Variance'] == 0]) / len(comparison) * 100 if len(comparison) > 0 else 0
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Items Unloaded", int(total_unloaded))
+        c1.metric("Items from Floor", int(total_floor))
         c2.metric("Items Returned", int(total_returned))
         c3.metric("Match Rate", f"{match_rate:.1f}%")
         
@@ -795,10 +793,10 @@ with tab_recon:
         
         # 6. Detailed Table
         st.dataframe(
-            comparison[['Date', 'med_id_clean', 'med_desc', 'qty_unloaded', 'qty_returned', 'Variance', 'Status']].sort_values('Date', ascending=False),
+            comparison[['Date', 'med_id_clean', 'med_desc', 'qty_floor', 'qty_returned', 'Variance', 'Status']].sort_values('Date', ascending=False),
             column_config={
                 "Date": st.column_config.DateColumn("Date"),
-                "qty_unloaded": st.column_config.NumberColumn("Unloaded (Floor)"),
+                "qty_floor": st.column_config.NumberColumn("Floor (Unloads/Bins)"),
                 "qty_returned": st.column_config.NumberColumn("Returned (Pharmacy)"),
                 "Variance": st.column_config.NumberColumn("Difference"),
             },
