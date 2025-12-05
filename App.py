@@ -1,11 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.21)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.22)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 9 (Reconciliation): Fixed "0" in Med Description. 
-#      - Logic now intelligently merges names and only fills Qty with 0.
-#   2. Tab 10 (Tech Comparison): Replaced complex Heatmap with clean Hourly Bar Chart.
-#   3. Previous fixes preserved.
+#   1. Tab 2 (Process Mining): Fixed KeyError 'source_idx'. 
+#      - Aligned column names for Sankey Diagram generation.
+#   2. Previous fixes preserved.
 ###############################################
 
 import streamlit as st
@@ -552,11 +551,30 @@ with tab_mine:
             
             fig_sankey = go.Figure(data=[go.Sankey(
                 node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#1E90FF"),
-                link=dict(source=path_counts['source_idx'], target=path_counts['target_idx'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
+                link=dict(source=path_counts['source'], target=path_counts['target'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
             )])
             fig_sankey.update_layout(title_text="Top 30 Workflow Routes", font_size=10, height=500)
             st.plotly_chart(fig_sankey, use_container_width=True)
             
+            st.divider()
+            
+            # --- ACTIVITY HEATMAP (Side-by-Side) ---
+            st.markdown("#### 🔥 Activity Heatmap (Device vs Hour)")
+            # Group by Hour and Device
+            activity = moves.groupby([moves['dt'].dt.hour.rename('Hour'), 'device']).size().reset_index(name='count')
+            
+            fig_heat = px.density_heatmap(
+                activity, 
+                x='Hour', 
+                y='device', 
+                z='count', 
+                nbinsx=24, 
+                color_continuous_scale='Viridis',
+                title="When are devices most active?"
+            )
+            fig_heat.update_layout(xaxis=dict(tickmode='linear', dtick=1))
+            st.plotly_chart(fig_heat, use_container_width=True)
+
             with st.expander("View Raw Path Data"):
                  st.dataframe(path_counts.sort_values('count', ascending=False), use_container_width=True)
         else:
