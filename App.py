@@ -1,9 +1,9 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.22)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.23)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 2 (Process Mining): Fixed KeyError 'source_idx'. 
-#      - Aligned column names for Sankey Diagram generation.
+#   1. Tab 9 (Reconciliation): Added "Exclude Controlled Substances" filter.
+#      - Filters out narcotics by keyword to improve match rate accuracy.
 #   2. Previous fixes preserved.
 ###############################################
 
@@ -772,56 +772,53 @@ with tab_pharm:
 # --- TAB 9: RETURN RECONCILIATION ---
 with tab_recon:
     st.markdown("### 🔄 Unload vs. Return Reconciliation")
+    
+    # 1. Filter Checkbox for Controlled Substances
+    filter_controlled = st.checkbox("Exclude Controlled Substances (Narcotics)", value=True, help="Removes common controlled meds (Oxy, Morphine, etc.) from reconciliation as they follow different workflows.")
+
     if not df.empty and not df_pharm.empty:
-        # 1. Unloads + Empty Return Bin
+        # 2. Unloads + Empty Return Bin
         unloads = df[df['event_type'].astype(str).str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
+        
+        # 3. Returns
+        returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
+
+        # APPLY FILTER IF CHECKED
+        if filter_controlled:
+            narc_terms = ["OXYCODONE", "MORPHINE", "FENTANYL", "HYDROMORPHONE", "HYDROCODONE", "LORAZEPAM", 
+                          "MIDAZOLAM", "DIAZEPAM", "ALPRAZOLAM", "CODEINE", "METHADONE", "KETAMINE", 
+                          "TRAMADOL", "ZOLPIDEM", "PHENOBARBITAL", "BUPRENORPHINE"]
+            pattern = '|'.join(narc_terms)
+            unloads = unloads[~unloads['med_desc'].astype(str).str.contains(pattern, case=False, na=False)]
+            returns = returns[~returns['med_desc'].astype(str).str.contains(pattern, case=False, na=False)]
+
+        # --- Aggregation Logic ---
         unloads['Date'] = unloads['dt'].dt.date
         unloads['med_id_clean'] = unloads['med_id'].astype(str).str.strip().str.upper()
-        # Aggregation Logic with Timestamps
-        unloads_agg = unloads.groupby(['Date', 'med_id_clean']).agg({
-            'qty': 'sum', 
-            'med_desc': 'first',
-            'dt': 'min' # Capture First Unload Time
-        }).reset_index()
+        unloads_agg = unloads.groupby(['Date', 'med_id_clean']).agg({'qty': 'sum', 'med_desc': 'first', 'dt': 'min'}).reset_index()
         unloads_agg = unloads_agg.rename(columns={'qty': 'qty_floor', 'dt': 'floor_time'})
 
-        # 2. Returns
-        returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
         returns['Date'] = returns['dt'].dt.date
         returns['med_id_clean'] = returns['med_id'].astype(str).str.strip().str.upper()
-        # Aggregation Logic with Timestamps
-        returns_agg = returns.groupby(['Date', 'med_id_clean']).agg({
-            'qty': 'sum',
-            'dt': 'min', # Capture First Return Time
-            'med_desc': 'first' # Include Description
-        }).reset_index()
+        returns_agg = returns.groupby(['Date', 'med_id_clean']).agg({'qty': 'sum', 'dt': 'min', 'med_desc': 'first'}).reset_index()
         returns_agg = returns_agg.rename(columns={'qty': 'qty_returned', 'dt': 'pharm_time'})
 
-        # 3. Merge
-        comparison = pd.merge(
-            unloads_agg, 
-            returns_agg, 
-            on=['Date', 'med_id_clean'], 
-            how='outer',
-            suffixes=('_floor', '_pharm')
-        )
+        # 4. Merge
+        comparison = pd.merge(unloads_agg, returns_agg, on=['Date', 'med_id_clean'], how='outer', suffixes=('_floor', '_pharm'))
         
-        # 3a. Coalesce Description
+        # Coalesce Description and Fill NAs
         comparison['med_desc'] = comparison['med_desc_floor'].combine_first(comparison['med_desc_pharm'])
-        
-        # 3b. Fill only numeric/dates with suitable defaults
         comparison['qty_floor'] = comparison['qty_floor'].fillna(0)
         comparison['qty_returned'] = comparison['qty_returned'].fillna(0)
         
         comparison['Variance'] = comparison['qty_returned'] - comparison['qty_floor']
         
         # Calculate Gap (Time to Return)
-        # Note: '0' fills might convert timestamps to int 0, need to handle NaTs
         comparison['floor_time'] = pd.to_datetime(comparison['floor_time'])
         comparison['pharm_time'] = pd.to_datetime(comparison['pharm_time'])
         comparison['gap_seconds'] = (comparison['pharm_time'] - comparison['floor_time']).dt.total_seconds()
         
-        # 4. Status
+        # 5. Status & Metrics
         def get_status(row):
             if row['Variance'] == 0: return "✅ Match"
             if row['Variance'] < 0: return "❌ Missing Items (Unloaded but not Returned)"
@@ -830,7 +827,6 @@ with tab_recon:
         comparison['Status'] = comparison.apply(get_status, axis=1)
         comparison['Gap'] = comparison['gap_seconds'].apply(seconds_to_mmss)
         
-        # 5. Metrics
         total_floor = comparison['qty_floor'].sum()
         total_returned = comparison['qty_returned'].sum()
         match_rate = len(comparison[comparison['Variance'] == 0]) / len(comparison) * 100 if len(comparison) > 0 else 0
