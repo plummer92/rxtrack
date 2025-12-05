@@ -1,11 +1,11 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.28)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.29)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 11 (Progression): Renamed "Errors" to "Discrepancies Encountered".
-#   2. Tab 11: Changed chart color to Orange (Neutral).
-#   3. Tab 11: Added explicit disclaimer about "Finder vs Creator" nuance.
-#   4. Previous fixes preserved.
+#   1. Tab 11 (Progression): Added "Discrepancy Drill-Down" section.
+#      - Allows filtering error rows by date (mimicking graph click).
+#      - Shows row-by-row details (Reason, Qty, etc.) for deeper analysis.
+#   2. Previous fixes preserved.
 ###############################################
 
 import streamlit as st
@@ -300,7 +300,7 @@ def load_events_data(start_date, end_date):
     if not conn: return pd.DataFrame()
     
     query = """
-        SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit, e.pk 
+        SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, e.discrepancy_reason, c.cost_per_unit, e.pk 
         FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
         WHERE e.dt::date BETWEEN %s AND %s
     """
@@ -1089,6 +1089,40 @@ with tab_progress:
                 st.plotly_chart(fig_err, use_container_width=True)
                 st.info("ℹ️ **Discrepancies Encountered:** This tracks how often a discrepancy was recorded during a transaction. High numbers may indicate a technician who is diligent at finding and fixing errors made by others.")
                 
+            # 5. Drill Down Feature
+            st.divider()
+            st.subheader("🔍 Discrepancy Drill-Down")
+            
+            # Get detailed error rows
+            # user_df index is currently 'dt' due to previous set_index
+            error_rows = user_df[user_df['is_error'] == 1].reset_index()
+            
+            if not error_rows.empty:
+                # Optional: Filter by specific date if the user wants to "click" into a day
+                # We simulate "clicking" by providing a dropdown of dates with errors
+                error_dates = sorted(error_rows['dt'].dt.date.unique(), reverse=True)
+                selected_err_date = st.selectbox(
+                    "Filter Drill-Down by Date", 
+                    options=["All Dates"] + [d.strftime('%Y-%m-%d') for d in error_dates],
+                    key="prog_drill_date"
+                )
+                
+                if selected_err_date != "All Dates":
+                    error_rows = error_rows[error_rows['dt'].dt.date.astype(str) == selected_err_date]
+                
+                st.dataframe(
+                    error_rows[['dt', 'device', 'med_desc', 'event_type', 'qty', 'discrepancy_qty', 'discrepancy_reason']].sort_values('dt', ascending=False),
+                    column_config={
+                        "dt": st.column_config.DatetimeColumn("Timestamp", format="MMM DD, HH:mm:ss"),
+                        "qty": st.column_config.NumberColumn("Tx Qty"),
+                        "discrepancy_qty": st.column_config.NumberColumn("Variance"),
+                        "discrepancy_reason": st.column_config.TextColumn("Reason"),
+                    },
+                    use_container_width=True
+                )
+            else:
+                st.success("🎉 No discrepancies found for this user in the selected dataset.")
+            
             with st.expander("View Raw Progression Data"):
                 st.dataframe(stats_over_time)
 
