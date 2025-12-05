@@ -1,10 +1,10 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.16)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.17)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 9 (Reconciliation): Now includes 'Empty Return Bin' transactions 
-#      alongside 'Unloads' on the floor side of the equation.
-#   2. Previous fixes (Tech Comparison, Pharmacy Filters) preserved.
+#   1. Transaction Counts (Tab 1 & 10): Now EXCLUDE "Verify Inventory" events.
+#      (Time spent verifying is still included in Dwell/Machine time calculations).
+#   2. Previous fixes (Reconciliation logic, Slider safety) preserved.
 ###############################################
 
 import streamlit as st
@@ -482,7 +482,11 @@ with tab_over:
         
         session_stats = df.groupby('session_id').agg(total_machine_time=('machine_time_sec', 'sum'))
         avg_machine_time = session_stats['total_machine_time'].mean()
-        total_tx = len(df)
+        
+        # FIX: Exclude "Verify Inventory" from Transaction Counts
+        real_transactions = df[~df['event_type'].astype(str).str.contains('verify', case=False, na=False)]
+        total_tx = len(real_transactions)
+        
         active_techs = df['user_name'].nunique()
         
         c1, c2, c3 = st.columns(3)
@@ -840,7 +844,9 @@ with tab_compare:
             else:
                 # -- METRICS FUNCTION --
                 def get_shift_metrics(sub_df):
-                    tx_count = len(sub_df)
+                    # FIX: Filter OUT 'Verify' from comparison count
+                    tx_count = len(sub_df[~sub_df['event_type'].astype(str).str.contains('verify', case=False, na=False)])
+                    
                     # Avg Machine Time (only positive values)
                     avg_mach = sub_df[sub_df['machine_time_sec'] > 0]['machine_time_sec'].mean()
                     avg_mach = 0 if pd.isna(avg_mach) else avg_mach
