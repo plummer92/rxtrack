@@ -1,11 +1,11 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.26)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.28)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Added Tab 11: Tech Progression.
-#      - Individual longitudinal analysis (Trend over time).
-#      - Aggregates by Day/Week/Month.
-#   2. Previous fixes (Slider Key, Filters, etc.) preserved.
+#   1. Tab 11 (Progression): Renamed "Errors" to "Discrepancies Encountered".
+#   2. Tab 11: Changed chart color to Orange (Neutral).
+#   3. Tab 11: Added explicit disclaimer about "Finder vs Creator" nuance.
+#   4. Previous fixes preserved.
 ###############################################
 
 import streamlit as st
@@ -1029,14 +1029,18 @@ with tab_progress:
             is_valid = ~user_df['event_type'].astype(str).str.contains('verify', case=False, na=False)
             # Assign it back to the dataframe. Since index is set, alignment is preserved.
             user_df['is_valid_tx'] = is_valid.astype(int)
+            
+            # FIX: Ensure "Errors" only counts discrepancies on VALID transactions (excluding verifies)
+            # This prevents Errors > Transactions scenarios
+            user_df['is_error'] = ((user_df['discrepancy_qty'] != 0) & (is_valid)).astype(int)
 
             
             # Basic Counts
             stats_over_time = user_df.resample(freq_code).agg({
                 'is_valid_tx': 'sum',
-                'discrepancy_qty': lambda x: (x != 0).sum(),
+                'is_error': 'sum',
                 'machine_time_sec': 'mean'
-            }).rename(columns={'is_valid_tx': 'Transactions', 'discrepancy_qty': 'Errors', 'machine_time_sec': 'Avg_Speed'})
+            }).rename(columns={'is_valid_tx': 'Transactions', 'is_error': 'Discrepancies_Encountered', 'machine_time_sec': 'Avg_Speed'})
             
             # B. Session Dwell Time (Needs session grouping first)
             # Reset index to get 'dt' back for session grouping
@@ -1074,8 +1078,16 @@ with tab_progress:
                 
             # Error Trend
             with c_chart2:
-                fig_err = px.bar(stats_over_time, x=stats_over_time.index, y='Errors', title="🛡️ Error/Discrepancy Trend", color_discrete_sequence=['red'])
+                # CHANGED: "Discrepancies Encountered" (Neutral) + Orange Color
+                fig_err = px.bar(
+                    stats_over_time, 
+                    x=stats_over_time.index, 
+                    y='Discrepancies_Encountered', 
+                    title="⚠️ Discrepancies Encountered Trend", 
+                    color_discrete_sequence=['orange']
+                )
                 st.plotly_chart(fig_err, use_container_width=True)
+                st.info("ℹ️ **Discrepancies Encountered:** This tracks how often a discrepancy was recorded during a transaction. High numbers may indicate a technician who is diligent at finding and fixing errors made by others.")
                 
             with st.expander("View Raw Progression Data"):
                 st.dataframe(stats_over_time)
