@@ -1,11 +1,11 @@
 ###############################################
-# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.20)
+# RXTRACK: EXECUTIVE DASHBOARD (FINAL ISOLATED v9.21)
 # Architecture: Tri-Table Strategy (Events | Config | Pharmacy)
 # Fixes: 
-#   1. Tab 10 (Tech Comparison): Enhanced Visualization Suite.
-#      - Added "Activity Heatmaps" (Device vs Hour) side-by-side.
-#      - Optimized Sankey to show Top 30 paths only (cleaner view).
-#   2. Previous fixes preserved.
+#   1. Tab 9 (Reconciliation): Fixed "0" in Med Description. 
+#      - Logic now intelligently merges names and only fills Qty with 0.
+#   2. Tab 10 (Tech Comparison): Replaced complex Heatmap with clean Hourly Bar Chart.
+#   3. Previous fixes preserved.
 ###############################################
 
 import streamlit as st
@@ -552,30 +552,11 @@ with tab_mine:
             
             fig_sankey = go.Figure(data=[go.Sankey(
                 node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#1E90FF"),
-                link=dict(source=path_counts['source'], target=path_counts['target'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
+                link=dict(source=path_counts['source_idx'], target=path_counts['target_idx'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
             )])
             fig_sankey.update_layout(title_text="Top 30 Workflow Routes", font_size=10, height=500)
             st.plotly_chart(fig_sankey, use_container_width=True)
             
-            st.divider()
-            
-            # --- ACTIVITY HEATMAP (Side-by-Side) ---
-            st.markdown("#### 🔥 Activity Heatmap (Device vs Hour)")
-            # Group by Hour and Device
-            activity = moves.groupby([moves['dt'].dt.hour.rename('Hour'), 'device']).size().reset_index(name='count')
-            
-            fig_heat = px.density_heatmap(
-                activity, 
-                x='Hour', 
-                y='device', 
-                z='count', 
-                nbinsx=24, 
-                color_continuous_scale='Viridis',
-                title="When are devices most active?"
-            )
-            fig_heat.update_layout(xaxis=dict(tickmode='linear', dtick=1))
-            st.plotly_chart(fig_heat, use_container_width=True)
-
             with st.expander("View Raw Path Data"):
                  st.dataframe(path_counts.sort_values('count', ascending=False), use_container_width=True)
         else:
@@ -793,19 +774,33 @@ with tab_recon:
         # Aggregation Logic with Timestamps
         returns_agg = returns.groupby(['Date', 'med_id_clean']).agg({
             'qty': 'sum',
-            'dt': 'min' # Capture First Return Time
+            'dt': 'min', # Capture First Return Time
+            'med_desc': 'first' # Include Description
         }).reset_index()
         returns_agg = returns_agg.rename(columns={'qty': 'qty_returned', 'dt': 'pharm_time'})
 
         # 3. Merge
-        comparison = pd.merge(unloads_agg, returns_agg, on=['Date', 'med_id_clean'], how='outer')
-        comparison.fillna(0, inplace=True)
+        comparison = pd.merge(
+            unloads_agg, 
+            returns_agg, 
+            on=['Date', 'med_id_clean'], 
+            how='outer',
+            suffixes=('_floor', '_pharm')
+        )
+        
+        # 3a. Coalesce Description
+        comparison['med_desc'] = comparison['med_desc_floor'].combine_first(comparison['med_desc_pharm'])
+        
+        # 3b. Fill only numeric/dates with suitable defaults
+        comparison['qty_floor'] = comparison['qty_floor'].fillna(0)
+        comparison['qty_returned'] = comparison['qty_returned'].fillna(0)
+        
         comparison['Variance'] = comparison['qty_returned'] - comparison['qty_floor']
         
         # Calculate Gap (Time to Return)
         # Note: '0' fills might convert timestamps to int 0, need to handle NaTs
-        comparison['floor_time'] = pd.to_datetime(comparison['floor_time'].replace(0, pd.NaT))
-        comparison['pharm_time'] = pd.to_datetime(comparison['pharm_time'].replace(0, pd.NaT))
+        comparison['floor_time'] = pd.to_datetime(comparison['floor_time'])
+        comparison['pharm_time'] = pd.to_datetime(comparison['pharm_time'])
         comparison['gap_seconds'] = (comparison['pharm_time'] - comparison['floor_time']).dt.total_seconds()
         
         # 4. Status
@@ -939,33 +934,37 @@ with tab_compare:
                         link=dict(source=path_counts['source'], target=path_counts['target'], value=path_counts['count'], color='rgba(200, 200, 200, 0.3)')
                     )]).update_layout(title_text=title, height=400, font=dict(size=10))
 
-                # -- HEATMAP FUNCTION --
-                def make_heatmap(sub_df, title):
-                    activity = sub_df.groupby([sub_df['dt'].dt.hour.rename('Hour'), 'device']).size().reset_index(name='count')
-                    return px.density_heatmap(
-                        activity, x='Hour', y='device', z='count', 
-                        title=title, nbinsx=24, color_continuous_scale='Viridis'
+                # -- BAR CHART FUNCTION (Replaced Heatmap) --
+                def make_activity_bar(sub_df, title):
+                    # Group by Hour only
+                    activity = sub_df.groupby([sub_df['dt'].dt.hour.rename('Hour')]).size().reset_index(name='Transactions')
+                    return px.bar(
+                        activity, 
+                        x='Hour', 
+                        y='Transactions',
+                        title=title,
+                        range_x=[0, 23] # Force full day view
                     )
 
                 c_san_1, c_san_2 = st.columns(2)
                 
                 # Plot A
                 fig_a_sankey = make_sankey(df_a, f"{user_a} Routes")
-                fig_a_heat = make_heatmap(df_a, "Activity")
+                fig_a_bar = make_activity_bar(df_a, f"{user_a} Activity by Hour")
                 
                 with c_san_1:
                     if fig_a_sankey: st.plotly_chart(fig_a_sankey, use_container_width=True)
                     else: st.info("No movement data.")
-                    st.plotly_chart(fig_a_heat, use_container_width=True)
+                    st.plotly_chart(fig_a_bar, use_container_width=True)
                 
                 # Plot B
                 fig_b_sankey = make_sankey(df_b, f"{user_b} Routes")
-                fig_b_heat = make_heatmap(df_b, "Activity")
+                fig_b_bar = make_activity_bar(df_b, f"{user_b} Activity by Hour")
                 
                 with c_san_2:
                     if fig_b_sankey: st.plotly_chart(fig_b_sankey, use_container_width=True)
                     else: st.info("No movement data.")
-                    st.plotly_chart(fig_b_heat, use_container_width=True)
+                    st.plotly_chart(fig_b_bar, use_container_width=True)
 
         else:
             st.info("Please select users and dates to compare.")
