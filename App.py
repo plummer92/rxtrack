@@ -1,9 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.18 - Image Fix)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.19)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Image Error Fix: Corrected st.image syntax to use raw URL string.
-#   2. Retained: Late Arrival Logic, Name Matching, Trade Logic, etc.
+#   1. ValueError Fix: Resolved "cannot insert dt, already exists" in Tab 12.
+#      - Renamed aggregation column to avoid conflict with index name.
+#   2. Retained: Late Arrival Logic, Name Matching, Trade Logic, Image Fix.
 ###############################################################
 
 import streamlit as st
@@ -909,9 +910,9 @@ with tab_attend:
                 # Manual Overrides (Event Name -> Schedule Name)
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
-                if "kathleen" in s or "nugent" in s: return "kathy"
-                if "deloris" in s or "spain" in s: return "dee"
-                if "daniel" in s or "jabusch" in s: return "dan"
+                if "nugent" in s or "kathleen" in s: return "kathy"
+                if "spain" in s or "deloris" in s: return "dee"
+                if "jabusch" in s or "daniel" in s: return "dan"
                 
                 # Default Logic: "Last, First" -> "First"
                 if "," in s:
