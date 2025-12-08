@@ -512,7 +512,7 @@ def load_schedule_data(start_date, end_date):
 init_db()
 
 with st.sidebar:
-    st.image("[https://img.icons8.com/color/96/caduceus.png](https://img.icons8.com/color/96/caduceus.png)", width=50)
+    st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("SJS St. Johns Pharmacy")
     
     rows_events, rows_pharm, min_db, max_db, present_dates = get_db_stats()
