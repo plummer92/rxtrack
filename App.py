@@ -1,11 +1,9 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.2)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.1)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Attendance Audit:
-#      - Intelligent Name Matching (First Name basis).
-#      - EXCLUDES "IV" shifts from metrics/main view (as requested).
-#      - Adds dedicated "PTO / Time Off" section.
+#   1. Resolved NameError by ensuring tab_attend is defined before use.
+#   2. Implemented intelligent name matching (First Name logic) for Attendance Audit.
 ###############################################################
 
 import streamlit as st
@@ -878,21 +876,11 @@ with tab_attend:
             audit['shift_type'] = audit['shift_type'].fillna("-")
             audit['tx_count'] = audit['tx_count'].fillna(0)
             
-            # --- 4. STATUS LOGIC (UPDATED FOR PTO & IV) ---
+            # --- 4. STATUS LOGIC ---
             def get_attendance_status(row):
-                shift = str(row['shift_type']).upper()
-                
-                # Check for PTO First
-                if row['assignment_type'] == 'PTO' or 'PTO' in shift:
-                    return "🌴 PTO"
-                
-                # Check for IV Shifts (Excluded from strict tracking)
-                if 'IV' in shift:
-                    if row['tx_count'] > 0: return "✅ Present (IV)"
-                    return "💉 IV Shift (Not Tracked)"
-
                 # Scheduled (Shift exists) but No Transactions
                 if row['shift_type'] != "-" and row['tx_count'] == 0:
+                    if row['assignment_type'] == 'PTO': return "🌴 PTO"
                     return "❌ No Show / No Login"
                 
                 # Not Scheduled but Has Transactions
@@ -908,46 +896,20 @@ with tab_attend:
             audit['Status'] = audit.apply(get_attendance_status, axis=1)
             
             # --- 5. METRICS & VISUALS ---
-            # Filter out IV shifts from standard metrics if they are "Not Tracked"
-            standard_audit = audit[~audit['Status'].str.contains("IV")]
-            
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Scheduled (Non-IV)", len(standard_audit[standard_audit['shift_type'] != "-"]))
-            m2.metric("Present", len(standard_audit[standard_audit['Status'] == "✅ Present"]))
+            m1.metric("Scheduled", len(audit[audit['shift_type'] != "-"]))
+            m2.metric("Present", len(audit[audit['Status'] == "✅ Present"]))
             m3.metric("Unscheduled", len(audit[audit['Status'] == "➕ Unscheduled Pick-up"]))
-            m4.metric("No Shows", len(standard_audit[standard_audit['Status'] == "❌ No Show / No Login"]))
+            m4.metric("No Shows", len(audit[audit['Status'] == "❌ No Show / No Login"]))
             
             st.divider()
             
-            # --- 6. PTO SECTION ---
-            pto_df = audit[audit['Status'] == "🌴 PTO"].copy()
-            if not pto_df.empty:
-                with st.expander("🌴 PTO / Time Off Report", expanded=True):
-                    st.dataframe(
-                        pto_df[['date_obj', 'display_name', 'shift_type', 'note']].sort_values('date_obj', ascending=False),
-                        column_config={
-                            "date_obj": st.column_config.DateColumn("Date"),
-                            "display_name": "Technician",
-                            "shift_type": "Leave Type",
-                            "note": "Notes"
-                        },
-                        use_container_width=True
-                    )
-            
-            # --- 7. MAIN ATTENDANCE TABLE (Excluding PTO) ---
-            st.subheader("Daily Attendance Log")
-            
-            filter_status = st.multiselect(
-                "Filter Status", 
-                options=["❌ No Show / No Login", "➕ Unscheduled Pick-up", "✅ Present", "💉 IV Shift (Not Tracked)", "✅ Present (IV)"], 
-                default=["❌ No Show / No Login", "➕ Unscheduled Pick-up"]
-            )
+            filter_status = st.multiselect("Filter Status", options=["❌ No Show / No Login", "➕ Unscheduled Pick-up", "✅ Present", "🌴 PTO"], default=["❌ No Show / No Login", "➕ Unscheduled Pick-up"])
             
             # Add text search filter
             search_name = st.text_input("Search Name", "")
             
-            view_df = audit[audit['Status'] != "🌴 PTO"].copy() # Exclude PTO from main list
-            
+            view_df = audit.copy()
             if filter_status: view_df = view_df[view_df['Status'].isin(filter_status)]
             if search_name: view_df = view_df[view_df['display_name'].astype(str).str.contains(search_name, case=False)]
                 
