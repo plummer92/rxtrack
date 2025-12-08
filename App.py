@@ -1,5 +1,5 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.12)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.13)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
 #   1. Syntax Error: Removed stray markdown characters.
@@ -7,6 +7,7 @@
 #      - "Phi Ho" -> Maps to "Ali"
 #      - "Rebekah" -> Maps to "Bekah"
 #      - (Plus previous aliases: Kathy, Dee, Dan)
+#   3. New Feature: Late Arrival / Early Departure Detection
 ###############################################################
 
 import streamlit as st
@@ -909,14 +910,14 @@ with tab_attend:
             # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
-                # Manual Overrides
+                # Manual Overrides (Event Name -> Schedule Name)
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
                 if "nugent" in s or "kathleen" in s: return "kathy"
                 if "spain" in s or "deloris" in s: return "dee"
                 if "jabusch" in s or "daniel" in s: return "dan"
                 
-                # Default Logic
+                # Default Logic: "Last, First" -> "First"
                 if "," in s:
                     parts = s.split(",")
                     if len(parts) >= 2:
