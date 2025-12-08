@@ -1,10 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.7)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.9)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Calendar Fix: Restored the query to fetch "active dates" so the calendar turns green.
-#   2. Connection Stability: Retained v10.6 connection fixes.
-#   3. Attendance Audit: Retained IV Exclusion & PTO Separation.
+#   1. Name Mapping Update: Added specific aliases:
+#      - "Phi Ho" -> Maps to "Ali"
+#      - "Rebekah" -> Maps to "Bekah"
+#   2. Previous Logic Retained: Calendar Green, IV Excluded, PTO Separated.
 ###############################################################
 
 import streamlit as st
@@ -131,13 +132,13 @@ def get_db_stats():
         try:
             cur.execute("SELECT COUNT(*) FROM events")
             rows_events = cur.fetchone()[0]
-        except: pass
+        except Exception as e: st.sidebar.warning(f"Events Count Error: {e}")
 
         # 2. Count Pharmacy
         try:
             cur.execute("SELECT COUNT(*) FROM pharmacy_orders")
             rows_pharm = cur.fetchone()[0]
-        except: pass
+        except Exception as e: st.sidebar.warning(f"Pharm Count Error: {e}")
         
         # 3. Get Date Range
         try:
@@ -152,14 +153,19 @@ def get_db_stats():
             if range_result and range_result[0] and range_result[1]:
                 min_dt = safe_to_date(range_result[0])
                 max_dt = safe_to_date(range_result[1])
-        except: pass
+        except Exception as e: pass
         
-        # 4. Get Active Dates for Calendar (RESTORED)
+        # 4. Get Active Dates for Calendar (Check BOTH tables)
         try:
-            if rows_events > 0:
-                cur.execute("SELECT DISTINCT dt::date FROM events WHERE dt IS NOT NULL")
-                present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
-        except: pass
+            query = """
+                SELECT DISTINCT dt::date FROM events WHERE dt IS NOT NULL
+                UNION
+                SELECT DISTINCT dt::date FROM pharmacy_orders WHERE dt IS NOT NULL
+            """
+            cur.execute(query)
+            present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
+        except Exception as e:
+            st.sidebar.warning(f"Calendar Load Error: {e}")
             
         cur.close()
         return rows_events, rows_pharm, min_dt, max_dt, present_dates
@@ -896,6 +902,11 @@ with tab_attend:
             # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
+                # Manual Overrides
+                if "phi" in s and "ho" in s: return "ali"
+                if "rebekah" in s: return "bekah"
+                
+                # Default Logic
                 if "," in s:
                     parts = s.split(",")
                     if len(parts) >= 2:
