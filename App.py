@@ -1,11 +1,12 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.17)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.17 - Late Arrival)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Attendance Logic: Now checks BOTH Pyxis AND Pharmacy tables for presence.
-#      (Fixes issue where Javier had Pharm transactions but showed as No Show).
-#   2. Name Matching: Added aliases for Kathleen->Kathy, Deloris->Dee, Daniel->Dan.
-#   3. Previous Logic: Trade parsing, IV/Admin exclusion, PTO separation preserved.
+#   1. New Feature: Late Arrival Detection.
+#      - Extracts shift start time from schedule (e.g. "0600" -> 06:00).
+#      - Compares with first transaction time.
+#      - Calculates "Minutes Late".
+#   2. Retained: All previous fixes (Name matching, trade logic, etc.).
 ###############################################################
 
 import streamlit as st
@@ -16,7 +17,7 @@ import psycopg2
 from psycopg2.extras import execute_batch
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, time
 import gc
 import re
 
