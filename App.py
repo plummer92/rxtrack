@@ -1,11 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.15)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.16)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Name Matching: added aliases for Ali (Phi Ho), Bekah, Kathy, Dee, Dan.
-#   2. Schedule Parsing: Improved handling of "trn"/"training" to extract primary tech.
-#   3. Admin Exclusion: Emily, Joe, and Krista removed from Attendance Audit.
-#   4. Previous Logic Retained: Trade logic, IV Exclusion, PTO Separation.
+#   1. Schedule Parsing: "Javier trn Kathy" -> Name: "Javier", Note: "Javier trn Kathy".
+#   2. Name Matching: Added specific aliases (Phi Ho->Ali, Daniel->Dan, etc.).
+#   3. Admin Exclusion: Emily, Joe, Krista removed from Attendance Audit.
+#   4. Retained: IV Exclusion, PTO Separation, Trade logic.
 ###############################################################
 
 import streamlit as st
@@ -331,10 +331,10 @@ def clean_schedule_data(df):
         
         lower_entry = entry.lower()
         
-        # Check for Training
+        # Check for Training (Extract the FIRST name, e.g. "Javier" from "Javier trn Kathy")
         if 'trn' in lower_entry or 'training' in lower_entry:
             parts = re.split(r'\s(?:trn|training)\s', entry, flags=re.IGNORECASE)
-            name = parts[0].strip()
+            name = parts[0].strip() # Take the first part as the primary staff
             assignment_type = "Training"
             note = entry 
         # Check for PTO
@@ -908,14 +908,14 @@ with tab_attend:
             # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
-                # Manual Overrides
+                # Manual Overrides (Event Name -> Schedule Name)
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
                 if "nugent" in s or "kathleen" in s: return "kathy"
                 if "spain" in s or "deloris" in s: return "dee"
                 if "jabusch" in s or "daniel" in s: return "dan"
                 
-                # Default Logic
+                # Default Logic: "Last, First" -> "First"
                 if "," in s:
                     parts = s.split(",")
                     if len(parts) >= 2:
