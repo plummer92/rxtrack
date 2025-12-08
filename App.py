@@ -1,9 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.14)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.15)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Admin Exclusion: Emily, Joe, and Krista removed from Attendance Audit.
-#   2. Previous Logic Retained: Trade logic, Name mapping, IV Exclusion, PTO Separation.
+#   1. Name Matching: added aliases for Ali (Phi Ho), Bekah, Kathy, Dee, Dan.
+#   2. Schedule Parsing: Improved handling of "trn"/"training" to extract primary tech.
+#   3. Admin Exclusion: Emily, Joe, and Krista removed from Attendance Audit.
+#   4. Previous Logic Retained: Trade logic, IV Exclusion, PTO Separation.
 ###############################################################
 
 import streamlit as st
