@@ -1,10 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.21)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.22)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. True Productivity: Added "Transactions Per Hour" to Tabs 10 & 11.
-#   2. Syntax/Image Fixes: Corrected st.image and file structure.
-#   3. Retained: All custom name logic (Ali, Bekah, etc.) and Schedule logic.
+#   1. ValueError Fix: Resolved "cannot insert Active_Hours" in Tab 11.
+#      - Ensures clean DataFrame assignment for productivity metrics.
+#   2. True Productivity: "Transactions Per Hour" added to Tabs 10 & 11.
+#   3. Retained: All custom name logic, Trade logic, Schedule parsing.
 ###############################################################
 
 import streamlit as st
@@ -472,7 +473,6 @@ def load_schedule_data(start_date, end_date):
 init_db()
 
 with st.sidebar:
-    # IMAGE FIX: Use raw URL string without markdown formatting
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("SJS St. Johns Pharmacy")
     
@@ -870,7 +870,8 @@ with tab_progress:
                 'machine_time_sec': 'mean'
             }).fillna(0).rename(columns={'is_valid_tx': 'Transactions', 'is_error': 'Errors', 'machine_time_sec': 'Speed'})
             
-            stats_over_time['Active_Hours'] = duration_res
+            # Use safe assignment to avoid ValueError if column exists
+            stats_over_time = stats_over_time.assign(Active_Hours=duration_res)
             stats_over_time['Tx_Per_Hour'] = stats_over_time['Transactions'] / stats_over_time['Active_Hours'].replace(0, 1)
 
             st.plotly_chart(px.line(stats_over_time, x=stats_over_time.index, y='Tx_Per_Hour', title="⚡ Productivity Trend (Transactions / Hour)", markers=True), use_container_width=True)
@@ -922,15 +923,14 @@ with tab_attend:
             all_presence['match_key'] = all_presence['user_name'].apply(get_event_name_key)
             
             # Group to find unique work days per person & First Scan Time
-            # FIX: Rename the 'dt' column immediately to avoid collision with index
+            # FIX: Rename columns first to avoid index collision
             worked_days = all_presence.groupby([all_presence['dt'].dt.date, 'match_key']).agg({
                 'user_name': 'first',  # Keep one name for reference
                 'source': 'count',      # Count total transactions across systems
                 'dt': 'min'             # Get the FIRST scan time
             }).rename(columns={'dt': 'first_scan', 'source': 'tx_count', 'user_name': 'actual_user_name'}).reset_index()
             
-            # Adjust column names after reset_index (group keys become columns)
-            # The groupby keys are 'dt' (date) and 'match_key'.
+            # Rename columns to ensure clean merge keys
             worked_days.columns = ['date_obj', 'match_key', 'actual_user_name', 'tx_count', 'first_scan']
             
             def get_sched_name_key(staff_name):
@@ -1047,4 +1047,3 @@ with tab_attend:
             st.dataframe(df_sched)
     else:
         st.info("No Schedule Data found. Upload 'Staff Schedule' CSV.")
-        
