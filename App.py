@@ -1,12 +1,9 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.17 - Late Arrival)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.18 - Image Fix)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. New Feature: Late Arrival Detection.
-#      - Extracts shift start time from schedule (e.g. "0600" -> 06:00).
-#      - Compares with first transaction time.
-#      - Calculates "Minutes Late".
-#   2. Retained: All previous fixes (Name matching, trade logic, etc.).
+#   1. Image Error Fix: Corrected st.image syntax to use raw URL string.
+#   2. Retained: Late Arrival Logic, Name Matching, Trade Logic, etc.
 ###############################################################
 
 import streamlit as st
@@ -332,10 +329,10 @@ def clean_schedule_data(df):
         
         lower_entry = entry.lower()
         
-        # Check for Training (Extract the FIRST name, e.g. "Javier" from "Javier trn Kathy")
+        # Check for Training
         if 'trn' in lower_entry or 'training' in lower_entry:
             parts = re.split(r'\s(?:trn|training)\s', entry, flags=re.IGNORECASE)
-            name = parts[0].strip() # Take the first part as the primary staff
+            name = parts[0].strip()
             assignment_type = "Training"
             note = entry 
         # Check for PTO
@@ -512,7 +509,7 @@ def load_schedule_data(start_date, end_date):
 init_db()
 
 with st.sidebar:
-    st.image("[https://img.icons8.com/color/96/caduceus.png](https://img.icons8.com/color/96/caduceus.png)", width=50)
+    st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("SJS St. Johns Pharmacy")
     
     rows_events, rows_pharm, min_db, max_db, present_dates = get_db_stats()
@@ -906,11 +903,10 @@ with tab_attend:
     
     if not df_sched.empty:
         if not df.empty:
-            # --- 1. NAME MATCHING (Unified for Pyxis + Pharmacy) ---
+            # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
-                
-                # Manual Overrides (Map Full/Last-First Name -> First Name)
+                # Manual Overrides (Event Name -> Schedule Name)
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
                 if "kathleen" in s or "nugent" in s: return "kathy"
@@ -924,9 +920,9 @@ with tab_attend:
                         return parts[1].strip().split(" ")[0] 
                 return s.split(" ")[0]
 
-            # 2. COMBINE SOURCES FOR 'WORKED' CHECK (Pyxis + Pharmacy)
-            # This fixes the Javier issue (worked in Pharm, but not Pyxis)
+            df['match_key'] = df['user_name'].apply(get_event_name_key)
             
+            # --- COMBINE SOURCES FOR 'WORKED' CHECK (Pyxis + Pharmacy) ---
             # Prepare Pyxis List
             pyxis_presence = df[['dt', 'user_name']].copy()
             pyxis_presence['source'] = 'Pyxis'
@@ -939,14 +935,14 @@ with tab_attend:
             all_presence = pd.concat([pyxis_presence, pharm_presence])
             all_presence['match_key'] = all_presence['user_name'].apply(get_event_name_key)
             
-            # Group to find unique work days per person
+            # Group to find unique work days per person & First Scan Time
             worked_days = all_presence.groupby([all_presence['dt'].dt.date, 'match_key']).agg({
                 'user_name': 'first',  # Keep one name for reference
-                'source': 'count'      # Count total transactions across systems
-            }).reset_index().rename(columns={'source': 'tx_count', 'user_name': 'actual_user_name'})
-            worked_days.columns = ['date_obj', 'match_key', 'actual_user_name', 'tx_count']
+                'source': 'count',      # Count total transactions across systems
+                'dt': 'min'             # Get the FIRST scan time
+            }).reset_index().rename(columns={'source': 'tx_count', 'user_name': 'actual_user_name', 'dt': 'first_scan'})
+            worked_days.columns = ['date_obj', 'match_key', 'actual_user_name', 'tx_count', 'first_scan']
             
-            # 3. SCHEDULE MATCHING
             def get_sched_name_key(staff_name):
                 return str(staff_name).strip().split(" ")[0].lower()
             
@@ -956,42 +952,67 @@ with tab_attend:
             # Merge Schedule with Combined Presence
             audit = pd.merge(df_sched, worked_days, on=['date_obj', 'match_key'], how='outer')
             
-            # --- 4. DISPLAY CLEANUP ---
+            # --- 2. DISPLAY CLEANUP ---
             audit['display_name'] = audit['actual_user_name'].fillna(audit['staff_name'])
             audit['display_name'] = audit['display_name'].fillna("Unknown")
             audit['shift_type'] = audit['shift_type'].fillna("-")
             audit['tx_count'] = audit['tx_count'].fillna(0)
             
-            # --- 5. STATUS LOGIC (Including IV/PTO) ---
+            # --- 3. LATE ARRIVAL LOGIC ---
+            def calculate_lateness(row):
+                if pd.isnull(row['first_scan']): return 0 # Didn't work, so not "late" in this sense
+                
+                # Try to parse start time from shift_type (e.g. "0600 IV" -> 06:00)
+                shift_str = str(row['shift_type'])
+                match = re.search(r'(\d{3,4})', shift_str)
+                if match:
+                    time_str = match.group(1)
+                    # Pad with leading zero if needed (e.g., "600" -> "0600")
+                    if len(time_str) == 3: time_str = "0" + time_str
+                    
+                    try:
+                        # Create a full datetime for the Scheduled Start
+                        sched_time = datetime.strptime(time_str, "%H%M").time()
+                        sched_start_dt = datetime.combine(row['date_obj'], sched_time)
+                        
+                        # Compare with Actual First Scan
+                        actual_start = row['first_scan']
+                        
+                        # Calculate difference in minutes
+                        diff = (actual_start - sched_start_dt).total_seconds() / 60
+                        return diff
+                    except:
+                        return 0
+                return 0
+
+            audit['minutes_late'] = audit.apply(calculate_lateness, axis=1)
+            
+            def format_lateness(val):
+                if val > 10: return f"🔴 {int(val)} min late"
+                if val < -10: return f"🟢 {int(abs(val))} min early"
+                return "On Time"
+
+            audit['Punctuality'] = audit['minutes_late'].apply(format_lateness)
+            
+            # --- 4. STATUS LOGIC (Including IV/PTO) ---
             def get_attendance_status(row):
                 shift = str(row['shift_type']).upper()
-                
-                # Check for PTO First
                 if row['assignment_type'] == 'PTO' or 'PTO' in shift:
                     return "🌴 PTO"
-                
-                # Check for IV Shifts (Excluded from strict tracking)
                 if 'IV' in shift:
                     if row['tx_count'] > 0: return "✅ Present (IV)"
                     return "💉 IV Shift (Not Tracked)"
-
-                # Scheduled (Shift exists) but No Transactions
                 if row['shift_type'] != "-" and row['tx_count'] == 0:
                     return "❌ No Show / No Login"
-                
-                # Not Scheduled but Has Transactions
                 if row['shift_type'] == "-" and row['tx_count'] > 0:
                     return "➕ Unscheduled Pick-up"
-                
-                # Scheduled and Has Transactions
                 if row['shift_type'] != "-" and row['tx_count'] > 0:
                     return "✅ Present"
-                
                 return "Unknown"
 
             audit['Status'] = audit.apply(get_attendance_status, axis=1)
             
-            # --- 6. METRICS & FILTERING ---
+            # --- 5. METRICS & FILTERING ---
             
             # EXCLUDE ADMINS (Emily, Joe, Krista)
             admins = ['emily', 'joe', 'krista']
@@ -1008,7 +1029,7 @@ with tab_attend:
             
             st.divider()
             
-            # --- 7. SEPARATE PTO SECTION ---
+            # --- 6. SEPARATE PTO SECTION ---
             pto_df = audit[audit['Status'] == "🌴 PTO"].copy()
             if not pto_df.empty:
                 with st.expander("🌴 PTO / Time Off Report", expanded=True):
@@ -1018,8 +1039,8 @@ with tab_attend:
                         use_container_width=True
                     )
             
-            # --- 8. MAIN TABLE (Filters out PTO & IV by default) ---
-            st.subheader("Daily Attendance Log")
+            # --- 7. MAIN TABLE (Filters out PTO & IV by default) ---
+            st.subheader("Daily Attendance & Punctuality Log")
             filter_status = st.multiselect(
                 "Filter Status", 
                 options=["❌ No Show / No Login", "➕ Unscheduled Pick-up", "✅ Present", "💉 IV Shift (Not Tracked)", "✅ Present (IV)"], 
@@ -1030,8 +1051,14 @@ with tab_attend:
             if filter_status: view_df = view_df[view_df['Status'].isin(filter_status)]
                 
             st.dataframe(
-                view_df[['date_obj', 'display_name', 'shift_type', 'Status', 'tx_count', 'note']].sort_values('date_obj', ascending=False), 
-                column_config={"date_obj": "Date", "display_name": "Tech", "shift_type": "Shift", "tx_count": "Transactions"},
+                view_df[['date_obj', 'display_name', 'shift_type', 'Status', 'Punctuality', 'tx_count', 'note']].sort_values('date_obj', ascending=False), 
+                column_config={
+                    "date_obj": st.column_config.DateColumn("Date"),
+                    "display_name": "Technician",
+                    "shift_type": "Shift",
+                    "tx_count": st.column_config.NumberColumn("Transactions"),
+                    "note": "Notes"
+                },
                 use_container_width=True
             )
         else:
