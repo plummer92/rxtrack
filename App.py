@@ -1,14 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.10)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.11)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Name Mapping Update: Added specific aliases:
-#      - "Phi Ho" -> Maps to "Ali"
-#      - "Rebekah" -> Maps to "Bekah"
-#      - "Nugent, Kathleen" -> Maps to "Kathy"
-#      - "Spain, Deloris" -> Maps to "Dee"
-#      - "Jabusch, Daniel" -> Maps to "Dan"
-#   2. Previous Logic Retained: Calendar Green, IV Excluded, PTO Separated.
+#   1. Schedule Parsing: Added logic to handle "(Trade)" shifts.
+#      - "Javier (Trade)" -> Cleans to "Javier".
+#      - "Ali ( Trade)" -> Cleans to "Ali".
+#   2. Previous Fixes: Name mapping, IV Exclusion, PTO Separation.
 ###############################################################
 
 import streamlit as st
@@ -342,6 +339,10 @@ def clean_schedule_data(df):
         elif any(x in entry.lower() for x in ['pto', 'off', 'sick']):
             name = entry
             assignment_type = "PTO"
+        # Check for Trade (Clean the name, keep note)
+        elif 'trade' in entry.lower():
+            name = re.sub(r'\(?\s*trade\s*\)?', '', entry, flags=re.IGNORECASE).strip()
+            note = entry
         
         return pd.Series([name.title(), assignment_type, note])
 
@@ -1001,3 +1002,4 @@ with tab_attend:
             st.dataframe(df_sched)
     else:
         st.info("No Schedule Data found. Upload 'Staff Schedule' CSV.")
+```
