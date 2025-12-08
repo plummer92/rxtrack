@@ -2,10 +2,9 @@
 # RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.11)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Schedule Parsing: Added logic to handle "(Trade)" shifts.
-#      - "Javier (Trade)" -> Cleans to "Javier".
-#      - "Ali ( Trade)" -> Cleans to "Ali".
-#   2. Previous Fixes: Name mapping, IV Exclusion, PTO Separation.
+#   1. Syntax Error: Cleaned up file structure.
+#   2. Schedule Parsing: Handles "(Trade)" and "( Trade)" suffixes.
+#   3. Name Matching: added aliases for Ali (Phi Ho), Bekah, Kathy, Dee, Dan.
 ###############################################################
 
 import streamlit as st
@@ -329,18 +328,20 @@ def clean_schedule_data(df):
         note = ""
         name = entry
         
+        lower_entry = entry.lower()
+        
         # Check for Training
-        if 'trn' in entry.lower() or 'training' in entry.lower():
+        if 'trn' in lower_entry or 'training' in lower_entry:
             parts = re.split(r'\s(?:trn|training)\s', entry, flags=re.IGNORECASE)
             name = parts[0].strip()
             assignment_type = "Training"
             note = entry 
         # Check for PTO
-        elif any(x in entry.lower() for x in ['pto', 'off', 'sick']):
+        elif any(x in lower_entry for x in ['pto', 'off', 'sick']):
             name = entry
             assignment_type = "PTO"
-        # Check for Trade (Clean the name, keep note)
-        elif 'trade' in entry.lower():
+        # Check for Trade (Remove "Trade" from name)
+        elif 'trade' in lower_entry:
             name = re.sub(r'\(?\s*trade\s*\)?', '', entry, flags=re.IGNORECASE).strip()
             note = entry
         
@@ -509,7 +510,7 @@ def load_schedule_data(start_date, end_date):
 init_db()
 
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
+    st.image("[https://img.icons8.com/color/96/caduceus.png](https://img.icons8.com/color/96/caduceus.png)", width=50)
     st.title("SJS St. Johns Pharmacy")
     
     rows_events, rows_pharm, min_db, max_db, present_dates = get_db_stats()
@@ -906,14 +907,14 @@ with tab_attend:
             # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
-                # Manual Overrides
+                # Manual Overrides (Event Name -> Schedule Name)
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
-                if "nugent" in s and "kathleen" in s: return "kathy"
-                if "spain" in s and "deloris" in s: return "dee"
-                if "jabusch" in s and "daniel" in s: return "dan"
+                if "nugent" in s or "kathleen" in s: return "kathy"
+                if "spain" in s or "deloris" in s: return "dee"
+                if "jabusch" in s or "daniel" in s: return "dan"
                 
-                # Default Logic
+                # Default Logic: "Last, First" -> "First"
                 if "," in s:
                     parts = s.split(",")
                     if len(parts) >= 2:
@@ -1002,4 +1003,3 @@ with tab_attend:
             st.dataframe(df_sched)
     else:
         st.info("No Schedule Data found. Upload 'Staff Schedule' CSV.")
-```
