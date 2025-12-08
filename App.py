@@ -1,9 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.4)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.5)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Robust Database Stats: Prevents "0 Rows" error by separating count queries from date queries.
-#   2. Attendance Audit: Intelligent Name Matching, IV Exclusion, and PTO Separation.
+#   1. Auto-Initialization: Creates tables if missing to prevent "0" errors.
+#   2. Diagnostic Stats: Shows real errors instead of silent 0s.
+#   3. Attendance: IV Exclusion & PTO Separation fully implemented.
 ###############################################################
 
 import streamlit as st
@@ -16,7 +17,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
 import gc
-import re  # Required for schedule parsing
+import re
 
 # Page Config
 st.set_page_config(
@@ -65,7 +66,7 @@ def generate_pk(row):
     return hashlib.sha256(row_str.encode()).hexdigest()
 
 ###########################################################
-#                 DATABASE CONNECTION
+#                 DATABASE CONNECTION & INIT
 ###########################################################
 @st.cache_resource
 def get_db_connection():
@@ -75,33 +76,72 @@ def get_db_connection():
         st.error(f"❌ DB Connection Error: {e}")
         return None
 
-def get_db_stats():
-    """ Calculates date range across primary tables safely. """
+def init_db():
+    """ Ensures all tables exist to prevent 'Relation does not exist' errors. """
     conn = get_db_connection()
-    # Default values
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        # Events
+        cur.execute("""CREATE TABLE IF NOT EXISTS events (
+            pk TEXT PRIMARY KEY, user_name TEXT, device TEXT, med_id TEXT, med_desc TEXT, 
+            event_type TEXT, dt TIMESTAMP, qty FLOAT, beginning_qty FLOAT, ending_qty FLOAT, 
+            discrepancy_qty FLOAT, discrepancy_reason TEXT, resolution_dt TIMESTAMP
+        );""")
+        # Config
+        cur.execute("""CREATE TABLE IF NOT EXISTS config_events (
+            pk TEXT PRIMARY KEY, dt TIMESTAMP, user_name TEXT, device TEXT, med_id TEXT, 
+            location TEXT, action_type TEXT, activity_category TEXT, min_qty FLOAT, max_qty FLOAT, is_standard BOOLEAN
+        );""")
+        # Costs
+        cur.execute("""CREATE TABLE IF NOT EXISTS med_costs (
+            med_id TEXT PRIMARY KEY, cost_per_unit FLOAT
+        );""")
+        # Pharmacy
+        cur.execute("""CREATE TABLE IF NOT EXISTS pharmacy_orders (
+            pk TEXT PRIMARY KEY, queue_id TEXT, priority TEXT, dt TIMESTAMP, med_id TEXT, 
+            med_desc TEXT, destination TEXT, user_name TEXT, qty FLOAT
+        );""")
+        # Schedule
+        cur.execute("""CREATE TABLE IF NOT EXISTS staff_schedule (
+            pk TEXT PRIMARY KEY, dt DATE, day_name TEXT, staff_name TEXT, 
+            shift_type TEXT, assignment_type TEXT, raw_entry TEXT, note TEXT
+        );""")
+        conn.commit()
+        cur.close()
+    except Exception as e:
+        st.sidebar.error(f"⚠️ DB Init Error: {e}")
+
+def get_db_stats():
+    """ Calculates stats safely with error reporting. """
+    conn = get_db_connection()
+    if not conn: return 0, 0, datetime.today().date(), datetime.today().date(), set()
+    
+    # Defaults
     rows_events = 0
     rows_pharm = 0
     min_dt = datetime.today().date()
     max_dt = datetime.today().date()
     present_dates = set()
     
-    if not conn: return rows_events, rows_pharm, min_dt, max_dt, present_dates
-    
     try:
         cur = conn.cursor()
         
-        # 1. Get Counts (Independently to prevent total failure)
+        # 1. Count Events
         try:
             cur.execute("SELECT COUNT(*) FROM events")
             rows_events = cur.fetchone()[0]
-        except: pass
+        except Exception as e:
+            st.sidebar.warning(f"Events table query failed: {e}")
 
+        # 2. Count Pharmacy
         try:
             cur.execute("SELECT COUNT(*) FROM pharmacy_orders")
             rows_pharm = cur.fetchone()[0]
-        except: pass
+        except Exception as e:
+            st.sidebar.warning(f"Pharm table query failed: {e}")
         
-        # 2. Get Date Range (Safely)
+        # 3. Get Dates (Robust to format errors)
         try:
             cur.execute("""
                 SELECT MIN(dt), MAX(dt) FROM (
@@ -115,22 +155,15 @@ def get_db_stats():
                 min_dt = safe_to_date(range_result[0])
                 max_dt = safe_to_date(range_result[1])
         except Exception as e:
-            # If date query fails, valid rows still exist, just default the slider
-            print(f"Date Query Error: {e}")
+            # Date query failed, likely bad data format. We proceed with defaults so counts still show.
+            print(f"Date Calc Error: {e}")
             pass
-        
-        # 3. Calendar Heatmap Data
-        try:
-            if rows_events > 0:
-                cur.execute("SELECT DISTINCT dt::date FROM events WHERE dt IS NOT NULL")
-                present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
-        except: pass
             
         cur.close()
         return rows_events, rows_pharm, min_dt, max_dt, present_dates
         
     except Exception as e:
-        # Return whatever we managed to gather
+        st.sidebar.error(f"Critical DB Stats Error: {e}")
         return rows_events, rows_pharm, min_dt, max_dt, present_dates
 
 ###########################################################
@@ -450,6 +483,9 @@ def load_schedule_data(start_date, end_date):
 #                 DASHBOARD UI
 ###########################################################
 
+# AUTO-INIT DB ON LOAD
+init_db()
+
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
     st.title("SJS St. Johns Pharmacy")
@@ -553,7 +589,7 @@ if df.empty and df_config.empty and df_pharm.empty and df_sched.empty:
     st.info("👋 Ready for data. Upload files to begin.")
     st.stop()
 
-# --- TABS DEFINITION (Crucial for Layout) ---
+# --- TABS DEFINITION ---
 tab_over, tab_mine, tab_comp, tab_pends, tab_loads, tab_effic, tab_drill, tab_pharm, tab_recon, tab_compare, tab_progress, tab_attend = st.tabs([
     "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", "📈 Tech Progression", "📅 Attendance"
 ])
@@ -845,87 +881,56 @@ with tab_attend:
     
     if not df_sched.empty:
         if not df.empty:
-            # --- 1. INTELLIGENT NAME MATCHING ---
-            
-            # Helper to extract a "Match Key" (First Name) from Event Data (Format: "Last, First")
+            # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
                 if "," in s:
-                    # "Epps, Raeven" -> "raeven"
                     parts = s.split(",")
                     if len(parts) >= 2:
                         return parts[1].strip().split(" ")[0] 
-                # Fallback: just take first word
                 return s.split(" ")[0]
 
             df['match_key'] = df['user_name'].apply(get_event_name_key)
             
-            # Group events by Date and Match Key
             worked_days = df.groupby([df['dt'].dt.date, 'match_key']).agg({
-                'user_name': 'first',  # Keep the full original name for display
+                'user_name': 'first',
                 'pk': 'count'
             }).reset_index().rename(columns={'pk': 'tx_count', 'user_name': 'actual_user_name'})
             worked_days.columns = ['date_obj', 'match_key', 'actual_user_name', 'tx_count']
             
-            # Helper to extract "Match Key" from Schedule Data (Format: "Raeven" or "Melissa S.")
             def get_sched_name_key(staff_name):
-                # "Melissa S." -> "melissa"
                 return str(staff_name).strip().split(" ")[0].lower()
             
             df_sched['match_key'] = df_sched['staff_name'].apply(get_sched_name_key)
             df_sched['date_obj'] = df_sched['dt'].dt.date
             
-            # --- 2. MERGE DATA ---
-            # Merge on Date + First Name Key
-            audit = pd.merge(
-                df_sched, 
-                worked_days, 
-                on=['date_obj', 'match_key'], 
-                how='outer'
-            )
+            audit = pd.merge(df_sched, worked_days, on=['date_obj', 'match_key'], how='outer')
             
-            # --- 3. CLEAN UP DISPLAY ---
-            # Fill NaNs
-            # If actual_user_name is missing (No Show), use the scheduled staff_name
+            # --- 2. DISPLAY CLEANUP ---
             audit['display_name'] = audit['actual_user_name'].fillna(audit['staff_name'])
-            # If staff_name is missing (Unscheduled), format the display name
             audit['display_name'] = audit['display_name'].fillna("Unknown")
-            
             audit['shift_type'] = audit['shift_type'].fillna("-")
             audit['tx_count'] = audit['tx_count'].fillna(0)
             
-            # --- 4. STATUS LOGIC (UPDATED FOR PTO & IV) ---
+            # --- 3. STATUS LOGIC (Including IV/PTO) ---
             def get_attendance_status(row):
                 shift = str(row['shift_type']).upper()
-                
-                # Check for PTO First
                 if row['assignment_type'] == 'PTO' or 'PTO' in shift:
                     return "🌴 PTO"
-                
-                # Check for IV Shifts (Excluded from strict tracking)
                 if 'IV' in shift:
                     if row['tx_count'] > 0: return "✅ Present (IV)"
                     return "💉 IV Shift (Not Tracked)"
-
-                # Scheduled (Shift exists) but No Transactions
                 if row['shift_type'] != "-" and row['tx_count'] == 0:
                     return "❌ No Show / No Login"
-                
-                # Not Scheduled but Has Transactions
                 if row['shift_type'] == "-" and row['tx_count'] > 0:
                     return "➕ Unscheduled Pick-up"
-                
-                # Scheduled and Has Transactions
                 if row['shift_type'] != "-" and row['tx_count'] > 0:
                     return "✅ Present"
-                
                 return "Unknown"
 
             audit['Status'] = audit.apply(get_attendance_status, axis=1)
             
-            # --- 5. METRICS & VISUALS ---
-            # Filter out IV shifts from standard metrics if they are "Not Tracked"
-            # This ensures they don't skew the "Scheduled" or "No Show" counts
+            # --- 4. METRICS (Exclude IV Untracked from stats) ---
             standard_audit = audit[~audit['Status'].str.contains("IV")]
             
             m1, m2, m3, m4 = st.columns(4)
@@ -936,52 +941,34 @@ with tab_attend:
             
             st.divider()
             
-            # --- 6. PTO SECTION ---
+            # --- 5. SEPARATE PTO SECTION ---
             pto_df = audit[audit['Status'] == "🌴 PTO"].copy()
             if not pto_df.empty:
                 with st.expander("🌴 PTO / Time Off Report", expanded=True):
                     st.dataframe(
                         pto_df[['date_obj', 'display_name', 'shift_type', 'note']].sort_values('date_obj', ascending=False),
-                        column_config={
-                            "date_obj": st.column_config.DateColumn("Date"),
-                            "display_name": "Technician",
-                            "shift_type": "Leave Type",
-                            "note": "Notes"
-                        },
+                        column_config={"date_obj": "Date", "display_name": "Tech", "shift_type": "Leave Type"},
                         use_container_width=True
                     )
             
-            # --- 7. MAIN ATTENDANCE TABLE (Excluding PTO & IV Untracked by default) ---
+            # --- 6. MAIN TABLE (Filters out PTO & IV by default) ---
             st.subheader("Daily Attendance Log")
-            
             filter_status = st.multiselect(
                 "Filter Status", 
                 options=["❌ No Show / No Login", "➕ Unscheduled Pick-up", "✅ Present", "💉 IV Shift (Not Tracked)", "✅ Present (IV)"], 
                 default=["❌ No Show / No Login", "➕ Unscheduled Pick-up"]
             )
             
-            # Add text search filter
-            search_name = st.text_input("Search Name", "")
-            
-            # Exclude PTO from main list so it's not redundant
             view_df = audit[audit['Status'] != "🌴 PTO"].copy() 
-            
             if filter_status: view_df = view_df[view_df['Status'].isin(filter_status)]
-            if search_name: view_df = view_df[view_df['display_name'].astype(str).str.contains(search_name, case=False)]
                 
             st.dataframe(
                 view_df[['date_obj', 'display_name', 'shift_type', 'Status', 'tx_count', 'note']].sort_values('date_obj', ascending=False), 
-                column_config={
-                    "date_obj": st.column_config.DateColumn("Date"),
-                    "display_name": "Technician",
-                    "shift_type": "Shift",
-                    "tx_count": st.column_config.NumberColumn("Transactions"),
-                    "note": "Notes"
-                },
+                column_config={"date_obj": "Date", "display_name": "Tech", "shift_type": "Shift", "tx_count": "Transactions"},
                 use_container_width=True
             )
         else:
-            st.warning("Schedule loaded, but no Event data found to compare.")
+            st.warning("Schedule loaded, but no Event data found.")
             st.dataframe(df_sched)
     else:
         st.info("No Schedule Data found. Upload 'Staff Schedule' CSV.")
