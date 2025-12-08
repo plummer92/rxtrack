@@ -862,7 +862,8 @@ with tab_progress:
                 if len(x) < 2: return 0.5
                 return (x.index.max() - x.index.min()).total_seconds() / 3600
             
-            duration_res = user_df.resample(freq_map[time_freq]).apply(calc_duration)
+           # Fixed Code: Select 'pk' (or any single column) to ensure a Series is returned
+            duration_res = user_df['pk'].resample(freq_map[time_freq]).apply(calc_duration)
 
             stats_over_time = user_df.resample(freq_map[time_freq]).agg({
                 'is_valid_tx': 'sum',
