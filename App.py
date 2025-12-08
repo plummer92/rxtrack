@@ -1,12 +1,9 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.3)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.4)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Restored full application structure (Fixed NameError).
-#   2. Attendance Audit Improvements:
-#      - Intelligent Name Matching (First Name basis).
-#      - EXCLUDES "IV" shifts from metrics & main table (as requested).
-#      - Adds dedicated "PTO / Time Off" section.
+#   1. Robust Database Stats: Prevents "0 Rows" error by separating count queries from date queries.
+#   2. Attendance Audit: Intelligent Name Matching, IV Exclusion, and PTO Separation.
 ###############################################################
 
 import streamlit as st
@@ -79,42 +76,62 @@ def get_db_connection():
         return None
 
 def get_db_stats():
-    """ Calculates date range across primary tables. """
+    """ Calculates date range across primary tables safely. """
     conn = get_db_connection()
-    if not conn: return 0, 0, datetime.today().date(), datetime.today().date(), set()
+    # Default values
+    rows_events = 0
+    rows_pharm = 0
+    min_dt = datetime.today().date()
+    max_dt = datetime.today().date()
+    present_dates = set()
+    
+    if not conn: return rows_events, rows_pharm, min_dt, max_dt, present_dates
     
     try:
         cur = conn.cursor()
-        # Get Range
-        cur.execute("""
-            SELECT MIN(dt), MAX(dt) FROM (
-                SELECT dt::timestamp as dt FROM events
-                UNION ALL
-                SELECT dt::timestamp as dt FROM pharmacy_orders
-            ) as combined
-        """)
-        range_result = cur.fetchone()
-        min_dt = safe_to_date(range_result[0]) if range_result and range_result[0] else datetime.today().date()
-        max_dt = safe_to_date(range_result[1]) if range_result and range_result[1] else datetime.today().date()
         
-        # Get Counts
-        cur.execute("SELECT COUNT(*) FROM events")
-        rows_events = cur.fetchone()[0]
+        # 1. Get Counts (Independently to prevent total failure)
+        try:
+            cur.execute("SELECT COUNT(*) FROM events")
+            rows_events = cur.fetchone()[0]
+        except: pass
+
+        try:
+            cur.execute("SELECT COUNT(*) FROM pharmacy_orders")
+            rows_pharm = cur.fetchone()[0]
+        except: pass
         
-        cur.execute("SELECT COUNT(*) FROM pharmacy_orders")
-        rows_pharm = cur.fetchone()[0]
+        # 2. Get Date Range (Safely)
+        try:
+            cur.execute("""
+                SELECT MIN(dt), MAX(dt) FROM (
+                    SELECT dt::date as dt FROM events WHERE dt IS NOT NULL
+                    UNION ALL
+                    SELECT dt::date as dt FROM pharmacy_orders WHERE dt IS NOT NULL
+                ) as combined
+            """)
+            range_result = cur.fetchone()
+            if range_result and range_result[0] and range_result[1]:
+                min_dt = safe_to_date(range_result[0])
+                max_dt = safe_to_date(range_result[1])
+        except Exception as e:
+            # If date query fails, valid rows still exist, just default the slider
+            print(f"Date Query Error: {e}")
+            pass
         
-        # Calendar Heatmap Data
-        present_dates = set()
-        if rows_events > 0:
-            cur.execute("SELECT DISTINCT DATE(dt) FROM events")
-            present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
+        # 3. Calendar Heatmap Data
+        try:
+            if rows_events > 0:
+                cur.execute("SELECT DISTINCT dt::date FROM events WHERE dt IS NOT NULL")
+                present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
+        except: pass
             
         cur.close()
         return rows_events, rows_pharm, min_dt, max_dt, present_dates
         
     except Exception as e:
-        return 0, 0, datetime.today().date(), datetime.today().date(), set()
+        # Return whatever we managed to gather
+        return rows_events, rows_pharm, min_dt, max_dt, present_dates
 
 ###########################################################
 #                 DATA CLEANING & PROCESSING
