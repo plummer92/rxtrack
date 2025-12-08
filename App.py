@@ -1,13 +1,9 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.13)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.14)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Syntax Error: Removed stray markdown characters.
-#   2. Name Matching Update:
-#      - "Phi Ho" -> Maps to "Ali"
-#      - "Rebekah" -> Maps to "Bekah"
-#      - (Plus previous aliases: Kathy, Dee, Dan)
-#   3. New Feature: Late Arrival / Early Departure Detection
+#   1. Admin Exclusion: Emily, Joe, and Krista removed from Attendance Audit.
+#   2. Previous Logic Retained: Trade logic, Name mapping, IV Exclusion, PTO Separation.
 ###############################################################
 
 import streamlit as st
@@ -910,14 +906,14 @@ with tab_attend:
             # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
-                # Manual Overrides (Event Name -> Schedule Name)
+                # Manual Overrides
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
                 if "nugent" in s or "kathleen" in s: return "kathy"
                 if "spain" in s or "deloris" in s: return "dee"
                 if "jabusch" in s or "daniel" in s: return "dan"
                 
-                # Default Logic: "Last, First" -> "First"
+                # Default Logic
                 if "," in s:
                     parts = s.split(",")
                     if len(parts) >= 2:
@@ -964,7 +960,13 @@ with tab_attend:
 
             audit['Status'] = audit.apply(get_attendance_status, axis=1)
             
-            # --- 4. METRICS (Exclude IV Untracked from stats) ---
+            # --- 4. METRICS & FILTERING ---
+            
+            # EXCLUDE ADMINS (Emily, Joe, Krista)
+            admins = ['emily', 'joe', 'krista']
+            audit = audit[~audit['display_name'].str.lower().isin(admins)]
+            
+            # Exclude IV Untracked from stats
             standard_audit = audit[~audit['Status'].str.contains("IV")]
             
             m1, m2, m3, m4 = st.columns(4)
