@@ -1,11 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.6)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.7)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Connection Staling Fix: Removed @st.cache_resource from DB connection.
-#      This forces a fresh connection on every run, eliminating "Connection Closed" errors.
-#   2. Proper Resource Cleanup: All DB functions now explicitly close connections.
-#   3. Logic Preserved: IV Exclusion & PTO Separation remain active.
+#   1. Calendar Fix: Restored the query to fetch "active dates" so the calendar turns green.
+#   2. Connection Stability: Retained v10.6 connection fixes.
+#   3. Attendance Audit: Retained IV Exclusion & PTO Separation.
 ###############################################################
 
 import streamlit as st
@@ -69,7 +68,6 @@ def generate_pk(row):
 ###########################################################
 #                 DATABASE CONNECTION & INIT
 ###########################################################
-# NOTE: Removed @st.cache_resource to prevent "connection closed" errors
 def get_db_connection():
     try:
         return psycopg2.connect(st.secrets["neon"]["db_url"])
@@ -116,11 +114,10 @@ def init_db():
         conn.close()
 
 def get_db_stats():
-    """ Calculates stats safely with error reporting. """
+    """ Calculates stats and active dates safely. """
     conn = get_db_connection()
     if not conn: return 0, 0, datetime.today().date(), datetime.today().date(), set()
     
-    # Defaults
     rows_events = 0
     rows_pharm = 0
     min_dt = datetime.today().date()
@@ -134,15 +131,15 @@ def get_db_stats():
         try:
             cur.execute("SELECT COUNT(*) FROM events")
             rows_events = cur.fetchone()[0]
-        except Exception as e: pass
+        except: pass
 
         # 2. Count Pharmacy
         try:
             cur.execute("SELECT COUNT(*) FROM pharmacy_orders")
             rows_pharm = cur.fetchone()[0]
-        except Exception as e: pass
+        except: pass
         
-        # 3. Get Dates
+        # 3. Get Date Range
         try:
             cur.execute("""
                 SELECT MIN(dt), MAX(dt) FROM (
@@ -155,7 +152,14 @@ def get_db_stats():
             if range_result and range_result[0] and range_result[1]:
                 min_dt = safe_to_date(range_result[0])
                 max_dt = safe_to_date(range_result[1])
-        except Exception as e: pass
+        except: pass
+        
+        # 4. Get Active Dates for Calendar (RESTORED)
+        try:
+            if rows_events > 0:
+                cur.execute("SELECT DISTINCT dt::date FROM events WHERE dt IS NOT NULL")
+                present_dates = {safe_to_date(row[0]) for row in cur.fetchall()}
+        except: pass
             
         cur.close()
         return rows_events, rows_pharm, min_dt, max_dt, present_dates
