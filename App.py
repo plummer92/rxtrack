@@ -908,7 +908,7 @@ with tab_attend:
             # --- 1. NAME MATCHING ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
-                # Manual Overrides (Event Name -> Schedule Name)
+                # Manual Overrides
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
                 if "nugent" in s or "kathleen" in s: return "kathy"
