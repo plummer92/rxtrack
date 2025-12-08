@@ -924,9 +924,8 @@ with tab_attend:
             all_presence['match_key'] = all_presence['user_name'].apply(get_event_name_key)
             
             # Group to find unique work days per person & First Scan Time
-            # FIX: Rename columns first to avoid index collision
             worked_days = all_presence.groupby([all_presence['dt'].dt.date, 'match_key']).agg({
-                'user_name': 'first',  # Keep one name for reference
+                'user_name': 'first',   # Keep one name for reference
                 'source': 'count',      # Count total transactions across systems
                 'dt': 'min'             # Get the FIRST scan time
             }).rename(columns={'dt': 'first_scan', 'source': 'tx_count', 'user_name': 'actual_user_name'}).reset_index()
@@ -949,32 +948,8 @@ with tab_attend:
             audit['shift_type'] = audit['shift_type'].fillna("-")
             audit['tx_count'] = audit['tx_count'].fillna(0)
             
-            # --- 3. LATE ARRIVAL LOGIC ---
-            def calculate_lateness(row):
-                if pd.isnull(row['first_scan']): return 0 
-                
-                shift_str = str(row['shift_type'])
-                match = re.search(r'(\d{3,4})', shift_str)
-                if match:
-                    time_str = match.group(1)
-                    if len(time_str) == 3: time_str = "0" + time_str
-                    try:
-                        sched_time = datetime.strptime(time_str, "%H%M").time()
-                        sched_start_dt = datetime.combine(row['date_obj'], sched_time)
-                        actual_start = row['first_scan']
-                        diff = (actual_start - sched_start_dt).total_seconds() / 60
-                        return diff
-                    except: return 0
-                return 0
-
-            audit['minutes_late'] = audit.apply(calculate_lateness, axis=1)
-            
-            def format_lateness(val):
-                if val > 15: return f"🔴 {int(val)} min late"
-                if val < -15: return f"🟢 {int(abs(val))} min early"
-                return "On Time"
-
-            audit['Punctuality'] = audit['minutes_late'].apply(format_lateness)
+            # --- 3. (REMOVED) LATE ARRIVAL LOGIC ---
+            # Punctuality calculation removed as requested.
             
             # --- 4. STATUS LOGIC (Including IV/PTO) ---
             def get_attendance_status(row):
@@ -1022,7 +997,7 @@ with tab_attend:
                     )
             
             # --- 7. MAIN TABLE (Filters out PTO & IV by default) ---
-            st.subheader("Daily Attendance & Punctuality Log")
+            st.subheader("Daily Attendance Log")
             filter_status = st.multiselect(
                 "Filter Status", 
                 options=["❌ No Show / No Login", "➕ Unscheduled Pick-up", "✅ Present", "💉 IV Shift (Not Tracked)", "✅ Present (IV)"], 
@@ -1032,8 +1007,9 @@ with tab_attend:
             view_df = audit[audit['Status'] != "🌴 PTO"].copy() 
             if filter_status: view_df = view_df[view_df['Status'].isin(filter_status)]
                 
+            # REMOVED 'Punctuality' from column list
             st.dataframe(
-                view_df[['date_obj', 'display_name', 'shift_type', 'Status', 'Punctuality', 'tx_count', 'note']].sort_values('date_obj', ascending=False), 
+                view_df[['date_obj', 'display_name', 'shift_type', 'Status', 'tx_count', 'note']].sort_values('date_obj', ascending=False), 
                 column_config={
                     "date_obj": st.column_config.DateColumn("Date"),
                     "display_name": "Technician",
