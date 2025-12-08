@@ -1,10 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.19)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.20)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
 #   1. ValueError Fix: Resolved "cannot insert dt, already exists" in Tab 12.
 #      - Renamed aggregation column to avoid conflict with index name.
-#   2. Retained: Late Arrival Logic, Name Matching, Trade Logic, Image Fix.
+#   2. Image Fix: Corrected st.image syntax to use raw URL string.
+#   3. Retained: Late Arrival Logic, Name Matching, Trade Logic.
 ###############################################################
 
 import streamlit as st
@@ -1067,3 +1068,4 @@ with tab_attend:
             st.dataframe(df_sched)
     else:
         st.info("No Schedule Data found. Upload 'Staff Schedule' CSV.")
+```
