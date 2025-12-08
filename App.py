@@ -1,11 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.16)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.17)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
-#   1. Schedule Parsing: "Javier trn Kathy" -> Name: "Javier", Note: "Javier trn Kathy".
-#   2. Name Matching: Added specific aliases (Phi Ho->Ali, Daniel->Dan, etc.).
-#   3. Admin Exclusion: Emily, Joe, Krista removed from Attendance Audit.
-#   4. Retained: IV Exclusion, PTO Separation, Trade logic.
+#   1. Attendance Logic: Now checks BOTH Pyxis AND Pharmacy tables for presence.
+#      (Fixes issue where Javier had Pharm transactions but showed as No Show).
+#   2. Name Matching: Added aliases for Kathleen->Kathy, Deloris->Dee, Daniel->Dan.
+#   3. Previous Logic: Trade parsing, IV/Admin exclusion, PTO separation preserved.
 ###############################################################
 
 import streamlit as st
@@ -511,7 +511,7 @@ def load_schedule_data(start_date, end_date):
 init_db()
 
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/caduceus.png", width=50)
+    st.image("[https://img.icons8.com/color/96/caduceus.png](https://img.icons8.com/color/96/caduceus.png)", width=50)
     st.title("SJS St. Johns Pharmacy")
     
     rows_events, rows_pharm, min_db, max_db, present_dates = get_db_stats()
@@ -905,15 +905,16 @@ with tab_attend:
     
     if not df_sched.empty:
         if not df.empty:
-            # --- 1. NAME MATCHING ---
+            # --- 1. NAME MATCHING (Unified for Pyxis + Pharmacy) ---
             def get_event_name_key(full_name):
                 s = str(full_name).strip().lower()
-                # Manual Overrides
+                
+                # Manual Overrides (Map Full/Last-First Name -> First Name)
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
-                if "nugent" in s or "kathleen" in s: return "kathy"
-                if "spain" in s or "deloris" in s: return "dee"
-                if "jabusch" in s or "daniel" in s: return "dan"
+                if "kathleen" in s or "nugent" in s: return "kathy"
+                if "deloris" in s or "spain" in s: return "dee"
+                if "daniel" in s or "jabusch" in s: return "dan"
                 
                 # Default Logic: "Last, First" -> "First"
                 if "," in s:
@@ -922,47 +923,74 @@ with tab_attend:
                         return parts[1].strip().split(" ")[0] 
                 return s.split(" ")[0]
 
-            df['match_key'] = df['user_name'].apply(get_event_name_key)
+            # 2. COMBINE SOURCES FOR 'WORKED' CHECK (Pyxis + Pharmacy)
+            # This fixes the Javier issue (worked in Pharm, but not Pyxis)
             
-            worked_days = df.groupby([df['dt'].dt.date, 'match_key']).agg({
-                'user_name': 'first',
-                'pk': 'count'
-            }).reset_index().rename(columns={'pk': 'tx_count', 'user_name': 'actual_user_name'})
+            # Prepare Pyxis List
+            pyxis_presence = df[['dt', 'user_name']].copy()
+            pyxis_presence['source'] = 'Pyxis'
+            
+            # Prepare Pharm List
+            pharm_presence = df_pharm[['dt', 'user_name']].copy()
+            pharm_presence['source'] = 'Pharmacy'
+            
+            # Combine
+            all_presence = pd.concat([pyxis_presence, pharm_presence])
+            all_presence['match_key'] = all_presence['user_name'].apply(get_event_name_key)
+            
+            # Group to find unique work days per person
+            worked_days = all_presence.groupby([all_presence['dt'].dt.date, 'match_key']).agg({
+                'user_name': 'first',  # Keep one name for reference
+                'source': 'count'      # Count total transactions across systems
+            }).reset_index().rename(columns={'source': 'tx_count', 'user_name': 'actual_user_name'})
             worked_days.columns = ['date_obj', 'match_key', 'actual_user_name', 'tx_count']
             
+            # 3. SCHEDULE MATCHING
             def get_sched_name_key(staff_name):
                 return str(staff_name).strip().split(" ")[0].lower()
             
             df_sched['match_key'] = df_sched['staff_name'].apply(get_sched_name_key)
             df_sched['date_obj'] = df_sched['dt'].dt.date
             
+            # Merge Schedule with Combined Presence
             audit = pd.merge(df_sched, worked_days, on=['date_obj', 'match_key'], how='outer')
             
-            # --- 2. DISPLAY CLEANUP ---
+            # --- 4. DISPLAY CLEANUP ---
             audit['display_name'] = audit['actual_user_name'].fillna(audit['staff_name'])
             audit['display_name'] = audit['display_name'].fillna("Unknown")
             audit['shift_type'] = audit['shift_type'].fillna("-")
             audit['tx_count'] = audit['tx_count'].fillna(0)
             
-            # --- 3. STATUS LOGIC (Including IV/PTO) ---
+            # --- 5. STATUS LOGIC (Including IV/PTO) ---
             def get_attendance_status(row):
                 shift = str(row['shift_type']).upper()
+                
+                # Check for PTO First
                 if row['assignment_type'] == 'PTO' or 'PTO' in shift:
                     return "🌴 PTO"
+                
+                # Check for IV Shifts (Excluded from strict tracking)
                 if 'IV' in shift:
                     if row['tx_count'] > 0: return "✅ Present (IV)"
                     return "💉 IV Shift (Not Tracked)"
+
+                # Scheduled (Shift exists) but No Transactions
                 if row['shift_type'] != "-" and row['tx_count'] == 0:
                     return "❌ No Show / No Login"
+                
+                # Not Scheduled but Has Transactions
                 if row['shift_type'] == "-" and row['tx_count'] > 0:
                     return "➕ Unscheduled Pick-up"
+                
+                # Scheduled and Has Transactions
                 if row['shift_type'] != "-" and row['tx_count'] > 0:
                     return "✅ Present"
+                
                 return "Unknown"
 
             audit['Status'] = audit.apply(get_attendance_status, axis=1)
             
-            # --- 4. METRICS & FILTERING ---
+            # --- 6. METRICS & FILTERING ---
             
             # EXCLUDE ADMINS (Emily, Joe, Krista)
             admins = ['emily', 'joe', 'krista']
@@ -979,7 +1007,7 @@ with tab_attend:
             
             st.divider()
             
-            # --- 5. SEPARATE PTO SECTION ---
+            # --- 7. SEPARATE PTO SECTION ---
             pto_df = audit[audit['Status'] == "🌴 PTO"].copy()
             if not pto_df.empty:
                 with st.expander("🌴 PTO / Time Off Report", expanded=True):
@@ -989,7 +1017,7 @@ with tab_attend:
                         use_container_width=True
                     )
             
-            # --- 6. MAIN TABLE (Filters out PTO & IV by default) ---
+            # --- 8. MAIN TABLE (Filters out PTO & IV by default) ---
             st.subheader("Daily Attendance Log")
             filter_status = st.multiselect(
                 "Filter Status", 
