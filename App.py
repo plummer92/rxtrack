@@ -1,10 +1,13 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.9)
+# RXTRACK: EXECUTIVE DASHBOARD (INTEGRATED v10.10)
 # Architecture: Quad-Table Strategy (Events | Config | Pharm | Schedule)
 # Fixes:
 #   1. Name Mapping Update: Added specific aliases:
 #      - "Phi Ho" -> Maps to "Ali"
 #      - "Rebekah" -> Maps to "Bekah"
+#      - "Nugent, Kathleen" -> Maps to "Kathy"
+#      - "Spain, Deloris" -> Maps to "Dee"
+#      - "Jabusch, Daniel" -> Maps to "Dan"
 #   2. Previous Logic Retained: Calendar Green, IV Excluded, PTO Separated.
 ###############################################################
 
@@ -905,6 +908,9 @@ with tab_attend:
                 # Manual Overrides
                 if "phi" in s and "ho" in s: return "ali"
                 if "rebekah" in s: return "bekah"
+                if "nugent" in s and "kathleen" in s: return "kathy"
+                if "spain" in s and "deloris" in s: return "dee"
+                if "jabusch" in s and "daniel" in s: return "dan"
                 
                 # Default Logic
                 if "," in s:
