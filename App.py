@@ -7,6 +7,7 @@
 #   3. UI Enhancements: Cleaner CSS, Toast notifications, Better charts.
 #   4. Performance: Optimized Pandas operations and layout rendering.
 #   5. Session Logic: Strict Device-based sessions with explicit Walk Time gaps.
+#   6. Navigation: Switched to Sidebar Radio to prevent view resets (QoL Fix).
 ###############################################################
 
 import streamlit as st
@@ -82,15 +83,6 @@ st.markdown("""
     }
     .cal-present { background-color: #4CAF50; } /* Green */
     .cal-missing { background-color: #F87171; } /* Red */
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px; white-space: pre-wrap;
-        background-color: #f3f4f6; border-radius: 4px;
-        padding-top: 10px; padding-bottom: 10px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #e5e7eb; border-bottom: 2px solid #4CAF50;
-    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -444,14 +436,26 @@ def get_present_dates(min_dt, max_dt):
 # --- MAIN APP LOGIC ---
 init_db() # Ensure DB structure
 
+# Define Pages for Navigation
+PAGES = [
+    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", 
+    "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", 
+    "🔄 Return Reconciliation", "⚖️ Tech Comparison", "📈 Tech Progression", "📅 Attendance"
+]
+
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
     st.title("RxTrack v11")
     st.caption("Pharmacy Workflow Intelligence")
     
+    # --- NAVIGATION MENU (PERSISTENT) ---
+    st.markdown("### 🧭 Navigation")
+    selected_page = st.radio("Go to:", PAGES, label_visibility="collapsed")
+    st.divider()
+    
     rows_events, rows_pharm, min_db, max_db = get_stats_range()
     
-    with st.expander("💾 Database Status", expanded=True):
+    with st.expander("💾 Database Status", expanded=False):
         c1, c2 = st.columns(2)
         c1.metric("Pyxis Events", f"{rows_events:,}")
         c2.metric("Pharm Orders", f"{rows_pharm:,}")
@@ -540,15 +544,10 @@ if df_events.empty and df_config.empty and df_pharm.empty:
     st.info("👋 System Idle. Please upload data via the sidebar to begin analysis.")
     st.stop()
 
-# --- TABS ---
-tabs = st.tabs([
-    "📊 Overview", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", 
-    "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", 
-    "🔄 Return Reconciliation", "⚖️ Tech Comparison", "📈 Tech Progression", "📅 Attendance"
-])
+# --- PAGE ROUTING ---
 
 # 1. OVERVIEW
-with tabs[0]:
+if selected_page == "📊 Overview":
     if not df_events.empty:
         st.markdown("## 🏥 Executive Summary")
         
@@ -584,7 +583,7 @@ with tabs[0]:
             st.plotly_chart(fig_pie, use_container_width=True)
 
 # 2. PROCESS MINING
-with tabs[1]:
+elif selected_page == "🚀 Process Mining":
     if not df_events.empty:
         st.markdown("### 🔄 Workflow Visualization")
         c1, c2, c3 = st.columns(3)
@@ -626,7 +625,7 @@ with tabs[1]:
             st.info("No movement data found for current selection.")
 
 # 3. COMPLIANCE
-with tabs[2]:
+elif selected_page == "🛡️ Compliance":
     if not df_events.empty:
         disc_df = df_events[df_events['discrepancy_qty'] != 0].copy()
         
@@ -647,7 +646,7 @@ with tabs[2]:
             st.success("✅ Zero discrepancies found in this period!")
 
 # 4. PENDS ANALYZER
-with tabs[3]:
+elif selected_page == "📥 Pends Analyzer":
     st.markdown("### 📥 Inventory Configuration")
     if not df_config.empty:
         c1, c2 = st.columns(2)
@@ -668,7 +667,7 @@ with tabs[3]:
         st.info("No configuration events found.")
 
 # 5. LOAD/UNLOAD
-with tabs[4]:
+elif selected_page == "🚚 Load/Unload":
     if not df_events.empty:
         loads = df_events[df_events['event_type'].str.contains('load|unload', case=False, na=False)]
         st.markdown("### 🚚 Load & Unload Activity")
@@ -677,7 +676,7 @@ with tabs[4]:
         st.info("No load/unload events found.")
 
 # 6. EFFICIENCY
-with tabs[5]:
+elif selected_page == "⚡ Efficiency":
     if not df_events.empty:
         st.markdown("### 📉 Inefficient Refills")
         effic = df_events.groupby(['device', 'med_desc']).agg(Trips=('pk', 'count'), Avg_Qty=('qty', 'mean')).reset_index()
@@ -689,7 +688,7 @@ with tabs[5]:
         st.plotly_chart(fig, use_container_width=True)
 
 # 7. SESSION EXPLORER
-with tabs[6]:
+elif selected_page == "🔍 Session Explorer":
     if not df_events.empty:
         st.header("🔍 Session Explorer")
         
@@ -750,7 +749,7 @@ with tabs[6]:
             st.dataframe(details[['dt', 'event_type', 'med_desc', 'qty']], use_container_width=True)
 
 # 8. PHARMACY WORKFLOW
-with tabs[7]:
+elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
         st.markdown("### 🏥 Central Pharmacy Workflow")
         c1, c2, c3 = st.columns(3)
@@ -769,7 +768,7 @@ with tabs[7]:
         st.dataframe(df_pharm, use_container_width=True)
 
 # 9. RECONCILIATION
-with tabs[8]:
+elif selected_page == "🔄 Return Reconciliation":
     st.markdown("### 🔄 Unload vs. Return Reconciliation")
     filter_narc = st.checkbox("Exclude Controlled Substances", value=True)
     
@@ -804,7 +803,7 @@ with tabs[8]:
         st.dataframe(merged, use_container_width=True)
 
 # 10. TECH COMPARISON
-with tabs[9]:
+elif selected_page == "⚖️ Tech Comparison":
     st.markdown("### ⚖️ Head-to-Head Comparison")
     if not df_events.empty:
         users = sorted(df_events['user_name'].dropna().unique())
@@ -842,7 +841,7 @@ with tabs[9]:
             st.metric("Avg Speed (sec)", f"{m_b[1]:.1f}s", delta=f"{m_b[1]-m_a[1]:.1f}s", delta_color="inverse")
 
 # 11. PROGRESSION
-with tabs[10]:
+elif selected_page == "📈 Tech Progression":
     st.markdown("### 📈 Performance Trend")
     if not df_events.empty:
         c1, c2 = st.columns(2)
@@ -873,7 +872,7 @@ with tabs[10]:
             st.plotly_chart(px.line(res, y='Speed', title="Speed (Sec/Tx)", markers=True), use_container_width=True)
 
 # 12. ATTENDANCE
-with tabs[11]:
+elif selected_page == "📅 Attendance":
     st.markdown("### 📋 Schedule Reconciliation")
     if not df_sched.empty and not df_events.empty:
         # 1. Normalize Names & Dates
