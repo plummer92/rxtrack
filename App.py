@@ -9,6 +9,7 @@
 #   5. Session Logic: Strict Device-based sessions with explicit Walk Time gaps.
 #   6. Navigation: Switched to Sidebar Radio to prevent view resets (QoL Fix).
 #   7. Data Cleaning: Filtered 'BATCH PICK' from Pharmacy Orders to stop double-counting.
+#   8. Pharmacy Workflow: Added Priority Filter for drill-down (Returns, Refills, etc.).
 ###############################################################
 
 import streamlit as st
@@ -405,6 +406,7 @@ def load_data(start_date, end_date):
     if not results["pharm"].empty:
         # Exclude aggregate rows where destination is "BATCH PICK"
         # This prevents double counting of volume/orders.
+        # Use na=False to keep rows where destination might be NaN (like Returns)
         results["pharm"] = results["pharm"][~results["pharm"]['destination'].astype(str).str.contains('BATCH PICK', case=False, na=False)]
 
     return df, results["config"], results["pharm"], results["schedule"]
@@ -759,20 +761,37 @@ elif selected_page == "🔍 Session Explorer":
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
         st.markdown("### 🏥 Central Pharmacy Workflow")
+        
+        # --- FILTERING ---
+        c_filter1, c_filter2 = st.columns(2)
+        priorities = sorted(df_pharm['priority'].dropna().unique())
+        sel_prio = c_filter1.multiselect("Filter Transaction Type (Priority)", priorities)
+        
+        # Apply Filter
+        view_pharm = df_pharm.copy()
+        if sel_prio:
+            view_pharm = view_pharm[view_pharm['priority'].isin(sel_prio)]
+            
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Orders", len(df_pharm))
-        c2.metric("Critical/STAT", len(df_pharm[df_pharm['priority'].str.contains('STAT|Critical', case=False, na=False)]))
-        c3.metric("Top Destination", df_pharm['destination'].mode()[0] if not df_pharm.empty else "-")
+        c1.metric("Total Orders", len(view_pharm))
+        c2.metric("Critical/STAT", len(view_pharm[view_pharm['priority'].str.contains('STAT|Critical', case=False, na=False)]))
+        
+        # Handling NaN destination for "Returns" cleanly in stats
+        top_dest_series = view_pharm['destination'].dropna()
+        top_dest = top_dest_series.mode()[0] if not top_dest_series.empty else "N/A"
+        c3.metric("Top Destination", top_dest)
         
         c_chart1, c_chart2 = st.columns(2)
         with c_chart1:
-            prio = df_pharm['priority'].value_counts().reset_index()
+            prio = view_pharm['priority'].value_counts().reset_index()
             st.plotly_chart(px.pie(prio, names='priority', values='count', hole=0.4, title="Order Priority"), use_container_width=True)
         with c_chart2:
-            dest = df_pharm[df_pharm['destination'] != 'Carousel Workflow']['destination'].value_counts().head(10).reset_index()
+            # Filter out NaN destinations for the chart
+            chart_dest_df = view_pharm.dropna(subset=['destination'])
+            dest = chart_dest_df[chart_dest_df['destination'] != 'Carousel Workflow']['destination'].value_counts().head(10).reset_index()
             st.plotly_chart(px.bar(dest, x='count', y='destination', orientation='h', title="Top Destinations"), use_container_width=True)
             
-        st.dataframe(df_pharm, use_container_width=True)
+        st.dataframe(view_pharm, use_container_width=True)
 
         st.divider()
         st.subheader("📦 Volume & Turnaround Tracking")
