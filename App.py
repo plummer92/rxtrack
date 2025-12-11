@@ -881,7 +881,7 @@ elif selected_page == "🏥 Pharmacy Workflow":
             base_capacity = np.where(recs['Avg_Refill_Qty'] > 0, recs['Avg_Refill_Qty'], recs['Avg_Stockout_Req'])
             
             # Suggested Min: 1.5x the typical fill amount to prevent hitting zero.
-            recs['Suggested Min'] = np.ceil(base_capacity * 1.5).clip(lower=1)
+            recs['Suggested Min'] = np.clip(np.ceil(base_capacity * 1.5), 1, None)
 
             # Suggested Max: 2.5x Min to allow full bin replenishment without overflow.
             recs['Suggested Max'] = np.ceil(recs['Suggested Min'] * 2.5)
