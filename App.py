@@ -6,6 +6,7 @@
 #   2. Centralized Constants: Moved hardcoded lists (Narcotics, Admins) to top.
 #   3. UI Enhancements: Cleaner CSS, Toast notifications, Better charts.
 #   4. Performance: Optimized Pandas operations and layout rendering.
+#   5. Session Logic: Strict Device-based sessions with explicit Walk Time gaps.
 ###############################################################
 
 import streamlit as st
@@ -164,6 +165,7 @@ def seconds_to_mmss(seconds):
     if pd.isna(seconds) or seconds < 0: return "-"
     m, s = divmod(int(seconds), 60)
     h, m = divmod(m, 60)
+    # Format: 5m 30s
     if h > 0: return f"{h}h {m}m {s}s"
     if m > 0: return f"{m}m {s}s"
     return f"{s}s"
@@ -384,19 +386,23 @@ def load_data(start_date, end_date):
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
         # Calculate Gap from previous transaction by SAME user
-        # Used for session breaking
         df['gap_prev'] = (df['dt'] - df.groupby('user_name')['dt'].shift(1)).dt.total_seconds().fillna(0)
         
-        # Machine time = Time spent AT the machine (if next tx is same device & < 10 mins)
+        # Machine time = Time spent AT the machine
         df['machine_time_sec'] = np.where(
             (df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration'] < 600), 
             df['duration'], 0
         )
         
-        # Session Definition: Break if User Changes OR Gap > 20 mins (1200s)
-        # This allows a session to span multiple devices (capturing walk time)
+        # --- STRICT DEVICE SESSION LOGIC ---
+        # A new session starts if:
+        # 1. User changes
+        # 2. Device changes (The key requirement: "restocking the machine from first scan... to new device")
+        # 3. Gap > 20 mins (Arbitrary break for lunch/long pauses even on same machine)
         df['is_new_session'] = np.where(
-            (df['user_name'] != df['user_name'].shift(1)) | (df['gap_prev'] > 1200), 1, 0
+            (df['user_name'] != df['user_name'].shift(1)) | 
+            (df['device'] != df['prev_device']) |
+            (df['gap_prev'] > 1200), 1, 0
         )
         
         df['session_id'] = df['is_new_session'].cumsum()
@@ -686,47 +692,62 @@ with tabs[5]:
 with tabs[6]:
     if not df_events.empty:
         st.header("🔍 Session Explorer")
+        
+        # Aggregate by Session (Which is now strictly 1 device per session)
         sessions = df_events.groupby('session_id').agg({
             'user_name': 'first', 
-            'device': 'first', 
+            'device': 'first',
             'dt': ['min', 'max'],
-            'machine_time_sec': 'sum'
+            'pk': 'count'
         }).reset_index()
         
-        sessions.columns = ['session_id', 'User', 'Device', 'Start', 'End', 'Active Machine Time']
-        sessions['Total Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
+        sessions.columns = ['session_id', 'User', 'Device', 'Start', 'End', 'Tx Count']
         
-        # Calculate "Walk / Idle" time (Time not spent actively scanning)
-        sessions['Walk / Idle Time'] = sessions['Total Duration'] - sessions['Active Machine Time']
+        # Calculate Duration of time spent AT the machine
+        sessions['Time at Machine'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
         
-        # Formatting for display
-        display_sessions = sessions.copy()
-        display_sessions['Active Machine Time'] = display_sessions['Active Machine Time'].apply(seconds_to_mmss)
-        display_sessions['Walk / Idle Time_fmt'] = display_sessions['Walk / Idle Time'].apply(seconds_to_mmss)
+        # Sort to calculate Walk Time (Gap between this session and the next one for same user)
+        sessions = sessions.sort_values(['User', 'Start'])
         
+        # Determine the Start time of the NEXT session for this user
+        sessions['Next Session Start'] = sessions.groupby('User')['Start'].shift(-1)
+        
+        # Walk Time = (Start of Next Session) - (End of Current Session)
+        sessions['Walk to Next Device'] = (sessions['Next Session Start'] - sessions['End']).dt.total_seconds()
+        
+        # --- FILTERS ---
         c1, c2, c3 = st.columns(3)
         users = sorted(sessions['User'].dropna().unique())
-        sel_u = c1.multiselect("User", users, key="sess_u")
-        min_sec = c2.number_input("Min Duration (sec)", 0, 3600, 60)
-        min_walk = c3.number_input("Filter Walk Time (sec)", 0, 3600, 0)
+        sel_u = c1.multiselect("Filter User", users, key="sess_u")
+        min_machine = c2.number_input("Min Time at Machine (sec)", 0, 3600, 30)
+        min_walk = c3.number_input("Min Walk Time (sec)", 0, 3600, 0)
         
-        filtered_sess = display_sessions[
-            (display_sessions['Total Duration'] > min_sec) & 
-            (display_sessions['Walk / Idle Time'] >= min_walk)
-        ]
-        
+        # Apply Filters
+        filtered_sess = sessions.copy()
         if sel_u: filtered_sess = filtered_sess[filtered_sess['User'].isin(sel_u)]
+        filtered_sess = filtered_sess[filtered_sess['Time at Machine'] >= min_machine]
         
-        # Rename for display
-        filtered_sess = filtered_sess.drop(columns=['Walk / Idle Time']).rename(columns={'Walk / Idle Time_fmt': 'Walk / Idle Time'})
+        # Only filter by walk time if the user asked for it (avoid hiding last sessions which have NaN walk time)
+        if min_walk > 0:
+            filtered_sess = filtered_sess[filtered_sess['Walk to Next Device'] >= min_walk]
+
+        # Formatting for Display
+        display_df = filtered_sess.copy()
+        display_df['Time at Machine'] = display_df['Time at Machine'].apply(seconds_to_mmss)
+        display_df['Walk to Next Device'] = display_df['Walk to Next Device'].apply(seconds_to_mmss)
         
-        st.dataframe(filtered_sess, use_container_width=True)
+        # Columns to show
+        cols = ['session_id', 'User', 'Device', 'Start', 'End', 'Tx Count', 'Time at Machine', 'Walk to Next Device']
+        st.dataframe(display_df[cols], use_container_width=True)
         
+        # Drill Down
         if not filtered_sess.empty:
             sel_id = st.selectbox("Drill into Session ID", filtered_sess['session_id'].unique())
-            details = df_events[df_events['session_id'] == sel_id]
-            st.write(f"**Session Timeline:** {len(details)} transactions")
-            st.dataframe(details[['dt', 'event_type', 'med_desc', 'qty', 'machine_time_sec']], use_container_width=True)
+            details = df_events[df_events['session_id'] == sel_id].sort_values('dt')
+            st.write(f"**Session Timeline:** {len(details)} transactions on **{details['device'].iloc[0]}**")
+            
+            # Show formatted table
+            st.dataframe(details[['dt', 'event_type', 'med_desc', 'qty']], use_container_width=True)
 
 # 8. PHARMACY WORKFLOW
 with tabs[7]:
