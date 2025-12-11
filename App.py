@@ -855,7 +855,7 @@ with tabs[11]:
         ).reset_index()
         
         # 3. Merge with Schedule
-        df_sched['date_obj'] = df_sched['dt']
+        df_sched['date_obj'] = df_sched['dt'].dt.date
         merged = pd.merge(df_sched, worked_agg, on=['date_obj', 'match_key'], how='outer')
         
         # 4. Status Logic
