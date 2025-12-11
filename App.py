@@ -380,6 +380,9 @@ def load_data(start_date, end_date):
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['duration'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         
+        # Calculate Previous Device (Needed for Process Mining)
+        df['prev_device'] = df.groupby('user_name')['device'].shift(1)
+        
         # Calculate Gap from previous transaction by SAME user
         # Used for session breaking
         df['gap_prev'] = (df['dt'] - df.groupby('user_name')['dt'].shift(1)).dt.total_seconds().fillna(0)
