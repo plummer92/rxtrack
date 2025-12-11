@@ -379,18 +379,25 @@ def load_data(start_date, end_date):
         df.sort_values(['user_name', 'dt'], inplace=True)
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['duration'] = (df['next_dt'] - df['dt']).dt.total_seconds()
-        df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         
-        # Logic: Machine time is valid if next tx is same device & < 10 mins gap
+        # Calculate Gap from previous transaction by SAME user
+        # Used for session breaking
+        df['gap_prev'] = (df['dt'] - df.groupby('user_name')['dt'].shift(1)).dt.total_seconds().fillna(0)
+        
+        # Machine time = Time spent AT the machine (if next tx is same device & < 10 mins)
         df['machine_time_sec'] = np.where(
             (df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration'] < 600), 
             df['duration'], 0
         )
+        
+        # Session Definition: Break if User Changes OR Gap > 20 mins (1200s)
+        # This allows a session to span multiple devices (capturing walk time)
         df['is_new_session'] = np.where(
-            (df['user_name'] != df['user_name'].shift(1)) | (df['device'] != df['prev_device']), 1, 0
+            (df['user_name'] != df['user_name'].shift(1)) | (df['gap_prev'] > 1200), 1, 0
         )
+        
         df['session_id'] = df['is_new_session'].cumsum()
-        df.drop(columns=['next_dt', 'is_new_session'], inplace=True, errors='ignore')
+        df.drop(columns=['next_dt', 'is_new_session', 'gap_prev'], inplace=True, errors='ignore')
 
     return df, results["config"], results["pharm"], results["schedule"]
 
@@ -692,15 +699,23 @@ with tabs[6]:
         # Formatting for display
         display_sessions = sessions.copy()
         display_sessions['Active Machine Time'] = display_sessions['Active Machine Time'].apply(seconds_to_mmss)
-        display_sessions['Walk / Idle Time'] = display_sessions['Walk / Idle Time'].apply(seconds_to_mmss)
+        display_sessions['Walk / Idle Time_fmt'] = display_sessions['Walk / Idle Time'].apply(seconds_to_mmss)
         
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         users = sorted(sessions['User'].dropna().unique())
         sel_u = c1.multiselect("User", users, key="sess_u")
         min_sec = c2.number_input("Min Duration (sec)", 0, 3600, 60)
+        min_walk = c3.number_input("Filter Walk Time (sec)", 0, 3600, 0)
         
-        filtered_sess = display_sessions[display_sessions['Total Duration'] > min_sec]
+        filtered_sess = display_sessions[
+            (display_sessions['Total Duration'] > min_sec) & 
+            (display_sessions['Walk / Idle Time'] >= min_walk)
+        ]
+        
         if sel_u: filtered_sess = filtered_sess[filtered_sess['User'].isin(sel_u)]
+        
+        # Rename for display
+        filtered_sess = filtered_sess.drop(columns=['Walk / Idle Time']).rename(columns={'Walk / Idle Time_fmt': 'Walk / Idle Time'})
         
         st.dataframe(filtered_sess, use_container_width=True)
         
