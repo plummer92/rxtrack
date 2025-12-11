@@ -838,105 +838,74 @@ elif selected_page == "🏥 Pharmacy Workflow":
 
         # 3. Inventory Optimization Recommendations (NEW)
         st.subheader("💡 Par Level Recommendations")
-        st.caption("Detailed analysis of stocked-out meds to suggest robust Min/Max levels.")
+        st.caption("Detailed analysis of stocked-out meds with timestamps to suggest robust Min/Max levels.")
         
-        if not stockout_only.empty and not df_events.empty:
-            # Get list of meds that stocked out
-            problem_meds = stockout_only['med_id'].unique()
-            
-            # Analyze usage for these meds from EVENTS table (Usage history)
-            usage_data = df_events[df_events['med_id'].isin(problem_meds)].copy()
-            
-            if not usage_data.empty:
-                usage_data['Date'] = usage_data['dt'].dt.date
-                
-                # --- A. DEMAND ANALYSIS (Dispenses) ---
-                # We assume dispense if qty < 0 OR event type explicitly says so
-                # Note: 'usage_data' is from events table where 'qty' is usually signed or we rely on type
-                # Using simple heuristic: absolute value of negative quantities is demand.
-                is_remove = usage_data['event_type'].astype(str).str.contains(r'REMOVE|DISPENSE|WITHDRAW', case=False, na=False)
-                
-                # Calculate dispense amount for each row
-                # If qty is negative, it's a remove. If it's positive but labeled Remove, treat as remove.
-                usage_data['dispense_amt'] = np.where(usage_data['qty'] < 0, usage_data['qty'].abs(), 
-                                             np.where(is_remove, usage_data['qty'], 0))
-                
-                # Daily Demand per Device/Med
-                daily_demand = usage_data.groupby(['device', 'med_id', 'med_desc', 'Date'])['dispense_amt'].sum().reset_index()
-                
-                # Stats per Device/Med
-                demand_stats = daily_demand.groupby(['device', 'med_id', 'med_desc']).agg(
-                    Max_Daily_Demand=('dispense_amt', 'max'),
-                    Avg_Daily_Demand=('dispense_amt', 'mean')
-                ).reset_index()
+        if not stockout_only.empty:
+            # --- C. SHORTAGE ANALYSIS (Stockouts) ---
+            # Analyze the stockout orders themselves to see requested quantities & timestamps
+            stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(
+                med_desc=('med_desc', 'first'),
+                Stockout_Count=('pk', 'count'),
+                Avg_Stockout_Req=('qty', 'mean'),
+                Stockout_Moments=('dt', lambda x: ', '.join(x.dt.strftime('%m/%d %H:%M').tolist()))
+            ).reset_index().rename(columns={'destination': 'device'})
 
-                # --- B. SUPPLY ANALYSIS (Refills) ---
-                # Look for Refill/Load events to see how much we usually put in
-                is_refill = usage_data['event_type'].astype(str).str.contains(r'REFILL|LOAD|STOCK|ADD', case=False, na=False)
-                usage_data['refill_amt'] = np.where(is_refill, usage_data['qty'], 0)
+            # --- B. SUPPLY ANALYSIS (Refills) ---
+            # Look for Refill/Load events to see how much we usually put in (if events data exists)
+            if not df_events.empty:
+                # Filter for Refill/Load/Stock/Add events
+                is_refill = df_events['event_type'].astype(str).str.contains(r'REFILL|LOAD|STOCK|ADD', case=False, na=False)
+                refill_data = df_events[is_refill].copy()
+                # Ensure we calculate refill amount correctly
+                refill_data['refill_amt'] = refill_data['qty']
                 
-                # Filter to only refill rows for counting
-                refill_rows = usage_data[is_refill]
-                refill_stats = refill_rows.groupby(['device', 'med_id']).agg(
+                refill_stats = refill_data.groupby(['device', 'med_id']).agg(
                     Total_Refills=('pk', 'count'),
                     Avg_Refill_Qty=('refill_amt', 'mean')
                 ).reset_index()
-
-                # --- C. SHORTAGE ANALYSIS (Stockouts) ---
-                # Analyze the stockout orders themselves to see requested quantities
-                stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(
-                    Stockout_Count=('pk', 'count'),
-                    Avg_Stockout_Req=('qty', 'mean')
-                ).reset_index().rename(columns={'destination': 'device'})
-
-                # --- D. MERGE & CALCULATE ---
-                # Base is stockout_agg because we are analyzing stockouts
-                recs = pd.merge(stockout_agg, demand_stats, on=['device', 'med_id'], how='left')
-                recs = pd.merge(recs, refill_stats, on=['device', 'med_id'], how='left')
                 
-                # Fill NaNs
-                recs['Max_Daily_Demand'] = recs['Max_Daily_Demand'].fillna(0)
-                recs['Avg_Refill_Qty'] = recs['Avg_Refill_Qty'].fillna(0)
-                recs['Total_Refills'] = recs['Total_Refills'].fillna(0)
-
-                # --- RECOMMENDATION LOGIC ---
-                # 1. Suggested Min: Must cover the Worst Case Daily Usage + Buffer
-                #    If Max Daily Demand is 0 (no usage data found?), default to avg stockout req size as a guess
-                base_min = np.where(recs['Max_Daily_Demand'] > 0, recs['Max_Daily_Demand'], recs['Avg_Stockout_Req'])
-                recs['Suggested Min'] = np.ceil(base_min * 1.5) # 50% Safety Stock
-                recs['Suggested Min'] = recs['Suggested Min'].replace(0, 1) # Min cannot be 0
-
-                # 2. Suggested Max: Min + Bin Capacity
-                #    We use Avg_Refill_Qty as a proxy for "How much usually fits or is sent".
-                #    If Avg Refill is small, maybe the bin is small?
-                #    Standard Par: Max is often 2x Min or Min + Standard Pack Size
-                #    Let's use: Max = Min + Max(Min, Avg_Refill_Qty) -> Effectively ensuring Max >= 2*Min
-                #    But simpler is often better: Max = 2.5 * Min to allow space for replenishment before empty.
-                recs['Suggested Max'] = np.ceil(recs['Suggested Min'] * 2.5)
-
-                # Sort by impact (frequency of stockouts)
-                recs = recs.sort_values('Stockout_Count', ascending=False)
-                
-                # Display
-                st.dataframe(
-                    recs[[
-                        'device', 'med_desc', 'Stockout_Count', 'Avg_Stockout_Req', 
-                        'Total_Refills', 'Avg_Refill_Qty', 'Max_Daily_Demand', 
-                        'Suggested Min', 'Suggested Max'
-                    ]],
-                    use_container_width=True,
-                    column_config={
-                        "Max_Daily_Demand": st.column_config.NumberColumn("Peak Daily Usage", format="%.0f"),
-                        "Avg_Refill_Qty": st.column_config.NumberColumn("Avg Refill Qty", format="%.1f"),
-                        "Avg_Stockout_Req": st.column_config.NumberColumn("Avg Stockout Req", format="%.1f"),
-                        "Suggested Min": st.column_config.NumberColumn("New Min", format="%.0f"),
-                        "Suggested Max": st.column_config.NumberColumn("New Max", format="%.0f"),
-                    }
-                )
+                recs = pd.merge(stockout_agg, refill_stats, on=['device', 'med_id'], how='left')
             else:
-                st.info("No usage events found for these medications to base recommendations on.")
+                recs = stockout_agg.copy()
+                recs['Total_Refills'] = 0
+                recs['Avg_Refill_Qty'] = 0
+
+            # Fill NaNs
+            recs['Avg_Refill_Qty'] = recs['Avg_Refill_Qty'].fillna(0)
+            recs['Total_Refills'] = recs['Total_Refills'].fillna(0)
+
+            # --- RECOMMENDATION LOGIC ---
+            # Without usage data (HIPAA restriction), we base MIN on the Average Stockout Request 
+            # or Average Refill Amount (whichever is larger, indicating typical capacity need).
+            # If Refill Qty is 0 (no data), rely on Stockout Req.
+            base_capacity = np.where(recs['Avg_Refill_Qty'] > 0, recs['Avg_Refill_Qty'], recs['Avg_Stockout_Req'])
+            
+            # Suggested Min: 1.5x the typical fill amount to prevent hitting zero.
+            recs['Suggested Min'] = np.ceil(base_capacity * 1.5).clip(lower=1)
+
+            # Suggested Max: 2.5x Min to allow full bin replenishment without overflow.
+            recs['Suggested Max'] = np.ceil(recs['Suggested Min'] * 2.5)
+
+            # Sort by impact (frequency of stockouts)
+            recs = recs.sort_values('Stockout_Count', ascending=False)
+            
+            st.dataframe(
+                recs[[
+                    'device', 'med_desc', 'Stockout_Count', 'Stockout_Moments', 
+                    'Avg_Stockout_Req', 'Avg_Refill_Qty', 
+                    'Suggested Min', 'Suggested Max'
+                ]],
+                use_container_width=True,
+                column_config={
+                    "Stockout_Moments": st.column_config.TextColumn("When?", width="medium"),
+                    "Avg_Refill_Qty": st.column_config.NumberColumn("Avg Refill Qty", format="%.1f"),
+                    "Avg_Stockout_Req": st.column_config.NumberColumn("Avg Stockout Req", format="%.1f"),
+                    "Suggested Min": st.column_config.NumberColumn("New Min", format="%.0f"),
+                    "Suggested Max": st.column_config.NumberColumn("New Max", format="%.0f"),
+                }
+            )
         else:
-            st.info("Need Stockout and Event data to generate recommendations.")
+            st.success("No Stockouts found! Par levels look good.")
 
         # 4. Turnaround Time (TAT) Analysis
         stockouts = df_pharm[df_pharm['priority'].str.contains(r'Stock\s*Out|Stockout', case=False, na=False)].copy()
