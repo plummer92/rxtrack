@@ -797,7 +797,7 @@ elif selected_page == "🏥 Pharmacy Workflow":
         st.subheader("📦 Volume & Turnaround Tracking")
         
         # 1. Volume Tracker
-        mask_vol = df_pharm['priority'].str.contains(r'Stockout|Pull', case=False, na=False)
+        mask_vol = df_pharm['priority'].str.contains(r'Stock\s*Out|Stockout|Pull', case=False, na=False)
         vol_df = df_pharm[mask_vol].copy()
         
         if not vol_df.empty:
@@ -810,7 +810,7 @@ elif selected_page == "🏥 Pharmacy Workflow":
 
         # 2. Stockout Heatmap (NEW)
         st.subheader("🔥 Stockout Heatmap")
-        stockout_only = df_pharm[df_pharm['priority'].str.contains('Stockout', case=False, na=False)].copy()
+        stockout_only = df_pharm[df_pharm['priority'].str.contains(r'Stock\s*Out|Stockout', case=False, na=False)].copy()
         
         if not stockout_only.empty:
             stockout_only['Hour'] = stockout_only['dt'].dt.hour
@@ -904,7 +904,7 @@ elif selected_page == "🏥 Pharmacy Workflow":
             st.info("Need both Stockout data and Usage data to generate recommendations.")
 
         # 4. Turnaround Time (TAT) Analysis
-        stockouts = df_pharm[df_pharm['priority'].str.contains('Stockout', case=False, na=False)].copy()
+        stockouts = df_pharm[df_pharm['priority'].str.contains(r'Stock\s*Out|Stockout', case=False, na=False)].copy()
         refills = df_events[df_events['event_type'].isin(['Refill', 'Load', 'Stock Return'])].copy()
         
         if not stockouts.empty and not refills.empty:
