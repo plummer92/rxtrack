@@ -10,7 +10,7 @@
 #   6. Navigation: Switched to Sidebar Radio to prevent view resets (QoL Fix).
 #   7. Data Cleaning: Filtered 'BATCH PICK' from Pharmacy Orders to stop double-counting.
 #   8. Pharmacy Workflow: Added Priority Filter, Stockout Heatmap, and Min/Max Recommendations.
-#   9. Fixes: Explicit column renaming in Turnaround Time analysis to prevent KeyErrors.
+#   9. Fixes: Included 'pk' in SQL selectors to prevent KeyErrors during aggregation.
 ###############################################################
 
 import streamlit as st
@@ -339,16 +339,16 @@ def load_data(start_date, end_date):
             WHERE e.dt::date BETWEEN %s AND %s
         """,
         "config": """
-            SELECT dt, user_name, device, med_id, location, action_type, activity_category, 
+            SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, 
                    min_qty, max_qty, is_standard 
             FROM config_events WHERE dt::date BETWEEN %s AND %s
         """,
         "pharm": """
-            SELECT queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+            SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
             FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s
         """,
         "schedule": """
-            SELECT dt, day_name, staff_name, shift_type, assignment_type, note
+            SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note
             FROM staff_schedule WHERE dt BETWEEN %s AND %s
         """
     }
