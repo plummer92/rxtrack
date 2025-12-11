@@ -10,6 +10,7 @@
 #   6. Navigation: Switched to Sidebar Radio to prevent view resets (QoL Fix).
 #   7. Data Cleaning: Filtered 'BATCH PICK' from Pharmacy Orders to stop double-counting.
 #   8. Pharmacy Workflow: Added Priority Filter, Stockout Heatmap, and Min/Max Recommendations.
+#   9. Fixes: Explicit column renaming in Turnaround Time analysis to prevent KeyErrors.
 ###############################################################
 
 import streamlit as st
@@ -844,25 +845,12 @@ elif selected_page == "🏥 Pharmacy Workflow":
             problem_meds = stockout_only['med_id'].unique()
             
             # Analyze usage for these meds from EVENTS table (Usage history)
-            # Filter for "Remove" or "Dispense" events (usually negative qty or implied usage)
-            # For simplicity, we assume any event in 'events' table for that med implies activity/usage pattern
-            # A better proxy is simply counting total dispensed qty per day
-            
             usage_data = df_events[df_events['med_id'].isin(problem_meds)].copy()
             if not usage_data.empty:
                 usage_data['Date'] = usage_data['dt'].dt.date
                 
-                # Calculate Daily Usage per Med per Device
-                # We assume 'qty' is the amount moved. If it's a dispense, we want the magnitude.
-                # Usually refills are + and dispenses are -. We want the demand (dispenses).
-                # If data mixes signs, we'll take absolute of negative numbers or just use transaction count as proxy if qty is unreliable.
-                # Let's assume 'qty' < 0 is dispense.
+                # Calculate Daily Usage
                 usage_data['dispensed_qty'] = np.where(usage_data['qty'] < 0, usage_data['qty'].abs(), 0)
-                
-                # If all qtys are positive (some reports do this), we might need another logic. 
-                # Fallback: Use total transaction volume as a proxy for "busyness" if qty is ambiguous.
-                # But let's try to sum dispensed qty first.
-                
                 daily_usage = usage_data.groupby(['device', 'med_id', 'med_desc', 'Date'])['dispensed_qty'].sum().reset_index()
                 
                 # Calculate Statistics
@@ -880,10 +868,6 @@ elif selected_page == "🏥 Pharmacy Workflow":
                 recs = pd.merge(stats, stockout_counts, on=['device', 'med_id'], how='inner')
                 
                 # RECOMMENDATION ALGORITHM
-                # Goal: Min > Max Daily Demand (so we don't run out in 1 day)
-                # Suggest Min = Max_Daily_Demand * 1.2 (20% buffer)
-                # Suggest Max = Suggest Min * 2 (Standard Par rule)
-                
                 recs['Suggested Min'] = (recs['Max_Daily_Demand'] * 1.2).apply(np.ceil)
                 recs['Suggested Max'] = (recs['Suggested Min'] * 2).apply(np.ceil)
                 
@@ -915,6 +899,10 @@ elif selected_page == "🏥 Pharmacy Workflow":
             stockouts['match_time'] = stockouts['dt']
             refills['match_time'] = refills['dt']
             
+            # Rename key columns to avoid ambiguity and ensure presence
+            stockouts = stockouts.rename(columns={'pk': 'pk_pharm', 'user_name': 'user_name_pharm'})
+            refills = refills.rename(columns={'pk': 'pk_pyxis', 'user_name': 'user_name_pyxis'})
+            
             # Find NEXT refill after stockout for SAME med_id
             tat_df = pd.merge_asof(
                 stockouts, 
@@ -943,9 +931,10 @@ elif selected_page == "🏥 Pharmacy Workflow":
                 c_tat2.plotly_chart(fig_tat, use_container_width=True)
                 
                 st.write("**Detailed Turnaround Log**")
-                display_cols = ['dt_pharm', 'dt_pyxis', 'med_desc_pharm', 'priority', 'user_name_pyxis', 'Turnaround']
+                display_cols = ['dt_pharm', 'match_time', 'med_desc_pharm', 'priority', 'user_name_pyxis', 'Turnaround']
                 
                 tat_view = tat_df[display_cols].copy()
+                tat_view = tat_view.rename(columns={'match_time': 'dt_pyxis'})
                 tat_view['Turnaround'] = tat_view['Turnaround'].apply(lambda x: f"{int(x)} min")
                 
                 st.dataframe(tat_view.sort_values('dt_pharm', ascending=False), use_container_width=True)
