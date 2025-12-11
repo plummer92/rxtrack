@@ -9,7 +9,7 @@
 #   5. Session Logic: Strict Device-based sessions with explicit Walk Time gaps.
 #   6. Navigation: Switched to Sidebar Radio to prevent view resets (QoL Fix).
 #   7. Data Cleaning: Filtered 'BATCH PICK' from Pharmacy Orders to stop double-counting.
-#   8. Pharmacy Workflow: Added Priority Filter for drill-down (Returns, Refills, etc.).
+#   8. Pharmacy Workflow: Added Priority Filter, Stockout Heatmap, and Min/Max Recommendations.
 ###############################################################
 
 import streamlit as st
@@ -808,7 +808,102 @@ elif selected_page == "🏥 Pharmacy Workflow":
         else:
             st.info("No 'Stockout' or 'Pull' orders found for Volume Tracker.")
 
-        # 2. Turnaround Time (TAT) Analysis
+        # 2. Stockout Heatmap (NEW)
+        st.subheader("🔥 Stockout Heatmap")
+        stockout_only = df_pharm[df_pharm['priority'].str.contains('Stockout', case=False, na=False)].copy()
+        
+        if not stockout_only.empty:
+            stockout_only['Hour'] = stockout_only['dt'].dt.hour
+            stockout_only['Day'] = stockout_only['dt'].dt.day_name()
+            # Sort days correctly
+            days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            stockout_only['Day'] = pd.Categorical(stockout_only['Day'], categories=days_order, ordered=True)
+            
+            heatmap_data = stockout_only.groupby(['Day', 'Hour']).size().reset_index(name='Count')
+            
+            fig_heat = px.density_heatmap(
+                heatmap_data, 
+                x='Hour', 
+                y='Day', 
+                z='Count', 
+                nbinsx=24, 
+                title="When do Stockouts Happen?",
+                color_continuous_scale='Reds'
+            )
+            fig_heat.update_layout(xaxis_title="Hour of Day", yaxis_title="")
+            st.plotly_chart(fig_heat, use_container_width=True)
+        else:
+            st.success("No stockouts found to plot!")
+
+        # 3. Inventory Optimization Recommendations (NEW)
+        st.subheader("💡 Par Level Recommendations")
+        st.caption("Suggested Min/Max to convert Stockouts into Standard Refills.")
+        
+        if not stockout_only.empty and not df_events.empty:
+            # Get list of meds that stocked out
+            problem_meds = stockout_only['med_id'].unique()
+            
+            # Analyze usage for these meds from EVENTS table (Usage history)
+            # Filter for "Remove" or "Dispense" events (usually negative qty or implied usage)
+            # For simplicity, we assume any event in 'events' table for that med implies activity/usage pattern
+            # A better proxy is simply counting total dispensed qty per day
+            
+            usage_data = df_events[df_events['med_id'].isin(problem_meds)].copy()
+            if not usage_data.empty:
+                usage_data['Date'] = usage_data['dt'].dt.date
+                
+                # Calculate Daily Usage per Med per Device
+                # We assume 'qty' is the amount moved. If it's a dispense, we want the magnitude.
+                # Usually refills are + and dispenses are -. We want the demand (dispenses).
+                # If data mixes signs, we'll take absolute of negative numbers or just use transaction count as proxy if qty is unreliable.
+                # Let's assume 'qty' < 0 is dispense.
+                usage_data['dispensed_qty'] = np.where(usage_data['qty'] < 0, usage_data['qty'].abs(), 0)
+                
+                # If all qtys are positive (some reports do this), we might need another logic. 
+                # Fallback: Use total transaction volume as a proxy for "busyness" if qty is ambiguous.
+                # But let's try to sum dispensed qty first.
+                
+                daily_usage = usage_data.groupby(['device', 'med_id', 'med_desc', 'Date'])['dispensed_qty'].sum().reset_index()
+                
+                # Calculate Statistics
+                stats = daily_usage.groupby(['device', 'med_id', 'med_desc']).agg(
+                    Max_Daily_Demand=('dispensed_qty', 'max'),
+                    Avg_Daily_Demand=('dispensed_qty', 'mean'),
+                    Days_Active=('Date', 'nunique')
+                ).reset_index()
+                
+                # Count actual stockouts per device/med
+                stockout_counts = stockout_only.groupby(['destination', 'med_id']).size().reset_index(name='Stockout_Count')
+                stockout_counts.rename(columns={'destination': 'device'}, inplace=True)
+                
+                # Merge Usage Stats with Stockout Counts
+                recs = pd.merge(stats, stockout_counts, on=['device', 'med_id'], how='inner')
+                
+                # RECOMMENDATION ALGORITHM
+                # Goal: Min > Max Daily Demand (so we don't run out in 1 day)
+                # Suggest Min = Max_Daily_Demand * 1.2 (20% buffer)
+                # Suggest Max = Suggest Min * 2 (Standard Par rule)
+                
+                recs['Suggested Min'] = (recs['Max_Daily_Demand'] * 1.2).apply(np.ceil)
+                recs['Suggested Max'] = (recs['Suggested Min'] * 2).apply(np.ceil)
+                
+                # Filter for useful recommendations
+                recs = recs.sort_values('Stockout_Count', ascending=False)
+                
+                st.dataframe(
+                    recs[['device', 'med_desc', 'Stockout_Count', 'Max_Daily_Demand', 'Suggested Min', 'Suggested Max']],
+                    use_container_width=True,
+                    column_config={
+                        "Max_Daily_Demand": st.column_config.NumberColumn("Peak Daily Usage"),
+                        "Stockout_Count": st.column_config.NumberColumn("Total Stockouts"),
+                    }
+                )
+            else:
+                st.info("No usage data found for the stocked-out medications to calculate recommendations.")
+        else:
+            st.info("Need both Stockout data and Usage data to generate recommendations.")
+
+        # 4. Turnaround Time (TAT) Analysis
         stockouts = df_pharm[df_pharm['priority'].str.contains('Stockout', case=False, na=False)].copy()
         refills = df_events[df_events['event_type'].isin(['Refill', 'Load', 'Stock Return'])].copy()
         
