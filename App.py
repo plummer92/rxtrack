@@ -677,17 +677,29 @@ with tabs[6]:
     if not df_events.empty:
         st.header("🔍 Session Explorer")
         sessions = df_events.groupby('session_id').agg({
-            'user_name': 'first', 'device': 'first', 'dt': ['min', 'max']
+            'user_name': 'first', 
+            'device': 'first', 
+            'dt': ['min', 'max'],
+            'machine_time_sec': 'sum'
         }).reset_index()
-        sessions.columns = ['session_id', 'User', 'Device', 'Start', 'End']
-        sessions['Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
+        
+        sessions.columns = ['session_id', 'User', 'Device', 'Start', 'End', 'Active Machine Time']
+        sessions['Total Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
+        
+        # Calculate "Walk / Idle" time (Time not spent actively scanning)
+        sessions['Walk / Idle Time'] = sessions['Total Duration'] - sessions['Active Machine Time']
+        
+        # Formatting for display
+        display_sessions = sessions.copy()
+        display_sessions['Active Machine Time'] = display_sessions['Active Machine Time'].apply(seconds_to_mmss)
+        display_sessions['Walk / Idle Time'] = display_sessions['Walk / Idle Time'].apply(seconds_to_mmss)
         
         c1, c2 = st.columns(2)
         users = sorted(sessions['User'].dropna().unique())
         sel_u = c1.multiselect("User", users, key="sess_u")
         min_sec = c2.number_input("Min Duration (sec)", 0, 3600, 60)
         
-        filtered_sess = sessions[sessions['Duration'] > min_sec]
+        filtered_sess = display_sessions[display_sessions['Total Duration'] > min_sec]
         if sel_u: filtered_sess = filtered_sess[filtered_sess['User'].isin(sel_u)]
         
         st.dataframe(filtered_sess, use_container_width=True)
@@ -836,11 +848,11 @@ with tabs[11]:
             df_pharm[['dt', 'match_key', 'user_name']]
         ])
         
-        worked_agg = worked.groupby([worked['dt'].dt.date, 'match_key']).agg({
-            'user_name': 'first',
-            'dt': 'count' # Tx count
-        }).reset_index().rename(columns={'dt': 'tx_count'})
-        worked_agg.columns = ['date_obj', 'match_key', 'actual_name', 'tx_count']
+        # Use named aggregation to avoid 'dt' column collision during reset_index
+        worked_agg = worked.groupby([worked['dt'].dt.date.rename('date_obj'), 'match_key']).agg(
+            actual_name=('user_name', 'first'),
+            tx_count=('dt', 'count')
+        ).reset_index()
         
         # 3. Merge with Schedule
         df_sched['date_obj'] = df_sched['dt']
