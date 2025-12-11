@@ -8,6 +8,7 @@
 #   4. Performance: Optimized Pandas operations and layout rendering.
 #   5. Session Logic: Strict Device-based sessions with explicit Walk Time gaps.
 #   6. Navigation: Switched to Sidebar Radio to prevent view resets (QoL Fix).
+#   7. Data Cleaning: Filtered 'BATCH PICK' from Pharmacy Orders to stop double-counting.
 ###############################################################
 
 import streamlit as st
@@ -399,6 +400,12 @@ def load_data(start_date, end_date):
         
         df['session_id'] = df['is_new_session'].cumsum()
         df.drop(columns=['next_dt', 'is_new_session', 'gap_prev'], inplace=True, errors='ignore')
+
+    # Process Pharmacy Orders to remove "BATCH PICK" summaries
+    if not results["pharm"].empty:
+        # Exclude aggregate rows where destination is "BATCH PICK"
+        # This prevents double counting of volume/orders.
+        results["pharm"] = results["pharm"][~results["pharm"]['destination'].astype(str).str.contains('BATCH PICK', case=False, na=False)]
 
     return df, results["config"], results["pharm"], results["schedule"]
 
