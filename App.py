@@ -767,6 +767,72 @@ elif selected_page == "🏥 Pharmacy Workflow":
             
         st.dataframe(df_pharm, use_container_width=True)
 
+        st.divider()
+        st.subheader("📦 Volume & Turnaround Tracking")
+        
+        # 1. Volume Tracker
+        mask_vol = df_pharm['priority'].str.contains(r'Stockout|Pull', case=False, na=False)
+        vol_df = df_pharm[mask_vol].copy()
+        
+        if not vol_df.empty:
+            vol_df['Date'] = vol_df['dt'].dt.date
+            vol_counts = vol_df.groupby(['Date', 'priority']).size().reset_index(name='Count')
+            fig_vol = px.bar(vol_counts, x='Date', y='Count', color='priority', title="Daily Volume: Stockouts & Pulls")
+            st.plotly_chart(fig_vol, use_container_width=True)
+        else:
+            st.info("No 'Stockout' or 'Pull' orders found for Volume Tracker.")
+
+        # 2. Turnaround Time (TAT) Analysis
+        stockouts = df_pharm[df_pharm['priority'].str.contains('Stockout', case=False, na=False)].copy()
+        refills = df_events[df_events['event_type'].isin(['Refill', 'Load', 'Stock Return'])].copy()
+        
+        if not stockouts.empty and not refills.empty:
+            stockouts = stockouts.sort_values('dt')
+            refills = refills.sort_values('dt')
+            
+            # Prepare for merge
+            stockouts['match_time'] = stockouts['dt']
+            refills['match_time'] = refills['dt']
+            
+            # Find NEXT refill after stockout for SAME med_id
+            tat_df = pd.merge_asof(
+                stockouts, 
+                refills, 
+                on='match_time', 
+                by='med_id', 
+                direction='forward',
+                suffixes=('_pharm', '_pyxis')
+            )
+            
+            # Filter matches
+            tat_df = tat_df.dropna(subset=['pk_pyxis'])
+            tat_df['Turnaround'] = (tat_df['match_time'] - tat_df['dt_pharm']).dt.total_seconds() / 60 # Minutes
+            
+            # Filter outliers (>24 hours)
+            tat_df = tat_df[tat_df['Turnaround'] < 1440]
+            
+            if not tat_df.empty:
+                avg_tat = tat_df['Turnaround'].mean()
+                
+                c_tat1, c_tat2 = st.columns(2)
+                c_tat1.metric("Avg Turnaround Time", f"{int(avg_tat)} min")
+                c_tat1.caption("Time from Pharmacy Stockout -> Pyxis Refill")
+                
+                fig_tat = px.histogram(tat_df, x='Turnaround', nbins=20, title="Turnaround Time Distribution (min)")
+                c_tat2.plotly_chart(fig_tat, use_container_width=True)
+                
+                st.write("**Detailed Turnaround Log**")
+                display_cols = ['dt_pharm', 'dt_pyxis', 'med_desc_pharm', 'priority', 'user_name_pyxis', 'Turnaround']
+                
+                tat_view = tat_df[display_cols].copy()
+                tat_view['Turnaround'] = tat_view['Turnaround'].apply(lambda x: f"{int(x)} min")
+                
+                st.dataframe(tat_view.sort_values('dt_pharm', ascending=False), use_container_width=True)
+            else:
+                st.warning("Could not match any Pharmacy Stockouts to subsequent Pyxis Refills (within 24h).")
+        else:
+            st.info("Insufficient data for Turnaround Analysis.")
+
 # 9. RECONCILIATION
 elif selected_page == "🔄 Return Reconciliation":
     st.markdown("### 🔄 Unload vs. Return Reconciliation")
