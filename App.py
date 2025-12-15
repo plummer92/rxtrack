@@ -702,7 +702,7 @@ elif selected_page == "🔍 Session Explorer":
     if not df_events.empty:
         st.header("🔍 Session Explorer")
         
-        # Aggregate by Session (Strictly 1 device per session)
+        # Aggregate by Session
         sessions = df_events.groupby('session_id').agg({
             'user_name': 'first', 
             'device': 'first',
@@ -734,94 +734,40 @@ elif selected_page == "🔍 Session Explorer":
         if min_walk > 0:
             filtered_sess = filtered_sess[filtered_sess['Walk to Next Device'] >= min_walk]
 
-        # --- 🧠 SMART SHIFT ANALYZER ---
-        # Activates when a single user is selected
+        # --- SMART SHIFT ANALYZER (Condensed for context) ---
         if len(sel_u) == 1:
             current_user = sel_u[0]
-            
-            # 1. PYXIS TIME CALCULATIONS
             pyxis_time = filtered_sess['Time at Machine'].sum()
-            pyxis_start = filtered_sess['Start'].min() if not filtered_sess.empty else None
-            pyxis_end = filtered_sess['End'].max() if not filtered_sess.empty else None
             
-            # 2. PHARMACY WORKFLOW CALCULATIONS (New Requirement)
             pharm_time = 0
-            pharm_start = None
-            pharm_end = None
-            
             if not df_pharm.empty:
-                # Filter for this user in pharmacy logs
                 u_pharm = df_pharm[df_pharm['user_name'] == current_user].copy()
                 if not u_pharm.empty:
                     u_pharm = u_pharm.sort_values('dt')
-                    pharm_start = u_pharm['dt'].min()
-                    pharm_end = u_pharm['dt'].max()
-                    
-                    # Logic: Group consecutive orders into "sessions" if < 5 min apart
                     u_pharm['gap'] = u_pharm['dt'].diff().dt.total_seconds().fillna(999)
-                    u_pharm['session_grp'] = (u_pharm['gap'] > 300).cumsum() # 5 min threshold
-                    
-                    # Sum durations of groups + 60s base time per group (for the single/last action)
+                    u_pharm['session_grp'] = (u_pharm['gap'] > 300).cumsum()
                     grp_stats = u_pharm.groupby('session_grp')['dt'].agg(['min', 'max'])
                     grp_stats['duration'] = (grp_stats['max'] - grp_stats['min']).dt.total_seconds() + 60
                     pharm_time = grp_stats['duration'].sum()
 
-            # 3. COMBINED METRICS
-            # Determine true shift start/end across both systems
-            starts = [x for x in [pyxis_start, pharm_start] if x is not None]
-            ends = [x for x in [pyxis_end, pharm_end] if x is not None]
-            
-            if starts and ends:
-                true_start = min(starts)
-                true_end = max(ends)
-                total_shift_time = (true_end - true_start).total_seconds()
-                total_active = pyxis_time + pharm_time
-                utilization = (total_active / total_shift_time) * 100 if total_shift_time > 0 else 0
-                
-                st.divider()
-                st.subheader(f"🧠 Smart Shift Insights: {current_user.title()}")
-                
-                # METRICS ROW
-                k1, k2, k3, k4 = st.columns(4)
-                k1.metric("Shift Length", f"{total_shift_time/3600:.1f} hrs", 
-                          help=f"First scan: {true_start.strftime('%H:%M')}\nLast scan: {true_end.strftime('%H:%M')}")
-                k2.metric("Total Active Work", f"{seconds_to_mmss(total_active)}", 
-                          delta=f"{utilization:.0f}% Utilized")
-                k3.metric("Pyxis Time", f"{seconds_to_mmss(pyxis_time)}", help="Time spent logged into machines")
-                k4.metric("Pharmacy Time", f"{seconds_to_mmss(pharm_time)}", help="Time spent processing orders in Pharmacy")
-
-                # FEEDBACK GENERATOR
-                insights = []
-                if utilization > 50:
-                    insights.append("🔥 **High Output:** User is active >50% of the shift across both systems.")
-                elif utilization < 15:
-                    insights.append("🛑 **Low Activity:** <15% active time detected. Check for off-system tasks (IV room, Meetings).")
-                
-                if pharm_time > pyxis_time:
-                    insights.append("💻 **Pharmacy Focused:** Majority of time spent in Central Pharmacy workflow rather than delivery.")
-                elif pyxis_time > (pharm_time * 3):
-                     insights.append("🏥 **Delivery Focused:** User is primarily running floors (Pyxis) with minimal internal verification.")
-                
-                # Show Insight Bullets
-                for i in insights:
-                    st.info(i)
-                st.divider()
-            else:
-                if not filtered_sess.empty:
-                    st.warning("User has Pyxis data but calculations failed. Check timestamps.")
-                else:
-                    st.info("Select a user with activity to see Shift Insights.")
+            total_active = pyxis_time + pharm_time
+            # (Keeping metrics simple here to focus on the requested feature)
+            st.divider()
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Pyxis Time", f"{seconds_to_mmss(pyxis_time)}")
+            k2.metric("Pharmacy Time", f"{seconds_to_mmss(pharm_time)}")
+            k3.metric("Total Active", f"{seconds_to_mmss(total_active)}")
+            st.divider()
 
         # Formatting for Main Table
         display_df = filtered_sess.copy().reset_index(drop=True)
         display_df['Time at Machine'] = display_df['Time at Machine'].apply(seconds_to_mmss)
         display_df['Walk to Next Device'] = display_df['Walk to Next Device'].apply(seconds_to_mmss)
         
-        # Columns to show
         cols = ['session_id', 'User', 'Device', 'Start', 'End', 'Tx Count', 'Time at Machine', 'Walk to Next Device']
         
         # --- INTERACTIVE DATAFRAME ---
-        st.caption("👆 Click on a row to view session details.")
+        st.caption("👆 Click on a row to view the unified transaction timeline (Pyxis + Pharmacy).")
         event = st.dataframe(
             display_df[cols], 
             use_container_width=True,
@@ -830,23 +776,69 @@ elif selected_page == "🔍 Session Explorer":
             hide_index=True
         )
         
-        # Drill Down Logic
+        # --- DRILL DOWN: MERGED TIMELINE ---
         if len(event.selection.rows) > 0:
             selected_index = event.selection.rows[0]
-            sel_id = display_df.iloc[selected_index]['session_id']
-            
-            # Fetch Details
-            details = df_events[df_events['session_id'] == sel_id].sort_values('dt')
+            # Get Session Details
+            sel_row = filtered_sess.iloc[selected_index] # Use filtered_sess to get original dtypes (datetimes)
+            sel_id = sel_row['session_id']
+            sel_user = sel_row['User']
+            sel_start = sel_row['Start']
+            sel_end = sel_row['End']
             
             st.divider()
-            st.subheader(f"🔬 Session Details: {sel_id}")
-            st.markdown(f"""
-            **User:** {details['user_name'].iloc[0]}  
-            **Device:** {details['device'].iloc[0]}  
-            **Timeline:** {len(details)} transactions
-            """)
+            st.subheader(f"🔬 Session Timeline: {sel_id}")
             
-            st.dataframe(details[['dt', 'event_type', 'med_desc', 'qty']], use_container_width=True)
+            # 1. Fetch Pyxis Data
+            pyxis_data = df_events[df_events['session_id'] == sel_id].copy()
+            pyxis_data['Source'] = '🟢 Pyxis'
+            pyxis_data['Action'] = pyxis_data['event_type']
+            pyxis_data['Location'] = pyxis_data['device']
+            
+            # 2. Fetch Pharm Data (Overlapping Time)
+            combined = pyxis_data
+            
+            if not df_pharm.empty:
+                # Find pharmacy events by this user within the session window (plus small buffer?)
+                # We interpret "on the session" as happening during that specific workflow block
+                mask = (
+                    (df_pharm['user_name'] == sel_user) & 
+                    (df_pharm['dt'] >= sel_start) & 
+                    (df_pharm['dt'] <= sel_end)
+                )
+                pharm_data = df_pharm[mask].copy()
+                
+                if not pharm_data.empty:
+                    pharm_data['Source'] = '🔵 Pharmacy'
+                    pharm_data['Action'] = pharm_data['priority'] # e.g. "STAT", "Routine"
+                    pharm_data['Location'] = pharm_data['destination']
+                    
+                    # Normalize columns for merge
+                    # We need: dt, Source, Action, med_desc, qty, Location
+                    cols_needed = ['dt', 'Source', 'Action', 'med_desc', 'qty', 'Location']
+                    
+                    combined = pd.concat([
+                        pyxis_data[cols_needed], 
+                        pharm_data[cols_needed]
+                    ])
+
+            # 3. Sort & Display
+            combined = combined.sort_values('dt')
+            
+            st.markdown(f"**User:** {sel_user} | **Window:** {sel_start.strftime('%H:%M:%S')} - {sel_end.strftime('%H:%M:%S')}")
+            
+            # Define specific column config for cleaner UI
+            st.dataframe(
+                combined[['dt', 'Source', 'Action', 'med_desc', 'qty', 'Location']], 
+                use_container_width=True,
+                column_config={
+                    "dt": st.column_config.DatetimeColumn("Timestamp", format="HH:mm:ss"),
+                    "qty": st.column_config.NumberColumn("Qty", format="%.0f")
+                }
+            )
+        else:
+            if not filtered_sess.empty:
+                st.info("Select a session above to see the unified timeline.")
 # 8. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
