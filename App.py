@@ -699,146 +699,150 @@ elif selected_page == "⚡ Efficiency":
 
 # 7. SESSION EXPLORER
 elif selected_page == "🔍 Session Explorer":
-    if not df_events.empty:
-        st.header("🔍 Session Explorer")
+    st.header("🔍 Session Explorer")
+    st.caption("Unified view of Pyxis and Pharmacy Workflow sessions.")
+
+    # 1. DATA PREPARATION (Combine Pyxis & Pharmacy)
+    if df_events.empty and df_pharm.empty:
+        st.info("No data available.")
+    else:
+        # Prepare Pyxis Data
+        if not df_events.empty:
+            px = df_events[['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk']].copy()
+            px['source'] = 'Pyxis'
+        else:
+            px = pd.DataFrame(columns=['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk', 'source'])
+
+        # Prepare Pharmacy Data
+        if not df_pharm.empty:
+            ph = df_pharm[['user_name', 'dt', 'destination', 'priority', 'med_desc', 'qty', 'pk']].copy()
+            # Map columns to match Pyxis structure
+            ph.rename(columns={'priority': 'event_type', 'destination': 'target_dest'}, inplace=True)
+            # Group all pharmacy actions under one "Device" name to prevent 100s of mini-sessions per order
+            ph['device'] = 'Pharmacy Workflow' 
+            ph['source'] = 'Pharmacy'
+        else:
+            ph = pd.DataFrame(columns=['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk', 'source'])
+
+        # Combine & Sort
+        combined = pd.concat([px, ph], ignore_index=True)
+        combined['dt'] = pd.to_datetime(combined['dt'])
+        combined.sort_values(['user_name', 'dt'], inplace=True)
         
-        # Aggregate by Session
-        sessions = df_events.groupby('session_id').agg({
-            'user_name': 'first', 
+        # 2. SESSION CALCULATION (Unified Logic)
+        # New Session if: User Changes OR Device Changes OR Gap > 20 mins
+        combined['prev_user'] = combined['user_name'].shift(1)
+        combined['prev_device'] = combined['device'].shift(1)
+        combined['prev_dt'] = combined['dt'].shift(1)
+        combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
+        
+        combined['is_new_session'] = np.where(
+            (combined['user_name'] != combined['prev_user']) | 
+            (combined['device'] != combined['prev_device']) | 
+            (combined['gap'] > 1200), 1, 0
+        )
+        combined['session_id'] = combined['is_new_session'].cumsum()
+
+        # 3. AGGREGATE SESSIONS
+        sessions = combined.groupby('session_id').agg({
+            'user_name': 'first',
             'device': 'first',
+            'source': 'first',
             'dt': ['min', 'max'],
             'pk': 'count'
         }).reset_index()
         
-        sessions.columns = ['session_id', 'User', 'Device', 'Start', 'End', 'Tx Count']
+        sessions.columns = ['session_id', 'User', 'Device', 'Source', 'Start', 'End', 'Tx Count']
         
-        # Calculate Duration of time spent AT the machine
-        sessions['Time at Machine'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
+        # Metrics
+        sessions['Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
+        # Ensure minimum duration of 30s for single-scan sessions (for visibility)
+        sessions['Duration'] = np.where(sessions['Duration'] < 10, 30, sessions['Duration'])
         
-        # Sort to calculate Walk Time
+        # Walk Time (Gap to NEXT session)
         sessions = sessions.sort_values(['User', 'Start'])
-        sessions['Next Session Start'] = sessions.groupby('User')['Start'].shift(-1)
-        sessions['Walk to Next Device'] = (sessions['Next Session Start'] - sessions['End']).dt.total_seconds()
+        sessions['Next Start'] = sessions.groupby('User')['Start'].shift(-1)
+        sessions['Walk Time'] = (sessions['Next Start'] - sessions['End']).dt.total_seconds()
         
         # --- FILTERS ---
         c1, c2, c3 = st.columns(3)
-        users = sorted(sessions['User'].dropna().unique())
-        sel_u = c1.multiselect("Filter User", users, key="sess_u")
-        min_machine = c2.number_input("Min Time at Machine (sec)", 0, 3600, 30)
-        min_walk = c3.number_input("Min Walk Time (sec)", 0, 3600, 0)
+        all_users = sorted(sessions['User'].dropna().unique())
+        sel_u = c1.multiselect("Filter User", all_users, key="u_sess_uni")
+        min_dur = c2.number_input("Min Duration (sec)", 0, 3600, 0)
+        sel_source = c3.multiselect("Filter Source", ["Pyxis", "Pharmacy"], default=["Pyxis", "Pharmacy"])
         
         # Apply Filters
-        filtered_sess = sessions.copy()
-        if sel_u: filtered_sess = filtered_sess[filtered_sess['User'].isin(sel_u)]
-        filtered_sess = filtered_sess[filtered_sess['Time at Machine'] >= min_machine]
-        if min_walk > 0:
-            filtered_sess = filtered_sess[filtered_sess['Walk to Next Device'] >= min_walk]
-
-        # --- SMART SHIFT ANALYZER (Condensed for context) ---
+        view = sessions.copy()
+        if sel_u: view = view[view['User'].isin(sel_u)]
+        if min_dur: view = view[view['Duration'] >= min_dur]
+        if sel_source: view = view[view['Source'].isin(sel_source)]
+        
+        # --- SMART SHIFT ANALYZER (Unified) ---
         if len(sel_u) == 1:
-            current_user = sel_u[0]
-            pyxis_time = filtered_sess['Time at Machine'].sum()
+            st.divider()
+            user_stats = view.copy()
+            total_active = user_stats['Duration'].sum()
+            pyxis_time = user_stats[user_stats['Source'] == 'Pyxis']['Duration'].sum()
+            pharm_time = user_stats[user_stats['Source'] == 'Pharmacy']['Duration'].sum()
             
-            pharm_time = 0
-            if not df_pharm.empty:
-                u_pharm = df_pharm[df_pharm['user_name'] == current_user].copy()
-                if not u_pharm.empty:
-                    u_pharm = u_pharm.sort_values('dt')
-                    u_pharm['gap'] = u_pharm['dt'].diff().dt.total_seconds().fillna(999)
-                    u_pharm['session_grp'] = (u_pharm['gap'] > 300).cumsum()
-                    grp_stats = u_pharm.groupby('session_grp')['dt'].agg(['min', 'max'])
-                    grp_stats['duration'] = (grp_stats['max'] - grp_stats['min']).dt.total_seconds() + 60
-                    pharm_time = grp_stats['duration'].sum()
-
-            total_active = pyxis_time + pharm_time
-            # (Keeping metrics simple here to focus on the requested feature)
-            st.divider()
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Pyxis Time", f"{seconds_to_mmss(pyxis_time)}")
-            k2.metric("Pharmacy Time", f"{seconds_to_mmss(pharm_time)}")
-            k3.metric("Total Active", f"{seconds_to_mmss(total_active)}")
+            # Identify "Home Base"
+            top_device = user_stats['Device'].mode()
+            home_base = top_device[0] if not top_device.empty else "N/A"
+            
+            st.subheader(f"🧠 Shift Analysis: {sel_u[0].title()}")
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total Active Time", seconds_to_mmss(total_active))
+            k2.metric("Pyxis Time", seconds_to_mmss(pyxis_time))
+            k3.metric("Pharmacy Time", seconds_to_mmss(pharm_time))
+            k4.metric("Most Visited", home_base)
+            
+            # Quick Insight
+            if pharm_time > pyxis_time:
+                st.info("💻 **Workflow Focus:** This user spent more time processing orders in the Pharmacy than delivering.")
+            elif pyxis_time > 0:
+                st.info("🏥 **Delivery Focus:** This user was primarily active on the floor (Pyxis).")
             st.divider()
 
-        # Formatting for Main Table
-        display_df = filtered_sess.copy().reset_index(drop=True)
-        display_df['Time at Machine'] = display_df['Time at Machine'].apply(seconds_to_mmss)
-        display_df['Walk to Next Device'] = display_df['Walk to Next Device'].apply(seconds_to_mmss)
+        # Display Formatting
+        disp = view.copy().reset_index(drop=True)
+        disp['Duration_Str'] = disp['Duration'].apply(seconds_to_mmss)
+        disp['Walk Time'] = disp['Walk Time'].apply(seconds_to_mmss)
+        disp['Start'] = disp['Start'].dt.strftime('%H:%M:%S')
+        disp['End'] = disp['End'].dt.strftime('%H:%M:%S')
         
-        cols = ['session_id', 'User', 'Device', 'Start', 'End', 'Tx Count', 'Time at Machine', 'Walk to Next Device']
-        
-        # --- INTERACTIVE DATAFRAME ---
-        st.caption("👆 Click on a row to view the unified transaction timeline (Pyxis + Pharmacy).")
+        # --- MAIN TABLE ---
+        st.caption("👆 Click a row to see the exact transactions.")
         event = st.dataframe(
-            display_df[cols], 
+            disp[['session_id', 'User', 'Source', 'Device', 'Start', 'End', 'Tx Count', 'Duration_Str', 'Walk Time']],
             use_container_width=True,
-            on_select="rerun",           
-            selection_mode="single-row", 
-            hide_index=True
+            on_select="rerun",
+            selection_mode="single-row",
+            hide_index=True,
+            column_config={"Duration_Str": "Duration"}
         )
         
-        # --- DRILL DOWN: MERGED TIMELINE ---
+        # --- DRILL DOWN ---
         if len(event.selection.rows) > 0:
-            selected_index = event.selection.rows[0]
-            # Get Session Details
-            sel_row = filtered_sess.iloc[selected_index] # Use filtered_sess to get original dtypes (datetimes)
-            sel_id = sel_row['session_id']
-            sel_user = sel_row['User']
-            sel_start = sel_row['Start']
-            sel_end = sel_row['End']
+            idx = event.selection.rows[0]
+            sel_id = disp.iloc[idx]['session_id']
+            
+            # Get raw transactions from the COMBINED dataset
+            details = combined[combined['session_id'] == sel_id].sort_values('dt').copy()
             
             st.divider()
-            st.subheader(f"🔬 Session Timeline: {sel_id}")
+            st.subheader(f"🔬 Timeline: {details['device'].iloc[0]}")
             
-            # 1. Fetch Pyxis Data
-            pyxis_data = df_events[df_events['session_id'] == sel_id].copy()
-            pyxis_data['Source'] = '🟢 Pyxis'
-            pyxis_data['Action'] = pyxis_data['event_type']
-            pyxis_data['Location'] = pyxis_data['device']
-            
-            # 2. Fetch Pharm Data (Overlapping Time)
-            combined = pyxis_data
-            
-            if not df_pharm.empty:
-                # Find pharmacy events by this user within the session window (plus small buffer?)
-                # We interpret "on the session" as happening during that specific workflow block
-                mask = (
-                    (df_pharm['user_name'] == sel_user) & 
-                    (df_pharm['dt'] >= sel_start) & 
-                    (df_pharm['dt'] <= sel_end)
-                )
-                pharm_data = df_pharm[mask].copy()
-                
-                if not pharm_data.empty:
-                    pharm_data['Source'] = '🔵 Pharmacy'
-                    pharm_data['Action'] = pharm_data['priority'] # e.g. "STAT", "Routine"
-                    pharm_data['Location'] = pharm_data['destination']
-                    
-                    # Normalize columns for merge
-                    # We need: dt, Source, Action, med_desc, qty, Location
-                    cols_needed = ['dt', 'Source', 'Action', 'med_desc', 'qty', 'Location']
-                    
-                    combined = pd.concat([
-                        pyxis_data[cols_needed], 
-                        pharm_data[cols_needed]
-                    ])
-
-            # 3. Sort & Display
-            combined = combined.sort_values('dt')
-            
-            st.markdown(f"**User:** {sel_user} | **Window:** {sel_start.strftime('%H:%M:%S')} - {sel_end.strftime('%H:%M:%S')}")
-            
-            # Define specific column config for cleaner UI
             st.dataframe(
-                combined[['dt', 'Source', 'Action', 'med_desc', 'qty', 'Location']], 
+                details[['dt', 'source', 'event_type', 'med_desc', 'qty']],
                 use_container_width=True,
                 column_config={
-                    "dt": st.column_config.DatetimeColumn("Timestamp", format="HH:mm:ss"),
-                    "qty": st.column_config.NumberColumn("Qty", format="%.0f")
+                    "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
+                    "qty": st.column_config.NumberColumn("Qty", format="%.1f")
                 }
             )
         else:
-            if not filtered_sess.empty:
-                st.info("Select a session above to see the unified timeline.")
+            if not view.empty:
+                st.info("Select a session above to view transaction details.")
 # 8. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
