@@ -740,8 +740,61 @@ elif selected_page == "🔍 Session Explorer":
         if min_walk > 0:
             filtered_sess = filtered_sess[filtered_sess['Walk to Next Device'] >= min_walk]
 
+        # --- 🧠 SMART SHIFT ANALYZER ---
+        # Only activates when a single user is selected to analyze their specific shift "story"
+        if len(sel_u) == 1 and not filtered_sess.empty:
+            st.divider()
+            st.subheader(f"🧠 Smart Shift Insights: {sel_u[0].title()}")
+            
+            # 1. Calculate Shift Metrics
+            shift_start = filtered_sess['Start'].min()
+            shift_end = filtered_sess['End'].max()
+            total_shift_time = (shift_end - shift_start).total_seconds()
+            
+            total_active_time = filtered_sess['Time at Machine'].sum()
+            utilization = (total_active_time / total_shift_time) * 100 if total_shift_time > 0 else 0
+            
+            avg_walk = filtered_sess['Walk to Next Device'].mean()
+            tx_vol = filtered_sess['Tx Count'].sum()
+            
+            # 2. Pattern Recognition Logic
+            insights = []
+            
+            # Pace Analysis
+            if utilization > 40:
+                insights.append("🔥 **High Intensity:** User is spending >40% of total shift time actively logged into machines.")
+            elif utilization < 10:
+                insights.append("🛑 **Low Utilization:** User spends <10% of time at machines. Check for indirect tasks (IV room/Desk work).")
+            else:
+                insights.append("✅ **Steady Pace:** User maintains a balanced workflow.")
+
+            # Routing Analysis (Walking/Gap Time)
+            if avg_walk > 600: # 10 mins
+                insights.append("🚶 **Long Gaps:** Average time between machines is high (>10 min). Potential inefficient routing or frequent interruptions.")
+            elif avg_walk < 120: # 2 mins
+                insights.append("⚡ **Rapid Routing:** User moves very quickly between devices.")
+
+            # Session Style
+            avg_sess_len = filtered_sess['Time at Machine'].mean()
+            if avg_sess_len < 60:
+                insights.append("🐇 **Micro-Sessions:** User frequently logs in for <1 min. 'Machine Hopping' behavior detected.")
+            elif avg_sess_len > 300:
+                insights.append("🐢 **Deep Sessions:** User tends to stay at one machine for long periods (>5 min).")
+
+            # 3. Display Dashboard
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Shift Duration", f"{total_shift_time/3600:.1f} hrs")
+            k2.metric("Machine Utilization", f"{utilization:.1f}%")
+            k3.metric("Avg Gap/Walk", f"{int(avg_walk/60)} min")
+            k4.metric("Total Volume", tx_vol)
+            
+            # Show Insight Bullets
+            for i in insights:
+                st.info(i)
+            st.divider()
+
         # Formatting for Display
-        display_df = filtered_sess.copy().reset_index(drop=True) # Reset index for safe iloc selection
+        display_df = filtered_sess.copy().reset_index(drop=True)
         display_df['Time at Machine'] = display_df['Time at Machine'].apply(seconds_to_mmss)
         display_df['Walk to Next Device'] = display_df['Walk to Next Device'].apply(seconds_to_mmss)
         
@@ -753,16 +806,14 @@ elif selected_page == "🔍 Session Explorer":
         event = st.dataframe(
             display_df[cols], 
             use_container_width=True,
-            on_select="rerun",           # Enables row selection
-            selection_mode="single-row", # Restricts to one row at a time
+            on_select="rerun",           
+            selection_mode="single-row", 
             hide_index=True
         )
         
         # Drill Down Logic
         if len(event.selection.rows) > 0:
-            # Get the index of the selected row
             selected_index = event.selection.rows[0]
-            # Retrieve the session_id using the index
             sel_id = display_df.iloc[selected_index]['session_id']
             
             # Fetch Details
@@ -776,7 +827,6 @@ elif selected_page == "🔍 Session Explorer":
             **Timeline:** {len(details)} transactions
             """)
             
-            # Show formatted table
             st.dataframe(details[['dt', 'event_type', 'med_desc', 'qty']], use_container_width=True)
         else:
             if not filtered_sess.empty:
