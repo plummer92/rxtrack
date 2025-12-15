@@ -736,27 +736,51 @@ elif selected_page == "🔍 Session Explorer":
         if sel_u: filtered_sess = filtered_sess[filtered_sess['User'].isin(sel_u)]
         filtered_sess = filtered_sess[filtered_sess['Time at Machine'] >= min_machine]
         
-        # Only filter by walk time if the user asked for it (avoid hiding last sessions which have NaN walk time)
+        # Only filter by walk time if the user asked for it
         if min_walk > 0:
             filtered_sess = filtered_sess[filtered_sess['Walk to Next Device'] >= min_walk]
 
         # Formatting for Display
-        display_df = filtered_sess.copy()
+        display_df = filtered_sess.copy().reset_index(drop=True) # Reset index for safe iloc selection
         display_df['Time at Machine'] = display_df['Time at Machine'].apply(seconds_to_mmss)
         display_df['Walk to Next Device'] = display_df['Walk to Next Device'].apply(seconds_to_mmss)
         
         # Columns to show
         cols = ['session_id', 'User', 'Device', 'Start', 'End', 'Tx Count', 'Time at Machine', 'Walk to Next Device']
-        st.dataframe(display_df[cols], use_container_width=True)
         
-        # Drill Down
-        if not filtered_sess.empty:
-            sel_id = st.selectbox("Drill into Session ID", filtered_sess['session_id'].unique())
+        # --- INTERACTIVE DATAFRAME ---
+        st.caption("👆 Click on a row to view session details.")
+        event = st.dataframe(
+            display_df[cols], 
+            use_container_width=True,
+            on_select="rerun",           # Enables row selection
+            selection_mode="single-row", # Restricts to one row at a time
+            hide_index=True
+        )
+        
+        # Drill Down Logic
+        if len(event.selection.rows) > 0:
+            # Get the index of the selected row
+            selected_index = event.selection.rows[0]
+            # Retrieve the session_id using the index
+            sel_id = display_df.iloc[selected_index]['session_id']
+            
+            # Fetch Details
             details = df_events[df_events['session_id'] == sel_id].sort_values('dt')
-            st.write(f"**Session Timeline:** {len(details)} transactions on **{details['device'].iloc[0]}**")
+            
+            st.divider()
+            st.subheader(f"🔬 Session Details: {sel_id}")
+            st.markdown(f"""
+            **User:** {details['user_name'].iloc[0]}  
+            **Device:** {details['device'].iloc[0]}  
+            **Timeline:** {len(details)} transactions
+            """)
             
             # Show formatted table
             st.dataframe(details[['dt', 'event_type', 'med_desc', 'qty']], use_container_width=True)
+        else:
+            if not filtered_sess.empty:
+                st.info("Select a session above to see the transaction timeline.")
 
 # 8. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
