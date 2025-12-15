@@ -702,7 +702,7 @@ elif selected_page == "🔍 Session Explorer":
     if not df_events.empty:
         st.header("🔍 Session Explorer")
         
-        # Aggregate by Session (Which is now strictly 1 device per session)
+        # Aggregate by Session (Strictly 1 device per session)
         sessions = df_events.groupby('session_id').agg({
             'user_name': 'first', 
             'device': 'first',
@@ -715,13 +715,9 @@ elif selected_page == "🔍 Session Explorer":
         # Calculate Duration of time spent AT the machine
         sessions['Time at Machine'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
         
-        # Sort to calculate Walk Time (Gap between this session and the next one for same user)
+        # Sort to calculate Walk Time
         sessions = sessions.sort_values(['User', 'Start'])
-        
-        # Determine the Start time of the NEXT session for this user
         sessions['Next Session Start'] = sessions.groupby('User')['Start'].shift(-1)
-        
-        # Walk Time = (Start of Next Session) - (End of Current Session)
         sessions['Walk to Next Device'] = (sessions['Next Session Start'] - sessions['End']).dt.total_seconds()
         
         # --- FILTERS ---
@@ -735,65 +731,88 @@ elif selected_page == "🔍 Session Explorer":
         filtered_sess = sessions.copy()
         if sel_u: filtered_sess = filtered_sess[filtered_sess['User'].isin(sel_u)]
         filtered_sess = filtered_sess[filtered_sess['Time at Machine'] >= min_machine]
-        
-        # Only filter by walk time if the user asked for it
         if min_walk > 0:
             filtered_sess = filtered_sess[filtered_sess['Walk to Next Device'] >= min_walk]
 
         # --- 🧠 SMART SHIFT ANALYZER ---
-        # Only activates when a single user is selected to analyze their specific shift "story"
-        if len(sel_u) == 1 and not filtered_sess.empty:
-            st.divider()
-            st.subheader(f"🧠 Smart Shift Insights: {sel_u[0].title()}")
+        # Activates when a single user is selected
+        if len(sel_u) == 1:
+            current_user = sel_u[0]
             
-            # 1. Calculate Shift Metrics
-            shift_start = filtered_sess['Start'].min()
-            shift_end = filtered_sess['End'].max()
-            total_shift_time = (shift_end - shift_start).total_seconds()
+            # 1. PYXIS TIME CALCULATIONS
+            pyxis_time = filtered_sess['Time at Machine'].sum()
+            pyxis_start = filtered_sess['Start'].min() if not filtered_sess.empty else None
+            pyxis_end = filtered_sess['End'].max() if not filtered_sess.empty else None
             
-            total_active_time = filtered_sess['Time at Machine'].sum()
-            utilization = (total_active_time / total_shift_time) * 100 if total_shift_time > 0 else 0
+            # 2. PHARMACY WORKFLOW CALCULATIONS (New Requirement)
+            pharm_time = 0
+            pharm_start = None
+            pharm_end = None
             
-            avg_walk = filtered_sess['Walk to Next Device'].mean()
-            tx_vol = filtered_sess['Tx Count'].sum()
+            if not df_pharm.empty:
+                # Filter for this user in pharmacy logs
+                u_pharm = df_pharm[df_pharm['user_name'] == current_user].copy()
+                if not u_pharm.empty:
+                    u_pharm = u_pharm.sort_values('dt')
+                    pharm_start = u_pharm['dt'].min()
+                    pharm_end = u_pharm['dt'].max()
+                    
+                    # Logic: Group consecutive orders into "sessions" if < 5 min apart
+                    u_pharm['gap'] = u_pharm['dt'].diff().dt.total_seconds().fillna(999)
+                    u_pharm['session_grp'] = (u_pharm['gap'] > 300).cumsum() # 5 min threshold
+                    
+                    # Sum durations of groups + 60s base time per group (for the single/last action)
+                    grp_stats = u_pharm.groupby('session_grp')['dt'].agg(['min', 'max'])
+                    grp_stats['duration'] = (grp_stats['max'] - grp_stats['min']).dt.total_seconds() + 60
+                    pharm_time = grp_stats['duration'].sum()
+
+            # 3. COMBINED METRICS
+            # Determine true shift start/end across both systems
+            starts = [x for x in [pyxis_start, pharm_start] if x is not None]
+            ends = [x for x in [pyxis_end, pharm_end] if x is not None]
             
-            # 2. Pattern Recognition Logic
-            insights = []
-            
-            # Pace Analysis
-            if utilization > 40:
-                insights.append("🔥 **High Intensity:** User is spending >40% of total shift time actively logged into machines.")
-            elif utilization < 10:
-                insights.append("🛑 **Low Utilization:** User spends <10% of time at machines. Check for indirect tasks (IV room/Desk work).")
+            if starts and ends:
+                true_start = min(starts)
+                true_end = max(ends)
+                total_shift_time = (true_end - true_start).total_seconds()
+                total_active = pyxis_time + pharm_time
+                utilization = (total_active / total_shift_time) * 100 if total_shift_time > 0 else 0
+                
+                st.divider()
+                st.subheader(f"🧠 Smart Shift Insights: {current_user.title()}")
+                
+                # METRICS ROW
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Shift Length", f"{total_shift_time/3600:.1f} hrs", 
+                          help=f"First scan: {true_start.strftime('%H:%M')}\nLast scan: {true_end.strftime('%H:%M')}")
+                k2.metric("Total Active Work", f"{seconds_to_mmss(total_active)}", 
+                          delta=f"{utilization:.0f}% Utilized")
+                k3.metric("Pyxis Time", f"{seconds_to_mmss(pyxis_time)}", help="Time spent logged into machines")
+                k4.metric("Pharmacy Time", f"{seconds_to_mmss(pharm_time)}", help="Time spent processing orders in Pharmacy")
+
+                # FEEDBACK GENERATOR
+                insights = []
+                if utilization > 50:
+                    insights.append("🔥 **High Output:** User is active >50% of the shift across both systems.")
+                elif utilization < 15:
+                    insights.append("🛑 **Low Activity:** <15% active time detected. Check for off-system tasks (IV room, Meetings).")
+                
+                if pharm_time > pyxis_time:
+                    insights.append("💻 **Pharmacy Focused:** Majority of time spent in Central Pharmacy workflow rather than delivery.")
+                elif pyxis_time > (pharm_time * 3):
+                     insights.append("🏥 **Delivery Focused:** User is primarily running floors (Pyxis) with minimal internal verification.")
+                
+                # Show Insight Bullets
+                for i in insights:
+                    st.info(i)
+                st.divider()
             else:
-                insights.append("✅ **Steady Pace:** User maintains a balanced workflow.")
+                if not filtered_sess.empty:
+                    st.warning("User has Pyxis data but calculations failed. Check timestamps.")
+                else:
+                    st.info("Select a user with activity to see Shift Insights.")
 
-            # Routing Analysis (Walking/Gap Time)
-            if avg_walk > 600: # 10 mins
-                insights.append("🚶 **Long Gaps:** Average time between machines is high (>10 min). Potential inefficient routing or frequent interruptions.")
-            elif avg_walk < 120: # 2 mins
-                insights.append("⚡ **Rapid Routing:** User moves very quickly between devices.")
-
-            # Session Style
-            avg_sess_len = filtered_sess['Time at Machine'].mean()
-            if avg_sess_len < 60:
-                insights.append("🐇 **Micro-Sessions:** User frequently logs in for <1 min. 'Machine Hopping' behavior detected.")
-            elif avg_sess_len > 300:
-                insights.append("🐢 **Deep Sessions:** User tends to stay at one machine for long periods (>5 min).")
-
-            # 3. Display Dashboard
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("Shift Duration", f"{total_shift_time/3600:.1f} hrs")
-            k2.metric("Machine Utilization", f"{utilization:.1f}%")
-            k3.metric("Avg Gap/Walk", f"{int(avg_walk/60)} min")
-            k4.metric("Total Volume", tx_vol)
-            
-            # Show Insight Bullets
-            for i in insights:
-                st.info(i)
-            st.divider()
-
-        # Formatting for Display
+        # Formatting for Main Table
         display_df = filtered_sess.copy().reset_index(drop=True)
         display_df['Time at Machine'] = display_df['Time at Machine'].apply(seconds_to_mmss)
         display_df['Walk to Next Device'] = display_df['Walk to Next Device'].apply(seconds_to_mmss)
@@ -828,10 +847,6 @@ elif selected_page == "🔍 Session Explorer":
             """)
             
             st.dataframe(details[['dt', 'event_type', 'med_desc', 'qty']], use_container_width=True)
-        else:
-            if not filtered_sess.empty:
-                st.info("Select a session above to see the transaction timeline.")
-
 # 8. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
