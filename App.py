@@ -673,7 +673,7 @@ if selected_page == "📊 Overview":
 # 2. TARDIES
 elif selected_page == "⏰ Tardies":
     st.header("⏰ Tardiness Tracker")
-    st.caption("Matches 'Scheduled Start' with 'Actual Clock-in'. Automatically ignores consecutive shifts (doubles).")
+    st.caption("Matches 'Scheduled Start' with 'Actual Clock-in'. Automatically ignores consecutive shifts and admins.")
     
     if not df_sched.empty and not df_att.empty:
         # 1. Normalize Names for Matching
@@ -700,7 +700,6 @@ elif selected_page == "⏰ Tardies":
             merged['diff_abs'] = (merged['actual_start_dt'] - merged['scheduled_start_dt']).abs()
             
             # Sort by smallest difference and keep the best match for each Scheduled Shift
-            # This prevents a 07:00 shift matching with a 15:00 clock-in
             best_matches = merged.sort_values('diff_abs').drop_duplicates(subset=['pk_x'])
             
             final_df = best_matches.copy()
@@ -709,24 +708,19 @@ elif selected_page == "⏰ Tardies":
             final_df['delay_min'] = (final_df['actual_start_dt'] - final_df['scheduled_start_dt']).dt.total_seconds() / 60
             
             # 7. Consecutive Shift Logic (The "Double" Fix)
-            # Sort by User and Time to find sequence
             final_df.sort_values(['match_key', 'actual_start_dt'], inplace=True)
-            
-            # Get the End Time of the PREVIOUS shift for this user on this day
             final_df['prev_end'] = final_df.groupby('match_key')['actual_end_dt'].shift(1)
-            
-            # Calculate gap: (Current Start) - (Previous End)
-            # If gap is small (e.g., < 30 mins), it's likely a split/double shift clock-in
             final_df['gap_min'] = (final_df['actual_start_dt'] - final_df['prev_end']).dt.total_seconds() / 60
             final_df['is_double'] = np.where((final_df['gap_min'].notnull()) & (final_df['gap_min'] < 30), True, False)
 
             # 8. Filter Results
             grace_period = st.slider("Grace Period (minutes)", 0, 15, 5)
             
-            # Filter: Delay > Grace AND Not a Double Shift
+            # Filter: Delay > Grace AND Not a Double Shift AND Not Admin
             tardies = final_df[
                 (final_df['delay_min'] > grace_period) & 
-                (final_df['is_double'] == False)
+                (final_df['is_double'] == False) &
+                (~final_df['match_key'].isin(ADMIN_USERS))
             ].copy()
             
             c1, c2, c3 = st.columns(3)
@@ -747,7 +741,7 @@ elif selected_page == "⏰ Tardies":
                     column_config={"date_obj": "Date"}
                 )
             else:
-                st.success("🎉 No tardies found (after excluding consecutive shifts)!")
+                st.success("🎉 No tardies found (after excluding doubles and admins)!")
         else:
             st.warning("No valid matches found between Schedule and Attendance.")
     else:
