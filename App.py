@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.1 - Fixed Excel Import)
+# RXTRACK: EXECUTIVE DASHBOARD (v12.2 - Name Confusion Fix)
 # Architecture: Quad-Table Strategy + Attendance Tracking
 # Updates:
-#   1. Fixed IndentationError in Sidebar.
-#   2. Added robust Excel/CSV handling for Schedule uploads.
-#   3. Includes 'Attendance Tracking' & 'Tardies' logic.
+#   1. Fixed 'Melissa S' vs 'Melissa D' merging issue.
+#   2. Added logic to preserve Last Initial for common duplicate names.
+#   3. Full Excel support for Schedule files.
 ###############################################################
 
 import streamlit as st
@@ -40,6 +40,7 @@ NARC_TERMS = [
 
 ADMIN_USERS = ['emily', 'joe', 'krista']
 
+# Nickname Mappings
 NAME_MAPPINGS = {
     "phi": "ali", "ho": "ali",
     "rebekah": "bekah",
@@ -47,6 +48,12 @@ NAME_MAPPINGS = {
     "spain": "dee", "deloris": "dee",
     "jabusch": "dan", "daniel": "dan"
 }
+
+# Names that REQUIRE a last initial to distinguish duplicates
+AMBIGUOUS_NAMES = [
+    "melissa", "emily", "sarah", "megan", "erin", "kyle", 
+    "jessica", "andy", "heather", "michelle", "taylor"
+]
 
 # --- CUSTOM CSS ---
 st.markdown("""
@@ -168,17 +175,46 @@ def generate_pk(row):
     return hashlib.sha256(row_str.encode()).hexdigest()
 
 def normalize_name(full_name):
-    """Normalize user names based on business logic."""
+    """
+    Normalize user names. 
+    SPECIAL LOGIC: If the first name is in AMBIGUOUS_NAMES (e.g. Melissa),
+    it preserves the last initial to distinguish Melissa S vs Melissa D.
+    """
     s = str(full_name).strip().lower()
-    for key, val in NAME_MAPPINGS.items():
-        if key in s: return val
+    
+    # 1. Extract First Name and optional Initial
+    first_name = ""
+    last_initial = ""
     
     if "," in s:
-        # Handle "Last, First Middle" format common in HR files
+        # Format: "Last, First Middle" (Attendance File)
         parts = s.split(",")
         if len(parts) >= 2:
-            return parts[1].strip().split(" ")[0]
-    return s.split(" ")[0]
+            last_name_part = parts[0].strip()
+            first_name_part = parts[1].strip().split(" ")[0]
+            
+            first_name = first_name_part
+            if last_name_part:
+                last_initial = last_name_part[0]
+    else:
+        # Format: "First Last" or "First L." (Schedule File)
+        parts = s.split(" ")
+        first_name = parts[0]
+        if len(parts) > 1:
+            last_initial = parts[1][0]
+            
+    # 2. Check for Nicknames
+    for key, val in NAME_MAPPINGS.items():
+        if key in first_name: 
+            first_name = val
+            break
+            
+    # 3. Decision: Return First Name OR First + Initial
+    # Only use initial if it's a known duplicate name (Ambiguous)
+    if first_name in AMBIGUOUS_NAMES and last_initial:
+        return f"{first_name} {last_initial}"
+    
+    return first_name
 
 def parse_shift_start(date_obj, shift_str):
     """Attempts to parse a start time from shift strings like '7a', '0700', '7:00'."""
@@ -467,19 +503,32 @@ def load_data(start_date, end_date):
     return df, results["config"], results["pharm"], results["schedule"], results["attendance"]
 
 def get_stats_range():
+    """Calculates the global date range across ALL tables."""
     sql = """
+        WITH all_dates AS (
+            SELECT dt::date as d FROM events WHERE dt IS NOT NULL
+            UNION ALL
+            SELECT dt::date as d FROM pharmacy_orders WHERE dt IS NOT NULL
+            UNION ALL
+            SELECT dt as d FROM staff_schedule WHERE dt IS NOT NULL
+            UNION ALL
+            SELECT dt_date as d FROM attendance_punches WHERE dt_date IS NOT NULL
+        )
         SELECT 
             (SELECT COUNT(*) FROM events),
             (SELECT COUNT(*) FROM pharmacy_orders),
-            MIN(dt::date), MAX(dt::date) 
-        FROM events
+            (SELECT COUNT(*) FROM staff_schedule),
+            (SELECT COUNT(*) FROM attendance_punches),
+            MIN(d), MAX(d) 
+        FROM all_dates
     """
     with db_cursor() as (conn, cur):
         cur.execute(sql)
         row = cur.fetchone()
-        if row and row[2] and row[3]:
-            return row[0] or 0, row[1] or 0, row[2], row[3]
-    return 0, 0, date.today(), date.today()
+        if row and row[4] and row[5]:
+            return (row[0] or 0), (row[1] or 0), (row[2] or 0), (row[3] or 0), row[4], row[5]
+    
+    return 0, 0, 0, 0, date.today(), date.today()
 
 def get_present_dates(min_dt, max_dt):
     sql = """
@@ -505,19 +554,23 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12")
+    st.title("RxTrack v12.2")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
     selected_page = st.radio("Go to:", PAGES, label_visibility="collapsed")
     st.divider()
     
-    rows_events, rows_pharm, min_db, max_db = get_stats_range()
+    n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
     
     with st.expander("💾 Database Status", expanded=False):
         c1, c2 = st.columns(2)
-        c1.metric("Pyxis Events", f"{rows_events:,}")
-        c2.metric("Pharm Orders", f"{rows_pharm:,}")
+        c1.metric("Pyxis Events", f"{n_events:,}")
+        c2.metric("Pharm Orders", f"{n_pharm:,}")
+        
+        c3, c4 = st.columns(2)
+        c3.metric("Sched. Shifts", f"{n_sched:,}")
+        c4.metric("Time Punches", f"{n_att:,}")
         
         present_dates = get_present_dates(min_db, max_db)
         if min_db and max_db and min_db <= max_db:
@@ -535,14 +588,14 @@ with st.sidebar:
 
     st.divider()
     
-    default_start = max(min_db, max_db - timedelta(days=7)) if min_db < max_db else min_db
-    date_range = st.slider("📅 Analysis Window", 
+    default_start = max(min_db, max_db - timedelta(days=14)) if min_db < max_db else min_db
+    
+    st.markdown("### 📅 Analysis Window")
+    date_range = st.slider("Select Range:", 
                            min_value=min_db, max_value=max_db, 
                            value=(default_start, max_db), format="MM/DD/YY")
     start_date, end_date = date_range
 
-    st.divider()
-    
     st.subheader("📤 Ingest Data")
     u_type = st.selectbox("File Type:", [
         "Daily Transaction Report", "Device Activity Log (Pends)", 
@@ -564,12 +617,9 @@ with st.sidebar:
 
             # --- 2. STAFF SCHEDULE (Enhanced) ---
             elif u_type == "Staff Schedule":
-                # Handle Excel vs CSV
                 if uploaded.name.endswith('.xlsx'):
-                    # Read Excel (reads first sheet by default)
                     raw = pd.read_excel(uploaded)
                 else:
-                    # Read CSV with encoding fallback
                     try:
                         raw = pd.read_csv(uploaded, header=0)
                     except UnicodeDecodeError:
@@ -582,7 +632,6 @@ with st.sidebar:
 
             # --- 3. OTHER FILES ---
             else:
-                # Detect Header Row Dynamically
                 if uploaded.name.endswith('.xlsx'):
                     preview = pd.read_excel(uploaded, header=None, nrows=20)
                 else:
@@ -746,6 +795,7 @@ elif selected_page == "⏰ Tardies":
             st.warning("No valid matches found between Schedule and Attendance.")
     else:
         st.info("Please upload both 'Staff Schedule' and 'Attendance Tracking' files.")
+
 # 3. PROCESS MINING
 elif selected_page == "🚀 Process Mining":
     if not df_events.empty:
