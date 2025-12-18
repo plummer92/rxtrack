@@ -1,10 +1,11 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.2 - Name Confusion Fix)
+# RXTRACK: EXECUTIVE DASHBOARD (v12.3 - Cell Time Override)
 # Architecture: Quad-Table Strategy + Attendance Tracking
 # Updates:
-#   1. Fixed 'Melissa S' vs 'Melissa D' merging issue.
-#   2. Added logic to preserve Last Initial for common duplicate names.
-#   3. Full Excel support for Schedule files.
+#   1. Fixed Schedule Parsing: Now respects times in cells (e.g. "1000-1830") 
+#      overriding column headers.
+#   2. Handles multiple staff in one cell (e.g. "Ali (1000) Melissa (1000)").
+#   3. Previous fixes (Name Normalization, Excel support) included.
 ###############################################################
 
 import streamlit as st
@@ -175,11 +176,7 @@ def generate_pk(row):
     return hashlib.sha256(row_str.encode()).hexdigest()
 
 def normalize_name(full_name):
-    """
-    Normalize user names. 
-    SPECIAL LOGIC: If the first name is in AMBIGUOUS_NAMES (e.g. Melissa),
-    it preserves the last initial to distinguish Melissa S vs Melissa D.
-    """
+    """Normalize user names based on business logic."""
     s = str(full_name).strip().lower()
     
     # 1. Extract First Name and optional Initial
@@ -187,17 +184,16 @@ def normalize_name(full_name):
     last_initial = ""
     
     if "," in s:
-        # Format: "Last, First Middle" (Attendance File)
+        # Format: "Last, First Middle"
         parts = s.split(",")
         if len(parts) >= 2:
             last_name_part = parts[0].strip()
             first_name_part = parts[1].strip().split(" ")[0]
-            
             first_name = first_name_part
             if last_name_part:
                 last_initial = last_name_part[0]
     else:
-        # Format: "First Last" or "First L." (Schedule File)
+        # Format: "First Last" or "First L."
         parts = s.split(" ")
         first_name = parts[0]
         if len(parts) > 1:
@@ -210,7 +206,6 @@ def normalize_name(full_name):
             break
             
     # 3. Decision: Return First Name OR First + Initial
-    # Only use initial if it's a known duplicate name (Ambiguous)
     if first_name in AMBIGUOUS_NAMES and last_initial:
         return f"{first_name} {last_initial}"
     
@@ -349,6 +344,10 @@ def clean_pharmacy_report(df):
     return df[["pk", "queue_id", "priority", "dt", "med_id", "med_desc", "destination", "user_name", "qty"]]
 
 def clean_schedule_data(df):
+    """
+    Cleans schedule data. 
+    IMPROVED: Handles cells with multiple names and specific time overrides (e.g. "Ali (1000-1830)").
+    """
     df = df.copy()
     if len(df.columns) > 2:
         df.rename(columns={df.columns[1]: 'Date', df.columns[2]: 'Day'}, inplace=True)
@@ -356,51 +355,97 @@ def clean_schedule_data(df):
     df = df.iloc[1:].dropna(subset=['Date'])
     df.drop(columns=[df.columns[0]], errors='ignore', inplace=True)
     
-    long_df = df.melt(id_vars=['Date', 'Day'], var_name='shift_type', value_name='raw_entry')
+    # Melt to long format
+    long_df = df.melt(id_vars=['Date', 'Day'], var_name='col_header', value_name='raw_entry')
     long_df.dropna(subset=['raw_entry'], inplace=True)
     long_df = long_df[~long_df['raw_entry'].astype(str).str.lower().isin(['x', 'nan', '', ' '])]
     
-    def parse_entry(entry):
-        entry = str(entry).strip()
-        assignment_type, note = "Shift", ""
-        name = entry
-        lower = entry.lower()
-        
-        if 'trn' in lower or 'training' in lower:
-            name = re.split(r'\s(?:trn|training)\s', entry, flags=re.IGNORECASE)[0].strip()
-            assignment_type = "Training"
-            note = entry 
-        elif any(x in lower for x in ['pto', 'off', 'sick']):
-            assignment_type = "PTO"
-        elif 'trade' in lower:
-            name = re.sub(r'\(?\s*trade\s*\)?', '', entry, flags=re.IGNORECASE).strip()
-            note = entry
-        
-        return pd.Series([name.title(), assignment_type, note])
-
-    long_df[['staff_name', 'assignment_type', 'note']] = long_df['raw_entry'].apply(parse_entry)
-    long_df['dt'] = pd.to_datetime(long_df['Date'], errors='coerce').dt.date
-    long_df.dropna(subset=['dt'], inplace=True)
-    long_df['day_name'] = long_df['Day']
-    long_df["pk"] = long_df.apply(generate_pk, axis=1)
+    processed_rows = []
     
-    return long_df[['pk', 'dt', 'day_name', 'staff_name', 'shift_type', 'assignment_type', 'raw_entry', 'note']]
+    for _, row in long_df.iterrows():
+        raw = str(row['raw_entry']).strip()
+        header = str(row['col_header']).strip()
+        dt = pd.to_datetime(row['Date'], errors='coerce').date()
+        day_name = row['Day']
+        
+        # 1. SPLIT LOGIC: Handle multiple people in one cell
+        # If parens with numbers exist (times), split by closing paren ')' to separate entries
+        if re.search(r'\(\d', raw): 
+            # Example: "Ali (1000) Melissa (1200)"
+            # Split by ')' but keep entries that had a start paren
+            parts = [p.strip() + ')' for p in raw.split(')') if '(' in p]
+        else:
+            # Default split by newline if just names list
+            parts = [p.strip() for p in raw.split('\n') if p.strip()]
+        
+        for part in parts:
+            if not part or part == ')': continue
+            
+            # 2. TIME EXTRACTION (Override)
+            # Look for ranges inside parens: (1000-1830) or (10-6)
+            override_time = None
+            
+            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part) # 1000-1830
+            if m_range:
+                override_time = m_range.group(1)
+                clean_part = part.replace(m_range.group(0), '')
+            else:
+                m_single = re.search(r'\((\d{4})\)', part) # (1000)
+                if m_single:
+                    override_time = m_single.group(1)
+                    clean_part = part.replace(m_single.group(0), '')
+                else:
+                    m_short = re.search(r'\((\d{1,2})\s*-\s*\d{1,2}\)', part) # (10-6)
+                    if m_short:
+                        override_time = m_short.group(1)
+                        clean_part = part.replace(m_short.group(0), '')
+                    else:
+                        clean_part = part
+            
+            clean_part = clean_part.replace('()', '').strip()
+            if clean_part.endswith(','): clean_part = clean_part[:-1]
+            
+            # 3. META DATA
+            assignment_type = "Shift"
+            note = ""
+            lower_part = clean_part.lower()
+            
+            if 'trn' in lower_part or 'training' in lower_part:
+                assignment_type = "Training"
+                clean_part = re.split(r'\s(?:trn|training)\s?', clean_part, flags=re.IGNORECASE)[0].strip()
+            elif any(x in lower_part for x in ['pto', 'off', 'sick']):
+                assignment_type = "PTO"
+            
+            # Determine Final Shift String (Override takes precedence)
+            final_shift_str = override_time if override_time else header
+            
+            # Generate PK manually to avoid applying row lambda
+            row_str = f"{dt}|{clean_part}|{final_shift_str}"
+            pk = hashlib.sha256(row_str.encode()).hexdigest()
+            
+            processed_rows.append({
+                'pk': pk,
+                'dt': dt,
+                'day_name': day_name,
+                'staff_name': clean_part.title(),
+                'shift_type': final_shift_str, # Used for time parsing
+                'assignment_type': assignment_type,
+                'raw_entry': part,
+                'note': note
+            })
+
+    return pd.DataFrame(processed_rows)
 
 def clean_attendance_file(file_obj):
     """Parses the specific Attendance Tracking CSV report format."""
-    # Reset file pointer and read
     file_obj.seek(0)
     content = file_obj.read().decode('utf-8', errors='ignore')
     lines = content.splitlines()
     
     data = []
     
-    # Regex to extract fields from the semi-structured lines
-    # Name: Inside 'Employee:' and followed by '",Date:'
     name_pat = re.compile(r'Employee:\s*([A-Za-z\-,\s\.]+?)(?="|",|",Date)')
-    # Date: 'Date: MM/DD/YYYY'
     date_pat = re.compile(r'Date:\s*(\d{1,2}/\d{1,2}/\d{4})')
-    # Time: 'MM/DD/YYYY HH:MM' (Find all, take first as start, second as end)
     time_pat = re.compile(r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2})')
 
     for line in lines:
@@ -554,7 +599,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12.2")
+    st.title("RxTrack v12.3")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
