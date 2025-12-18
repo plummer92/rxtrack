@@ -544,7 +544,7 @@ with st.sidebar:
 
     st.divider()
     
-    st.subheader("📤 Ingest Data")
+  st.subheader("📤 Ingest Data")
     u_type = st.selectbox("File Type:", [
         "Daily Transaction Report", "Device Activity Log (Pends)", 
         "Financial Price List", "Pharmacy Workflow Report", 
@@ -554,22 +554,45 @@ with st.sidebar:
     
     if uploaded and st.button(f"Process {u_type}"):
         try:
+            # --- 1. ATTENDANCE TRACKING ---
             if u_type == "Attendance Tracking":
                 clean = clean_attendance_file(uploaded)
                 if not clean.empty:
                     sql = "INSERT INTO attendance_punches (pk, raw_name, dt_date, start_dt, end_dt) VALUES (%(pk)s, %(raw_name)s, %(dt_date)s, %(start_dt)s, %(end_dt)s) ON CONFLICT (pk) DO NOTHING;"
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
                 else:
-                    st.error("❌ Could not parse any attendance records.")
-                    
+                    st.error("❌ Could not parse any attendance records. Check file format.")
+
+            # --- 2. STAFF SCHEDULE (Fixed for Excel) ---
             elif u_type == "Staff Schedule":
-                raw = pd.read_csv(uploaded, header=0)
+                # Handle Excel vs CSV
+                if uploaded.name.endswith('.xlsx'):
+                    # Read Excel (reads first sheet by default)
+                    raw = pd.read_excel(uploaded)
+                else:
+                    # Read CSV with encoding fallback
+                    try:
+                        raw = pd.read_csv(uploaded, header=0)
+                    except UnicodeDecodeError:
+                        uploaded.seek(0)
+                        raw = pd.read_csv(uploaded, header=0, encoding='latin1')
+                
                 clean = clean_schedule_data(raw)
                 sql = "INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(day_name)s, %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, %(note)s) ON CONFLICT (pk) DO NOTHING;"
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
+
+            # --- 3. OTHER FILES ---
             else:
-                # Standard Files
-                preview = pd.read_excel(uploaded, header=None, nrows=20) if uploaded.name.endswith('.xlsx') else pd.read_csv(uploaded, header=None, nrows=20)
+                # Detect Header Row Dynamically
+                if uploaded.name.endswith('.xlsx'):
+                    preview = pd.read_excel(uploaded, header=None, nrows=20)
+                else:
+                    try:
+                        preview = pd.read_csv(uploaded, header=None, nrows=20)
+                    except UnicodeDecodeError:
+                        uploaded.seek(0)
+                        preview = pd.read_csv(uploaded, header=None, nrows=20, encoding='latin1')
+
                 header_idx = None
                 for idx, row in preview.iterrows():
                     s = str(row.values).lower()
@@ -579,10 +602,17 @@ with st.sidebar:
                     if u_type == "Pharmacy Workflow Report" and "tranqueueid" in s: header_idx = idx; break
                 
                 if header_idx is None:
-                    st.error("❌ Could not detect valid header row.")
+                    st.error("❌ Could not detect valid header row. File might be formatted incorrectly.")
                 else:
                     uploaded.seek(0)
-                    raw = pd.read_excel(uploaded, header=header_idx) if uploaded.name.endswith('.xlsx') else pd.read_csv(uploaded, header=header_idx)
+                    if uploaded.name.endswith('.xlsx'):
+                        raw = pd.read_excel(uploaded, header=header_idx)
+                    else:
+                        try:
+                            raw = pd.read_csv(uploaded, header=header_idx)
+                        except UnicodeDecodeError:
+                            uploaded.seek(0)
+                            raw = pd.read_csv(uploaded, header=header_idx, encoding='latin1')
                     
                     if u_type == "Daily Transaction Report":
                         clean = clean_dataframe(raw)
@@ -602,7 +632,6 @@ with st.sidebar:
 
         except Exception as e:
             st.error(f"Processing Error: {e}")
-
 # --- LOAD DATA ---
 df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
 
