@@ -1,11 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.3 - Cell Time Override)
+# RXTRACK: EXECUTIVE DASHBOARD (v12.5 - Name Match Fixes)
 # Architecture: Quad-Table Strategy + Attendance Tracking
 # Updates:
-#   1. Fixed Schedule Parsing: Now respects times in cells (e.g. "1000-1830") 
-#      overriding column headers.
-#   2. Handles multiple staff in one cell (e.g. "Ali (1000) Melissa (1000)").
-#   3. Previous fixes (Name Normalization, Excel support) included.
+#   1. Added "nicholas" -> "nick" mapping.
+#   2. Refined "phi" -> "ali" mapping (removed generic "ho").
+#   3. Retains all previous fixes (Time Overrides, Cell Splitter).
 ###############################################################
 
 import streamlit as st
@@ -41,16 +40,19 @@ NARC_TERMS = [
 
 ADMIN_USERS = ['emily', 'joe', 'krista']
 
-# Nickname Mappings
+# Nickname Mappings (LOWER CASE)
+# Maps the "Formal/Legal" name (found in Attendance) to the "Schedule" name
 NAME_MAPPINGS = {
-    "phi": "ali", "ho": "ali",
+    "phi": "ali",          # Maps Phi -> Ali
     "rebekah": "bekah",
     "nugent": "kathy", "kathleen": "kathy",
     "spain": "dee", "deloris": "dee",
-    "jabusch": "dan", "daniel": "dan"
+    "jabusch": "dan", "daniel": "dan",
+    "nicholas": "nick"     # Maps Nicholas -> Nick
 }
 
 # Names that REQUIRE a last initial to distinguish duplicates
+# If a name is in this list, the system will keep the Last Initial (e.g. "Melissa S")
 AMBIGUOUS_NAMES = [
     "melissa", "emily", "sarah", "megan", "erin", "kyle", 
     "jessica", "andy", "heather", "michelle", "taylor"
@@ -200,12 +202,14 @@ def normalize_name(full_name):
             last_initial = parts[1][0]
             
     # 2. Check for Nicknames
+    # This loop checks if a known nickname key is part of the first name
     for key, val in NAME_MAPPINGS.items():
         if key in first_name: 
             first_name = val
             break
             
     # 3. Decision: Return First Name OR First + Initial
+    # Only use initial if it's a known duplicate name (Ambiguous)
     if first_name in AMBIGUOUS_NAMES and last_initial:
         return f"{first_name} {last_initial}"
     
@@ -369,22 +373,17 @@ def clean_schedule_data(df):
         day_name = row['Day']
         
         # 1. SPLIT LOGIC: Handle multiple people in one cell
-        # If parens with numbers exist (times), split by closing paren ')' to separate entries
         if re.search(r'\(\d', raw): 
             # Example: "Ali (1000) Melissa (1200)"
-            # Split by ')' but keep entries that had a start paren
             parts = [p.strip() + ')' for p in raw.split(')') if '(' in p]
         else:
-            # Default split by newline if just names list
             parts = [p.strip() for p in raw.split('\n') if p.strip()]
         
         for part in parts:
             if not part or part == ')': continue
             
             # 2. TIME EXTRACTION (Override)
-            # Look for ranges inside parens: (1000-1830) or (10-6)
             override_time = None
-            
             m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part) # 1000-1830
             if m_range:
                 override_time = m_range.group(1)
@@ -599,7 +598,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12.3")
+    st.title("RxTrack v12.5")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -630,6 +629,20 @@ with st.sidebar:
                 curr += timedelta(days=1)
             cal_html += '</div>'
             st.markdown(cal_html, unsafe_allow_html=True)
+
+    # --- DATABASE MAINTENANCE ---
+    with st.expander("🗑️ Database Maintenance", expanded=False):
+        st.warning("Clears uploaded data from the database.")
+        if st.button("Clear Schedule Data"):
+            execute_statement("DELETE FROM staff_schedule", [])
+            st.toast("Schedule cleared! Re-upload file now.", icon="🗑️")
+            st.cache_data.clear()
+            st.rerun()
+        if st.button("Clear Attendance Data"):
+            execute_statement("DELETE FROM attendance_punches", [])
+            st.toast("Attendance cleared! Re-upload file now.", icon="🗑️")
+            st.cache_data.clear()
+            st.rerun()
 
     st.divider()
     
