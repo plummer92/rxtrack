@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.5 - Name Match Fixes)
+# RXTRACK: EXECUTIVE DASHBOARD (v12.6 - Shift Leaderboard)
 # Architecture: Quad-Table Strategy + Attendance Tracking
 # Updates:
-#   1. Added "nicholas" -> "nick" mapping.
-#   2. Refined "phi" -> "ali" mapping (removed generic "ho").
-#   3. Retains all previous fixes (Time Overrides, Cell Splitter).
+#   1. Added '🏆 Shift Leaderboard' tab.
+#   2. analyzes productivity PER SHIFT TYPE (e.g. who is best at 7IV?).
+#   3. Retains all previous name/schedule fixes.
 ###############################################################
 
 import streamlit as st
@@ -41,18 +41,16 @@ NARC_TERMS = [
 ADMIN_USERS = ['emily', 'joe', 'krista']
 
 # Nickname Mappings (LOWER CASE)
-# Maps the "Formal/Legal" name (found in Attendance) to the "Schedule" name
 NAME_MAPPINGS = {
-    "phi": "ali",          # Maps Phi -> Ali
+    "phi": "ali",          
     "rebekah": "bekah",
     "nugent": "kathy", "kathleen": "kathy",
     "spain": "dee", "deloris": "dee",
     "jabusch": "dan", "daniel": "dan",
-    "nicholas": "nick"     # Maps Nicholas -> Nick
+    "nicholas": "nick"     
 }
 
 # Names that REQUIRE a last initial to distinguish duplicates
-# If a name is in this list, the system will keep the Last Initial (e.g. "Melissa S")
 AMBIGUOUS_NAMES = [
     "melissa", "emily", "sarah", "megan", "erin", "kyle", 
     "jessica", "andy", "heather", "michelle", "taylor"
@@ -181,12 +179,10 @@ def normalize_name(full_name):
     """Normalize user names based on business logic."""
     s = str(full_name).strip().lower()
     
-    # 1. Extract First Name and optional Initial
     first_name = ""
     last_initial = ""
     
     if "," in s:
-        # Format: "Last, First Middle"
         parts = s.split(",")
         if len(parts) >= 2:
             last_name_part = parts[0].strip()
@@ -195,32 +191,25 @@ def normalize_name(full_name):
             if last_name_part:
                 last_initial = last_name_part[0]
     else:
-        # Format: "First Last" or "First L."
         parts = s.split(" ")
         first_name = parts[0]
         if len(parts) > 1:
             last_initial = parts[1][0]
             
-    # 2. Check for Nicknames
-    # This loop checks if a known nickname key is part of the first name
     for key, val in NAME_MAPPINGS.items():
         if key in first_name: 
             first_name = val
             break
             
-    # 3. Decision: Return First Name OR First + Initial
-    # Only use initial if it's a known duplicate name (Ambiguous)
     if first_name in AMBIGUOUS_NAMES and last_initial:
         return f"{first_name} {last_initial}"
     
     return first_name
 
 def parse_shift_start(date_obj, shift_str):
-    """Attempts to parse a start time from shift strings like '7a', '0700', '7:00'."""
     if not shift_str or pd.isna(shift_str): return None
     s = str(shift_str).lower().strip()
     
-    # Priority 1: Explicit HH:MM (e.g., 7:00, 14:30)
     m_time = re.search(r'(\d{1,2}):(\d{2})', s)
     if m_time:
         h, m = int(m_time.group(1)), int(m_time.group(2))
@@ -230,7 +219,6 @@ def parse_shift_start(date_obj, shift_str):
             return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
         except: return None
         
-    # Priority 2: Hour + AM/PM (e.g., 7a, 7p)
     m_ampm = re.search(r'(\d{1,2})\s*([ap])', s)
     if m_ampm:
         h = int(m_ampm.group(1))
@@ -241,7 +229,6 @@ def parse_shift_start(date_obj, shift_str):
             return pd.to_datetime(f"{date_obj} {h:02d}:00")
         except: return None
     
-    # Priority 3: Military Integer (e.g., 0700, 1400)
     m_mil = re.search(r'(\d{4})', s)
     if m_mil:
         val = int(m_mil.group(1))
@@ -348,10 +335,6 @@ def clean_pharmacy_report(df):
     return df[["pk", "queue_id", "priority", "dt", "med_id", "med_desc", "destination", "user_name", "qty"]]
 
 def clean_schedule_data(df):
-    """
-    Cleans schedule data. 
-    IMPROVED: Handles cells with multiple names and specific time overrides (e.g. "Ali (1000-1830)").
-    """
     df = df.copy()
     if len(df.columns) > 2:
         df.rename(columns={df.columns[1]: 'Date', df.columns[2]: 'Day'}, inplace=True)
@@ -359,7 +342,6 @@ def clean_schedule_data(df):
     df = df.iloc[1:].dropna(subset=['Date'])
     df.drop(columns=[df.columns[0]], errors='ignore', inplace=True)
     
-    # Melt to long format
     long_df = df.melt(id_vars=['Date', 'Day'], var_name='col_header', value_name='raw_entry')
     long_df.dropna(subset=['raw_entry'], inplace=True)
     long_df = long_df[~long_df['raw_entry'].astype(str).str.lower().isin(['x', 'nan', '', ' '])]
@@ -372,9 +354,7 @@ def clean_schedule_data(df):
         dt = pd.to_datetime(row['Date'], errors='coerce').date()
         day_name = row['Day']
         
-        # 1. SPLIT LOGIC: Handle multiple people in one cell
         if re.search(r'\(\d', raw): 
-            # Example: "Ali (1000) Melissa (1200)"
             parts = [p.strip() + ')' for p in raw.split(')') if '(' in p]
         else:
             parts = [p.strip() for p in raw.split('\n') if p.strip()]
@@ -382,19 +362,18 @@ def clean_schedule_data(df):
         for part in parts:
             if not part or part == ')': continue
             
-            # 2. TIME EXTRACTION (Override)
             override_time = None
-            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part) # 1000-1830
+            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part)
             if m_range:
                 override_time = m_range.group(1)
                 clean_part = part.replace(m_range.group(0), '')
             else:
-                m_single = re.search(r'\((\d{4})\)', part) # (1000)
+                m_single = re.search(r'\((\d{4})\)', part)
                 if m_single:
                     override_time = m_single.group(1)
                     clean_part = part.replace(m_single.group(0), '')
                 else:
-                    m_short = re.search(r'\((\d{1,2})\s*-\s*\d{1,2}\)', part) # (10-6)
+                    m_short = re.search(r'\((\d{1,2})\s*-\s*\d{1,2}\)', part)
                     if m_short:
                         override_time = m_short.group(1)
                         clean_part = part.replace(m_short.group(0), '')
@@ -404,7 +383,6 @@ def clean_schedule_data(df):
             clean_part = clean_part.replace('()', '').strip()
             if clean_part.endswith(','): clean_part = clean_part[:-1]
             
-            # 3. META DATA
             assignment_type = "Shift"
             note = ""
             lower_part = clean_part.lower()
@@ -415,10 +393,8 @@ def clean_schedule_data(df):
             elif any(x in lower_part for x in ['pto', 'off', 'sick']):
                 assignment_type = "PTO"
             
-            # Determine Final Shift String (Override takes precedence)
             final_shift_str = override_time if override_time else header
             
-            # Generate PK manually to avoid applying row lambda
             row_str = f"{dt}|{clean_part}|{final_shift_str}"
             pk = hashlib.sha256(row_str.encode()).hexdigest()
             
@@ -427,7 +403,7 @@ def clean_schedule_data(df):
                 'dt': dt,
                 'day_name': day_name,
                 'staff_name': clean_part.title(),
-                'shift_type': final_shift_str, # Used for time parsing
+                'shift_type': final_shift_str,
                 'assignment_type': assignment_type,
                 'raw_entry': part,
                 'note': note
@@ -436,7 +412,6 @@ def clean_schedule_data(df):
     return pd.DataFrame(processed_rows)
 
 def clean_attendance_file(file_obj):
-    """Parses the specific Attendance Tracking CSV report format."""
     file_obj.seek(0)
     content = file_obj.read().decode('utf-8', errors='ignore')
     lines = content.splitlines()
@@ -547,7 +522,6 @@ def load_data(start_date, end_date):
     return df, results["config"], results["pharm"], results["schedule"], results["attendance"]
 
 def get_stats_range():
-    """Calculates the global date range across ALL tables."""
     sql = """
         WITH all_dates AS (
             SELECT dt::date as d FROM events WHERE dt IS NOT NULL
@@ -591,14 +565,15 @@ def get_present_dates(min_dt, max_dt):
 init_db()
 
 PAGES = [
-    "📊 Overview", "⏰ Tardies", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", 
-    "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", 
-    "🔄 Return Reconciliation", "⚖️ Tech Comparison", "📈 Tech Progression", "📅 Attendance"
+    "📊 Overview", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", "🛡️ Compliance", 
+    "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", 
+    "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", 
+    "📈 Tech Progression", "📅 Attendance"
 ]
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12.5")
+    st.title("RxTrack v12.6")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -630,7 +605,6 @@ with st.sidebar:
             cal_html += '</div>'
             st.markdown(cal_html, unsafe_allow_html=True)
 
-    # --- DATABASE MAINTENANCE ---
     with st.expander("🗑️ Database Maintenance", expanded=False):
         st.warning("Clears uploaded data from the database.")
         if st.button("Clear Schedule Data"):
@@ -664,7 +638,6 @@ with st.sidebar:
     
     if uploaded and st.button(f"Process {u_type}"):
         try:
-            # --- 1. ATTENDANCE TRACKING ---
             if u_type == "Attendance Tracking":
                 clean = clean_attendance_file(uploaded)
                 if not clean.empty:
@@ -673,7 +646,6 @@ with st.sidebar:
                 else:
                     st.error("❌ Could not parse any attendance records. Check file format.")
 
-            # --- 2. STAFF SCHEDULE (Enhanced) ---
             elif u_type == "Staff Schedule":
                 if uploaded.name.endswith('.xlsx'):
                     raw = pd.read_excel(uploaded)
@@ -688,7 +660,6 @@ with st.sidebar:
                 sql = "INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(day_name)s, %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, %(note)s) ON CONFLICT (pk) DO NOTHING;"
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
 
-            # --- 3. OTHER FILES ---
             else:
                 if uploaded.name.endswith('.xlsx'):
                     preview = pd.read_excel(uploaded, header=None, nrows=20)
@@ -776,6 +747,98 @@ if selected_page == "📊 Overview":
             fig_pie = px.pie(type_counts, names='event_type', values='count', hole=0.4)
             fig_pie.update_layout(showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
+
+# 14. SHIFT LEADERBOARD (NEW)
+elif selected_page == "🏆 Shift Leaderboard":
+    st.header("🏆 Shift Performance Leaderboard")
+    st.caption("Identify top performers and high-volume staff by shift type.")
+    
+    if not df_sched.empty:
+        # 1. Prepare Activity Data (Transactions per User per Day)
+        activity_data = []
+        
+        # Pyxis Counts
+        if not df_events.empty:
+            df_events['match_key'] = df_events['user_name'].apply(normalize_name)
+            pyxis_counts = df_events.groupby([df_events['dt'].dt.date, 'match_key']).size().reset_index(name='pyxis_tx')
+            pyxis_counts.columns = ['date_obj', 'match_key', 'pyxis_tx']
+            activity_data.append(pyxis_counts)
+            
+        # Pharmacy Counts
+        if not df_pharm.empty:
+            df_pharm['match_key'] = df_pharm['user_name'].apply(normalize_name)
+            pharm_counts = df_pharm.groupby([df_pharm['dt'].dt.date, 'match_key']).size().reset_index(name='pharm_tx')
+            pharm_counts.columns = ['date_obj', 'match_key', 'pharm_tx']
+            activity_data.append(pharm_counts)
+            
+        # Merge Activity into One DF
+        if activity_data:
+            total_activity = activity_data[0]
+            for df in activity_data[1:]:
+                total_activity = pd.merge(total_activity, df, on=['date_obj', 'match_key'], how='outer').fillna(0)
+            
+            total_activity['total_tx'] = total_activity.get('pyxis_tx', 0) + total_activity.get('pharm_tx', 0)
+        else:
+            total_activity = pd.DataFrame(columns=['date_obj', 'match_key', 'total_tx'])
+
+        # 2. Prepare Schedule Data
+        df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
+        df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
+        
+        # Merge Schedule with Activity
+        # We want to know: For a given Shift Type, who worked it and how much did they do?
+        merged = pd.merge(df_sched, total_activity, on=['date_obj', 'match_key'], how='left')
+        merged['total_tx'] = merged['total_tx'].fillna(0)
+        
+        # 3. Aggregation Logic
+        valid_shifts = [s for s in merged['shift_type'].unique() if s and str(s).lower() not in ['x', 'nan', 'pto', 'off']]
+        sel_shift = st.selectbox("Select Shift Type", sorted(valid_shifts))
+        
+        # Filter for selected shift
+        shift_data = merged[merged['shift_type'] == sel_shift]
+        
+        if not shift_data.empty:
+            # Group by User
+            stats = shift_data.groupby('staff_name').agg(
+                shifts_worked=('pk', 'count'),
+                total_transactions=('total_tx', 'sum'),
+                avg_tx_per_shift=('total_tx', 'mean')
+            ).reset_index()
+            
+            # Filter out people with 0 shifts (sanity check)
+            stats = stats[stats['shifts_worked'] > 0]
+            
+            # 4. Visualization
+            c1, c2 = st.columns(2)
+            
+            with c1:
+                st.subheader("📊 Most Shifts Worked")
+                top_volume = stats.sort_values('shifts_worked', ascending=False).head(10)
+                fig_vol = px.bar(top_volume, x='shifts_worked', y='staff_name', orientation='h', 
+                                 title=f"Who works '{sel_shift}' the most?", text_auto=True)
+                fig_vol.update_layout(yaxis={'categoryorder':'total ascending', 'title': ''}, xaxis_title="Shifts Count")
+                st.plotly_chart(fig_vol, use_container_width=True)
+                
+            with c2:
+                st.subheader("⚡ Efficiency (Tx per Shift)")
+                # Only show users with at least 3 shifts to avoid outliers from one busy day
+                top_eff = stats[stats['shifts_worked'] >= 3].sort_values('avg_tx_per_shift', ascending=False).head(10)
+                if top_eff.empty:
+                    top_eff = stats.sort_values('avg_tx_per_shift', ascending=False).head(10)
+                    st.caption("(Showing all users; filtered list was empty)")
+                
+                fig_eff = px.bar(top_eff, x='avg_tx_per_shift', y='staff_name', orientation='h',
+                                 title=f"Most Productive on '{sel_shift}'", text_auto='.0f', color='avg_tx_per_shift')
+                fig_eff.update_layout(yaxis={'categoryorder':'total ascending', 'title': ''}, xaxis_title="Avg Transactions")
+                st.plotly_chart(fig_eff, use_container_width=True)
+                
+            st.divider()
+            st.write("Detailed Stats", stats.sort_values('shifts_worked', ascending=False))
+        else:
+            st.info(f"No data found for shift type: {sel_shift}")
+            
+    else:
+        st.warning("Please upload a Schedule file to use this feature.")
 
 # 2. TARDIES
 elif selected_page == "⏰ Tardies":
