@@ -1,11 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (IMPROVED v12.0)
+# RXTRACK: EXECUTIVE DASHBOARD (v12.1 - Fixed Excel Import)
 # Architecture: Quad-Table Strategy + Attendance Tracking
 # Updates:
-#   1. Added 'Attendance Tracking' file ingestion.
-#   2. Created 'attendance_punches' database table.
-#   3. Added '⏰ Tardies' tab with auto-calculation logic.
-#   4. Implemented smart shift time parsing (e.g., "7a" -> 07:00).
+#   1. Fixed IndentationError in Sidebar.
+#   2. Added robust Excel/CSV handling for Schedule uploads.
+#   3. Includes 'Attendance Tracking' & 'Tardies' logic.
 ###############################################################
 
 import streamlit as st
@@ -544,7 +543,7 @@ with st.sidebar:
 
     st.divider()
     
-  st.subheader("📤 Ingest Data")
+    st.subheader("📤 Ingest Data")
     u_type = st.selectbox("File Type:", [
         "Daily Transaction Report", "Device Activity Log (Pends)", 
         "Financial Price List", "Pharmacy Workflow Report", 
@@ -563,7 +562,7 @@ with st.sidebar:
                 else:
                     st.error("❌ Could not parse any attendance records. Check file format.")
 
-            # --- 2. STAFF SCHEDULE (Fixed for Excel) ---
+            # --- 2. STAFF SCHEDULE (Enhanced) ---
             elif u_type == "Staff Schedule":
                 # Handle Excel vs CSV
                 if uploaded.name.endswith('.xlsx'):
@@ -632,6 +631,7 @@ with st.sidebar:
 
         except Exception as e:
             st.error(f"Processing Error: {e}")
+
 # --- LOAD DATA ---
 df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
 
