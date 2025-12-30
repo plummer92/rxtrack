@@ -1148,24 +1148,67 @@ elif selected_page == "🏥 Pharmacy Workflow":
 elif selected_page == "🔄 Return Reconciliation":
     st.markdown("### 🔄 Unload vs. Return Reconciliation")
     filter_narc = st.checkbox("Exclude Controlled Substances", value=True)
+    
     if not df_events.empty and not df_pharm.empty:
+        # 1. Filter Floor Data (Pyxis) - Get Unloads and Empty Returns
         unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
+        
+        # 2. Filter Pharmacy Data (Workflow) - Get Returns
         returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
         
+        # Optional: Exclude Narcs
         if filter_narc:
             pat = '|'.join(NARC_TERMS)
             unloads = unloads[~unloads['med_desc'].str.contains(pat, case=False, na=False)]
             returns = returns[~returns['med_desc'].str.contains(pat, case=False, na=False)]
             
+        # 3. Aggregate Floor Data (Include Event Type now)
         unloads['Date'] = unloads['dt'].dt.date
-        grp_unload = unloads.groupby(['Date', unloads['med_id'].str.strip().str.upper()]).agg({'qty': 'sum', 'med_desc': 'first'}).reset_index()
-        returns['Date'] = returns['dt'].dt.date
-        grp_return = returns.groupby(['Date', returns['med_id'].str.strip().str.upper()]).agg({'qty': 'sum'}).reset_index()
+        grp_unload = unloads.groupby(['Date', unloads['med_id'].str.strip().str.upper()]).agg({
+            'qty': 'sum', 
+            'med_desc': 'first',
+            'event_type': lambda x: ", ".join(sorted(x.astype(str).unique()))  # Aggregates types like "UNLOAD, EMPTY RETURN"
+        }).reset_index()
         
+        # 4. Aggregate Pharmacy Data
+        returns['Date'] = returns['dt'].dt.date
+        grp_return = returns.groupby(['Date', returns['med_id'].str.strip().str.upper()]).agg({
+            'qty': 'sum',
+            'med_desc': 'first'
+        }).reset_index()
+        
+        # 5. Merge Data
         merged = pd.merge(grp_unload, grp_return, on=['Date', 'med_id'], how='outer', suffixes=('_floor', '_pharm'))
-        merged.fillna(0, inplace=True)
+        
+        # Handle Missing Data
+        merged['med_desc'] = merged['med_desc_floor'].fillna(merged['med_desc_pharm']).fillna("Unknown Med")
+        merged['qty_floor'] = merged['qty_floor'].fillna(0)
+        merged['qty_pharm'] = merged['qty_pharm'].fillna(0)
+        merged['event_type'] = merged['event_type'].fillna("Manual Pharm Return") # If no Pyxis record exists
+        
+        # Calculate Variance
         merged['Variance'] = merged['qty_pharm'] - merged['qty_floor']
-        st.dataframe(merged, use_container_width=True)
+        
+        # 6. Formatting for Display
+        merged.rename(columns={
+            'event_type': 'Floor Action',
+            'qty_floor': 'Qty Unloaded',
+            'qty_pharm': 'Qty Returned'
+        }, inplace=True)
+        
+        # Columns to show
+        cols = ['Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
+        
+        st.dataframe(
+            merged[cols].sort_values(['Date', 'Variance']), 
+            use_container_width=True,
+            column_config={
+                "Date": st.column_config.DateColumn("Date"),
+                "Variance": st.column_config.NumberColumn("Variance", format="%.0f")
+            }
+        )
+    else:
+        st.info("Need both Pyxis Transaction Reports and Pharmacy Workflow Reports to perform reconciliation.")
 
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
