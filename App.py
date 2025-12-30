@@ -1151,65 +1151,139 @@ elif selected_page == "🔄 Return Reconciliation":
     
     if not df_events.empty and not df_pharm.empty:
         # 1. Filter Floor Data (Pyxis) - Get Unloads and Empty Returns
-        unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
+        # We perform the filtering on the main df to get the raw detail rows
+        raw_unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
         
         # 2. Filter Pharmacy Data (Workflow) - Get Returns
-        returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
+        raw_returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
         
         # Optional: Exclude Narcs
         if filter_narc:
             pat = '|'.join(NARC_TERMS)
-            unloads = unloads[~unloads['med_desc'].str.contains(pat, case=False, na=False)]
-            returns = returns[~returns['med_desc'].str.contains(pat, case=False, na=False)]
+            raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
+            raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
             
-        # 3. Aggregate Floor Data (Include Event Type now)
-        unloads['Date'] = unloads['dt'].dt.date
-        grp_unload = unloads.groupby(['Date', unloads['med_id'].str.strip().str.upper()]).agg({
+        # 3. Prepare for Aggregation
+        # Normalize Med IDs for grouping
+        raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
+        raw_unloads['Date'] = raw_unloads['dt'].dt.date
+        
+        raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
+        raw_returns['Date'] = raw_returns['dt'].dt.date
+
+        # 4. Aggregate Floor Data
+        grp_unload = raw_unloads.groupby(['Date', 'norm_med_id']).agg({
             'qty': 'sum', 
             'med_desc': 'first',
-            'event_type': lambda x: ", ".join(sorted(x.astype(str).unique()))  # Aggregates types like "UNLOAD, EMPTY RETURN"
+            'event_type': lambda x: ", ".join(sorted(x.astype(str).unique())) 
         }).reset_index()
         
-        # 4. Aggregate Pharmacy Data
-        returns['Date'] = returns['dt'].dt.date
-        grp_return = returns.groupby(['Date', returns['med_id'].str.strip().str.upper()]).agg({
+        # 5. Aggregate Pharmacy Data
+        grp_return = raw_returns.groupby(['Date', 'norm_med_id']).agg({
             'qty': 'sum',
             'med_desc': 'first'
         }).reset_index()
         
-        # 5. Merge Data
-        merged = pd.merge(grp_unload, grp_return, on=['Date', 'med_id'], how='outer', suffixes=('_floor', '_pharm'))
+        # 6. Merge Data
+        merged = pd.merge(grp_unload, grp_return, on=['Date', 'norm_med_id'], how='outer', suffixes=('_floor', '_pharm'))
         
         # Handle Missing Data
         merged['med_desc'] = merged['med_desc_floor'].fillna(merged['med_desc_pharm']).fillna("Unknown Med")
         merged['qty_floor'] = merged['qty_floor'].fillna(0)
         merged['qty_pharm'] = merged['qty_pharm'].fillna(0)
-        merged['event_type'] = merged['event_type'].fillna("Manual Pharm Return") # If no Pyxis record exists
+        merged['event_type'] = merged['event_type'].fillna("Manual Pharm Return")
         
         # Calculate Variance
         merged['Variance'] = merged['qty_pharm'] - merged['qty_floor']
         
-        # 6. Formatting for Display
+        # Formatting
         merged.rename(columns={
             'event_type': 'Floor Action',
             'qty_floor': 'Qty Unloaded',
             'qty_pharm': 'Qty Returned'
         }, inplace=True)
         
-        # Columns to show
-        cols = ['Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
+        # --- DISPLAY MAIN TABLE ---
+        st.caption("👆 Click a row to see the exact timestamps and Pyxis machines involved.")
         
-        st.dataframe(
-            merged[cols].sort_values(['Date', 'Variance']), 
+        cols_display = ['Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
+        
+        # Sort and reset index so selection index aligns perfectly
+        display_df = merged.sort_values(['Date', 'Variance']).reset_index(drop=True)
+        
+        event = st.dataframe(
+            display_df[cols_display], 
             use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            hide_index=True,
             column_config={
                 "Date": st.column_config.DateColumn("Date"),
                 "Variance": st.column_config.NumberColumn("Variance", format="%.0f")
             }
         )
+        
+        # --- DRILL DOWN LOGIC ---
+        if len(event.selection.rows) > 0:
+            selected_index = event.selection.rows[0]
+            row = display_df.iloc[selected_index]
+            
+            sel_date = row['Date']
+            sel_med_id = row['norm_med_id'] # Use the hidden normalized ID for filtering
+            sel_med_desc = row['med_desc']
+            
+            st.divider()
+            st.subheader(f"🔎 Audit Trail: {sel_med_desc}")
+            
+            c1, c2 = st.columns(2)
+            
+            # Left: Pyxis Details
+            with c1:
+                st.markdown("#### 🏥 Floor (Pyxis)")
+                # Filter raw_unloads for specific date/med
+                floor_details = raw_unloads[
+                    (raw_unloads['Date'] == sel_date) & 
+                    (raw_unloads['norm_med_id'] == sel_med_id)
+                ].sort_values('dt')
+                
+                if not floor_details.empty:
+                    st.dataframe(
+                        floor_details[['dt', 'device', 'user_name', 'qty', 'event_type']],
+                        use_container_width=True,
+                        column_config={
+                            "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
+                            "qty": st.column_config.NumberColumn("Qty", format="%.0f")
+                        },
+                        hide_index=True
+                    )
+                else:
+                    st.info("No Pyxis records found.")
+
+            # Right: Pharmacy Details
+            with c2:
+                st.markdown("#### 💊 Pharmacy (Carousel/Packager)")
+                # Filter raw_returns for specific date/med
+                pharm_details = raw_returns[
+                    (raw_returns['Date'] == sel_date) & 
+                    (raw_returns['norm_med_id'] == sel_med_id)
+                ].sort_values('dt')
+                
+                if not pharm_details.empty:
+                    st.dataframe(
+                        pharm_details[['dt', 'destination', 'user_name', 'qty']],
+                        use_container_width=True,
+                        column_config={
+                            "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
+                            "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+                            "destination": "Location"
+                        },
+                        hide_index=True
+                    )
+                else:
+                    st.info("No Pharmacy scan records found.")
+                    
     else:
         st.info("Need both Pyxis Transaction Reports and Pharmacy Workflow Reports to perform reconciliation.")
-
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
     st.markdown("### ⚖️ Head-to-Head Comparison")
