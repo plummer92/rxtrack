@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.6 - Shift Leaderboard)
+# RXTRACK: EXECUTIVE DASHBOARD (v12.7 - Smart Reconciliation)
 # Architecture: Quad-Table Strategy + Attendance Tracking
 # Updates:
-#   1. Added '🏆 Shift Leaderboard' tab.
-#   2. analyzes productivity PER SHIFT TYPE (e.g. who is best at 7IV?).
-#   3. Retains all previous name/schedule fixes.
+#   1. Enhanced Return Reconciliation with Charts & Stats.
+#   2. Added "Show/Hide Matched" toggle to focus on errors.
+#   3. Retains all previous name/schedule/upload fixes.
 ###############################################################
 
 import streamlit as st
@@ -335,6 +335,10 @@ def clean_pharmacy_report(df):
     return df[["pk", "queue_id", "priority", "dt", "med_id", "med_desc", "destination", "user_name", "qty"]]
 
 def clean_schedule_data(df):
+    """
+    Cleans schedule data. 
+    IMPROVED: Handles cells with multiple names and specific time overrides (e.g. "Ali (1000-1830)").
+    """
     df = df.copy()
     if len(df.columns) > 2:
         df.rename(columns={df.columns[1]: 'Date', df.columns[2]: 'Day'}, inplace=True)
@@ -342,6 +346,7 @@ def clean_schedule_data(df):
     df = df.iloc[1:].dropna(subset=['Date'])
     df.drop(columns=[df.columns[0]], errors='ignore', inplace=True)
     
+    # Melt to long format
     long_df = df.melt(id_vars=['Date', 'Day'], var_name='col_header', value_name='raw_entry')
     long_df.dropna(subset=['raw_entry'], inplace=True)
     long_df = long_df[~long_df['raw_entry'].astype(str).str.lower().isin(['x', 'nan', '', ' '])]
@@ -354,7 +359,9 @@ def clean_schedule_data(df):
         dt = pd.to_datetime(row['Date'], errors='coerce').date()
         day_name = row['Day']
         
+        # 1. SPLIT LOGIC: Handle multiple people in one cell
         if re.search(r'\(\d', raw): 
+            # Example: "Ali (1000) Melissa (1200)"
             parts = [p.strip() + ')' for p in raw.split(')') if '(' in p]
         else:
             parts = [p.strip() for p in raw.split('\n') if p.strip()]
@@ -362,18 +369,19 @@ def clean_schedule_data(df):
         for part in parts:
             if not part or part == ')': continue
             
+            # 2. TIME EXTRACTION (Override)
             override_time = None
-            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part)
+            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part) # 1000-1830
             if m_range:
                 override_time = m_range.group(1)
                 clean_part = part.replace(m_range.group(0), '')
             else:
-                m_single = re.search(r'\((\d{4})\)', part)
+                m_single = re.search(r'\((\d{4})\)', part) # (1000)
                 if m_single:
                     override_time = m_single.group(1)
                     clean_part = part.replace(m_single.group(0), '')
                 else:
-                    m_short = re.search(r'\((\d{1,2})\s*-\s*\d{1,2}\)', part)
+                    m_short = re.search(r'\((\d{1,2})\s*-\s*\d{1,2}\)', part) # (10-6)
                     if m_short:
                         override_time = m_short.group(1)
                         clean_part = part.replace(m_short.group(0), '')
@@ -383,6 +391,7 @@ def clean_schedule_data(df):
             clean_part = clean_part.replace('()', '').strip()
             if clean_part.endswith(','): clean_part = clean_part[:-1]
             
+            # 3. META DATA
             assignment_type = "Shift"
             note = ""
             lower_part = clean_part.lower()
@@ -393,8 +402,10 @@ def clean_schedule_data(df):
             elif any(x in lower_part for x in ['pto', 'off', 'sick']):
                 assignment_type = "PTO"
             
+            # Determine Final Shift String (Override takes precedence)
             final_shift_str = override_time if override_time else header
             
+            # Generate PK manually to avoid applying row lambda
             row_str = f"{dt}|{clean_part}|{final_shift_str}"
             pk = hashlib.sha256(row_str.encode()).hexdigest()
             
@@ -403,7 +414,7 @@ def clean_schedule_data(df):
                 'dt': dt,
                 'day_name': day_name,
                 'staff_name': clean_part.title(),
-                'shift_type': final_shift_str,
+                'shift_type': final_shift_str, # Used for time parsing
                 'assignment_type': assignment_type,
                 'raw_entry': part,
                 'note': note
@@ -412,6 +423,7 @@ def clean_schedule_data(df):
     return pd.DataFrame(processed_rows)
 
 def clean_attendance_file(file_obj):
+    """Parses the specific Attendance Tracking CSV report format."""
     file_obj.seek(0)
     content = file_obj.read().decode('utf-8', errors='ignore')
     lines = content.splitlines()
@@ -522,6 +534,7 @@ def load_data(start_date, end_date):
     return df, results["config"], results["pharm"], results["schedule"], results["attendance"]
 
 def get_stats_range():
+    """Calculates the global date range across ALL tables."""
     sql = """
         WITH all_dates AS (
             SELECT dt::date as d FROM events WHERE dt IS NOT NULL
@@ -573,7 +586,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12.6")
+    st.title("RxTrack v12.7")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -1151,7 +1164,6 @@ elif selected_page == "🔄 Return Reconciliation":
     
     if not df_events.empty and not df_pharm.empty:
         # 1. Filter Floor Data (Pyxis) - Get Unloads and Empty Returns
-        # We perform the filtering on the main df to get the raw detail rows
         raw_unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
         
         # 2. Filter Pharmacy Data (Workflow) - Get Returns
@@ -1164,7 +1176,6 @@ elif selected_page == "🔄 Return Reconciliation":
             raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
             
         # 3. Prepare for Aggregation
-        # Normalize Med IDs for grouping
         raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
         raw_unloads['Date'] = raw_unloads['dt'].dt.date
         
@@ -1193,26 +1204,53 @@ elif selected_page == "🔄 Return Reconciliation":
         merged['qty_pharm'] = merged['qty_pharm'].fillna(0)
         merged['event_type'] = merged['event_type'].fillna("Manual Pharm Return")
         
-        # Calculate Variance
+        # Calculate Variance and Status
         merged['Variance'] = merged['qty_pharm'] - merged['qty_floor']
+        merged['Status'] = np.where(merged['Variance'] == 0, "✅ Matched", "❌ Variance")
         
-        # Formatting
+        # Rename for display
         merged.rename(columns={
             'event_type': 'Floor Action',
             'qty_floor': 'Qty Unloaded',
             'qty_pharm': 'Qty Returned'
         }, inplace=True)
+
+        # --- DASHBOARD METRICS ---
+        total_items = len(merged)
+        matched_items = len(merged[merged['Variance'] == 0])
+        match_rate = (matched_items / total_items * 100) if total_items > 0 else 0
         
-        # --- DISPLAY MAIN TABLE ---
-        st.caption("👆 Click a row to see the exact timestamps and Pyxis machines involved.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Match Rate", f"{match_rate:.1f}%")
+        c2.metric("Total Items", total_items)
+        c3.metric("Discrepancies", total_items - matched_items, delta_color="inverse")
+        c4.metric("Net Variance", f"{merged['Variance'].sum():.0f}")
         
-        cols_display = ['Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
+        # --- DAILY TREND CHART ---
+        daily = merged.groupby(['Date', 'Status']).size().unstack(fill_value=0)
+        # Ensure columns exist even if data is missing
+        for col in ["✅ Matched", "❌ Variance"]:
+            if col not in daily.columns: daily[col] = 0
+            
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=daily.index, y=daily['✅ Matched'], name='Matched', marker_color='#4CAF50'))
+        fig.add_trace(go.Bar(x=daily.index, y=daily['❌ Variance'], name='Variance', marker_color='#F44336'))
+        fig.update_layout(barmode='stack', title="Daily Reconciliation Performance", height=300, margin=dict(l=0, r=0, t=30, b=0))
+        st.plotly_chart(fig, use_container_width=True)
         
-        # Sort and reset index so selection index aligns perfectly
-        display_df = merged.sort_values(['Date', 'Variance']).reset_index(drop=True)
+        # --- TABLE & FILTERS ---
+        st.divider()
+        show_all = st.checkbox("Show Matched Rows (Variance = 0)", value=False)
         
+        display_df = merged.copy()
+        if not show_all:
+            display_df = display_df[display_df['Variance'] != 0]
+            
+        cols_display = ['Status', 'Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
+        
+        st.caption("👆 Click a row to drill down into specific timestamps.")
         event = st.dataframe(
-            display_df[cols_display], 
+            display_df[cols_display].sort_values(['Date', 'Variance']), 
             use_container_width=True,
             on_select="rerun",
             selection_mode="single-row",
@@ -1229,7 +1267,7 @@ elif selected_page == "🔄 Return Reconciliation":
             row = display_df.iloc[selected_index]
             
             sel_date = row['Date']
-            sel_med_id = row['norm_med_id'] # Use the hidden normalized ID for filtering
+            sel_med_id = row['norm_med_id'] 
             sel_med_desc = row['med_desc']
             
             st.divider()
@@ -1240,7 +1278,6 @@ elif selected_page == "🔄 Return Reconciliation":
             # Left: Pyxis Details
             with c1:
                 st.markdown("#### 🏥 Floor (Pyxis)")
-                # Filter raw_unloads for specific date/med
                 floor_details = raw_unloads[
                     (raw_unloads['Date'] == sel_date) & 
                     (raw_unloads['norm_med_id'] == sel_med_id)
@@ -1262,7 +1299,6 @@ elif selected_page == "🔄 Return Reconciliation":
             # Right: Pharmacy Details
             with c2:
                 st.markdown("#### 💊 Pharmacy (Carousel/Packager)")
-                # Filter raw_returns for specific date/med
                 pharm_details = raw_returns[
                     (raw_returns['Date'] == sel_date) & 
                     (raw_returns['norm_med_id'] == sel_med_id)
@@ -1284,6 +1320,7 @@ elif selected_page == "🔄 Return Reconciliation":
                     
     else:
         st.info("Need both Pyxis Transaction Reports and Pharmacy Workflow Reports to perform reconciliation.")
+
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
     st.markdown("### ⚖️ Head-to-Head Comparison")
