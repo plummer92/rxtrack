@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v13.1 - Detailed Inventory Support)
+# RXTRACK: EXECUTIVE DASHBOARD (v13.3 - Logistics Price Fix)
 # Architecture: Quad-Table Strategy + Attendance + Pricing
 # Updates:
-#   1. Added 'Inventory Audit (Detailed RC)' support.
-#   2. Created new table 'inventory_detailed' for station-level data.
-#   3. Automatically updates master Price List from detailed reports.
+#   1. "Inventory Audit (Detailed RC)" now FILTERS for Pyxis Logistics.
+#   2. Corrects 'med_costs' table to use unit price vs bulk price.
+#   3. Retains all previous tabs (Student Project, Leaderboard, etc).
 ###############################################################
 
 import streamlit as st
@@ -159,7 +159,6 @@ def init_db():
             pk TEXT PRIMARY KEY, med_id TEXT, med_desc TEXT, med_class TEXT, 
             unit_cost FLOAT, qty_on_hand FLOAT, min_lvl FLOAT, max_lvl FLOAT
         );""",
-        # --- NEW TABLE FOR DETAILED STATION INVENTORY ---
         """CREATE TABLE IF NOT EXISTS inventory_detailed (
             pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT, 
             unit_cost FLOAT, current_count FLOAT, pocket_location TEXT
@@ -185,68 +184,52 @@ def generate_pk(row):
     return hashlib.sha256(row_str.encode()).hexdigest()
 
 def normalize_name(full_name):
-    """Normalize user names based on business logic."""
     s = str(full_name).strip().lower()
-    
-    first_name = ""
-    last_initial = ""
-    
+    first_name, last_initial = "", ""
     if "," in s:
         parts = s.split(",")
         if len(parts) >= 2:
             last_name_part = parts[0].strip()
             first_name_part = parts[1].strip().split(" ")[0]
             first_name = first_name_part
-            if last_name_part:
-                last_initial = last_name_part[0]
+            if last_name_part: last_initial = last_name_part[0]
     else:
         parts = s.split(" ")
         first_name = parts[0]
-        if len(parts) > 1:
-            last_initial = parts[1][0]
-            
+        if len(parts) > 1: last_initial = parts[1][0]
     for key, val in NAME_MAPPINGS.items():
         if key in first_name: 
             first_name = val
             break
-            
     if first_name in AMBIGUOUS_NAMES and last_initial:
         return f"{first_name} {last_initial}"
-    
     return first_name
 
 def parse_shift_start(date_obj, shift_str):
     if not shift_str or pd.isna(shift_str): return None
     s = str(shift_str).lower().strip()
-    
     m_time = re.search(r'(\d{1,2}):(\d{2})', s)
     if m_time:
         h, m = int(m_time.group(1)), int(m_time.group(2))
         if 'p' in s and h < 12: h += 12
         if 'a' in s and h == 12: h = 0
-        try:
-            return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
+        try: return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
         except: return None
-        
     m_ampm = re.search(r'(\d{1,2})\s*([ap])', s)
     if m_ampm:
         h = int(m_ampm.group(1))
         ampm = m_ampm.group(2)
         if ampm == 'p' and h < 12: h += 12
         if ampm == 'a' and h == 12: h = 0
-        try:
-            return pd.to_datetime(f"{date_obj} {h:02d}:00")
+        try: return pd.to_datetime(f"{date_obj} {h:02d}:00")
         except: return None
-    
     m_mil = re.search(r'(\d{4})', s)
     if m_mil:
         val = int(m_mil.group(1))
         if 0 <= val <= 2400:
             h, m = divmod(val, 100)
-            try:
-                return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
+            try: return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
             except: return None
-            
     return None
 
 # --- DATA CLEANING ---
@@ -260,19 +243,15 @@ def clean_dataframe(df):
         "DiscrepancyReason": "discrepancy_reason", "ResolutionDatetime": "resolution_dt"
     }
     df.rename(columns=colmap, inplace=True)
-    
     required = ["user_name", "device", "med_id", "med_desc", "event_type", "dt", "qty", 
                 "beginning_qty", "ending_qty", "discrepancy_qty", "discrepancy_reason", "resolution_dt"]
     for col in required:
         if col not in df.columns: df[col] = None
-
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df.dropna(subset=["dt"], inplace=True)
     df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
-    
     for c in ["qty", "discrepancy_qty", "beginning_qty", "ending_qty"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype('float32')
-
     df["dt"] = df["dt"].astype(str)
     df["resolution_dt"] = df["resolution_dt"].astype(str).replace(['NaT', 'nan', 'None', ''], None)
     df["pk"] = df.apply(generate_pk, axis=1)
@@ -286,43 +265,33 @@ def clean_activity_log(df):
         "Action": "action_type", "ActivityType": "activity_category", "AffectedElement": "raw_element",
         "Amount": "qty_col", "Quantity": "qty_col"
     }, inplace=True)
-    
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df.dropna(subset=["dt"], inplace=True)
-
     pattern_element = r'^(.*?) \((.*?)\)'
     extracted = df['raw_element'].astype(str).str.extract(pattern_element)
     df['location'] = extracted[0].str.strip()
     df['med_id'] = extracted[1].str.strip()
     df.dropna(subset=['med_id'], inplace=True)
-
     if 'qty_col' not in df.columns:
         pattern_qty = r':\s*(\d+)$' 
         df['qty_col'] = df['raw_element'].astype(str).str.extract(pattern_qty)[0]
-    
     df['qty_extracted'] = pd.to_numeric(df['qty_col'], errors='coerce')
-    
     df.sort_values(['user_name', 'device', 'med_id', 'dt'], inplace=True)
     df['time_gap'] = df.groupby(['user_name', 'device', 'med_id'])['dt'].diff().dt.total_seconds().fillna(999)
     df['group_id'] = (df['time_gap'] > 120).astype(int).cumsum()
-    
     df['is_min'] = df['activity_category'].str.contains('Min', case=False, na=False)
     df['is_max'] = df['activity_category'].str.contains('Max', case=False, na=False)
     df['is_std'] = df['activity_category'].str.contains('Standard Stock', case=False, na=False)
-    
     df['min_qty'] = np.where(df['is_min'], df['qty_extracted'], np.nan)
     df['max_qty'] = np.where(df['is_max'], df['qty_extracted'], np.nan)
     df['max_qty'] = np.where((~df['is_min']) & (~df['is_max']), df['qty_extracted'], df['max_qty'])
-
     grouped = df.groupby(['user_name', 'device', 'med_id', 'group_id'], as_index=False).agg({
         'min_qty': 'max', 'max_qty': 'max', 'is_std': 'max',
         'location': 'first', 'dt': 'first', 'action_type': 'first', 'activity_category': 'first'
     })
-
     grouped["dt"] = grouped["dt"].astype(str)
     grouped["pk"] = grouped.apply(generate_pk, axis=1)
     grouped.replace({np.nan: None}, inplace=True)
-    
     return grouped.rename(columns={'is_std': 'is_standard'})[['pk', 'dt', 'user_name', 'device', 'med_id', 'location', 'action_type', 'activity_category', 'min_qty', 'max_qty', 'is_standard']]
 
 def clean_pharmacy_report(df):
@@ -335,7 +304,6 @@ def clean_pharmacy_report(df):
     df.rename(columns=colmap, inplace=True)
     for col in colmap.values():
         if col not in df.columns: df[col] = None
-        
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
     df.dropna(subset=["dt"], inplace=True)
     df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
@@ -347,10 +315,8 @@ def clean_schedule_data(df):
     df = df.copy()
     if len(df.columns) > 2:
         df.rename(columns={df.columns[1]: 'Date', df.columns[2]: 'Day'}, inplace=True)
-    
     df = df.iloc[1:].dropna(subset=['Date'])
     df.drop(columns=[df.columns[0]], errors='ignore', inplace=True)
-    
     long_df = df.melt(id_vars=['Date', 'Day'], var_name='col_header', value_name='raw_entry')
     long_df.dropna(subset=['raw_entry'], inplace=True)
     long_df = long_df[~long_df['raw_entry'].astype(str).str.lower().isin(['x', 'nan', '', ' '])]
@@ -369,7 +335,6 @@ def clean_schedule_data(df):
         
         for part in parts:
             if not part or part == ')': continue
-            
             override_time = None
             m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part)
             if m_range:
@@ -387,36 +352,20 @@ def clean_schedule_data(df):
                         clean_part = part.replace(m_short.group(0), '')
                     else:
                         clean_part = part
-            
             clean_part = clean_part.replace('()', '').strip()
             if clean_part.endswith(','): clean_part = clean_part[:-1]
-            
             assignment_type = "Shift"
             note = ""
             lower_part = clean_part.lower()
-            
             if 'trn' in lower_part or 'training' in lower_part:
                 assignment_type = "Training"
                 clean_part = re.split(r'\s(?:trn|training)\s?', clean_part, flags=re.IGNORECASE)[0].strip()
             elif any(x in lower_part for x in ['pto', 'off', 'sick']):
                 assignment_type = "PTO"
-            
             final_shift_str = override_time if override_time else header
-            
             row_str = f"{dt}|{clean_part}|{final_shift_str}"
             pk = hashlib.sha256(row_str.encode()).hexdigest()
-            
-            processed_rows.append({
-                'pk': pk,
-                'dt': dt,
-                'day_name': day_name,
-                'staff_name': clean_part.title(),
-                'shift_type': final_shift_str,
-                'assignment_type': assignment_type,
-                'raw_entry': part,
-                'note': note
-            })
-
+            processed_rows.append({'pk': pk, 'dt': dt, 'day_name': day_name, 'staff_name': clean_part.title(), 'shift_type': final_shift_str, 'assignment_type': assignment_type, 'raw_entry': part, 'note': note})
     return pd.DataFrame(processed_rows)
 
 def clean_attendance_file(file_obj):
@@ -427,7 +376,6 @@ def clean_attendance_file(file_obj):
     name_pat = re.compile(r'Employee:\s*([A-Za-z\-,\s\.]+?)(?="|",|",Date)')
     date_pat = re.compile(r'Date:\s*(\d{1,2}/\d{1,2}/\d{4})')
     time_pat = re.compile(r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2})')
-
     for line in lines:
         if "Employee:" not in line or "Date:" not in line: continue
         m_name = name_pat.search(line)
@@ -438,12 +386,7 @@ def clean_attendance_file(file_obj):
         start_time = times[0] if len(times) > 0 else None
         end_time = times[1] if len(times) > 1 else None
         if name and date_str and start_time:
-            data.append({
-                "raw_name": name,
-                "dt_date": pd.to_datetime(date_str).date(),
-                "start_dt": start_time,
-                "end_dt": end_time
-            })
+            data.append({"raw_name": name, "dt_date": pd.to_datetime(date_str).date(), "start_dt": start_time, "end_dt": end_time})
     df = pd.DataFrame(data)
     if not df.empty: df["pk"] = df.apply(generate_pk, axis=1)
     return df
@@ -451,35 +394,34 @@ def clean_attendance_file(file_obj):
 def clean_inventory_file(df):
     """Cleans Inventory Audit CSV (Standard/Prices)."""
     df = df.copy()
-    colmap = {
-        "MedID": "med_id", "MedDescription": "med_desc", "MedClass": "med_class",
-        "UnitCost": "unit_cost", "CurrentCount": "qty_on_hand",
-        "CurrentMin": "min_lvl", "CurrentMax": "max_lvl"
-    }
+    colmap = {"MedID": "med_id", "MedDescription": "med_desc", "MedClass": "med_class", "UnitCost": "unit_cost", "CurrentCount": "qty_on_hand", "CurrentMin": "min_lvl", "CurrentMax": "max_lvl"}
     df.rename(columns=colmap, inplace=True)
-    
     for c in ["med_id", "med_desc", "unit_cost", "qty_on_hand", "min_lvl", "max_lvl"]:
         if c not in df.columns: df[c] = None
-        
     if df['unit_cost'].dtype == object:
         df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
-    
     df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
     df['qty_on_hand'] = pd.to_numeric(df['qty_on_hand'], errors='coerce').fillna(0)
-    
     df['pk'] = df.apply(lambda x: str(x['med_id']), axis=1)
     return df[['pk', 'med_id', 'med_desc', 'med_class', 'unit_cost', 'qty_on_hand', 'min_lvl', 'max_lvl']]
 
 def clean_detailed_inventory(df):
-    """Cleans the detailed Station-Level Inventory CSV."""
+    """Cleans the detailed Station-Level Inventory CSV (v13.3 - Added SourceSystem)."""
     df = df.copy()
     colmap = {
-        "StationName": "station", "MedID": "med_id", "MedDescription": "med_desc",
-        "UnitCost": "unit_cost", "CurrentCount": "current_count", "DrawerSubdrawerPocket": "pocket_location"
+        "StationName": "station", 
+        "SourceSystem": "source_system",  # Added for filtering
+        "MedID": "med_id", 
+        "MedDescription": "med_desc", 
+        "UnitCost": "unit_cost", 
+        "CurrentCount": "current_count", 
+        "DrawerSubdrawerPocket": "pocket_location"
     }
     df.rename(columns=colmap, inplace=True)
     
-    for c in ["station", "med_id", "med_desc", "unit_cost", "current_count", "pocket_location"]:
+    # Required columns
+    required = ["station", "source_system", "med_id", "med_desc", "unit_cost", "current_count", "pocket_location"]
+    for c in required:
         if c not in df.columns: df[c] = None
         
     if df['unit_cost'].dtype == object:
@@ -491,7 +433,7 @@ def clean_detailed_inventory(df):
     df['row_sig'] = df['station'].astype(str) + df['med_id'].astype(str) + df['pocket_location'].astype(str)
     df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
     
-    return df[['pk', 'station', 'med_id', 'med_desc', 'unit_cost', 'current_count', 'pocket_location']]
+    return df[required + ['pk']]
 
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
@@ -524,7 +466,6 @@ def load_data(start_date, end_date):
     
     results = {}
     params = (start_date, end_date)
-    
     with db_cursor() as (conn, cur):
         for key, sql in queries.items():
             try:
@@ -539,22 +480,13 @@ def load_data(start_date, end_date):
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
         df["qty"] = df["qty"].fillna(0).astype('float32')
         df = df[~df['med_desc'].astype(str).str.contains(r'Drw|Pkt|Cubic', regex=True, case=False, na=False)]
-        
         df.sort_values(['user_name', 'dt'], inplace=True)
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['duration'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['prev_device'] = df.groupby('user_name')['device'].shift(1)
         df['gap_prev'] = (df['dt'] - df.groupby('user_name')['dt'].shift(1)).dt.total_seconds().fillna(0)
-        df['machine_time_sec'] = np.where(
-            (df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration'] < 600), 
-            df['duration'], 0
-        )
-        
-        df['is_new_session'] = np.where(
-            (df['user_name'] != df['user_name'].shift(1)) | 
-            (df['device'] != df['prev_device']) |
-            (df['gap_prev'] > 1200), 1, 0
-        )
+        df['machine_time_sec'] = np.where((df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration'] < 600), df['duration'], 0)
+        df['is_new_session'] = np.where((df['user_name'] != df['user_name'].shift(1)) | (df['device'] != df['prev_device']) | (df['gap_prev'] > 1200), 1, 0)
         df['session_id'] = df['is_new_session'].cumsum()
         df.drop(columns=['next_dt', 'is_new_session', 'gap_prev'], inplace=True, errors='ignore')
 
@@ -587,7 +519,6 @@ def get_stats_range():
         row = cur.fetchone()
         if row and row[4] and row[5]:
             return (row[0] or 0), (row[1] or 0), (row[2] or 0), (row[3] or 0), row[4], row[5]
-    
     return 0, 0, 0, 0, date.today(), date.today()
 
 def get_present_dates(min_dt, max_dt):
@@ -615,7 +546,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v13.1")
+    st.title("RxTrack v13.3")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -628,16 +559,13 @@ with st.sidebar:
         c1, c2 = st.columns(2)
         c1.metric("Pyxis Events", f"{n_events:,}")
         c2.metric("Pharm Orders", f"{n_pharm:,}")
-        
         c3, c4 = st.columns(2)
         c3.metric("Sched. Shifts", f"{n_sched:,}")
         c4.metric("Time Punches", f"{n_att:,}")
-        
         present_dates = get_present_dates(min_db, max_db)
         if min_db and max_db and min_db <= max_db:
             delta = (max_db - min_db).days
             cal_start = max_db - timedelta(days=90) if delta > 90 else min_db
-            
             cal_html = '<div class="cal-grid">'
             curr = cal_start
             while curr <= max_db:
@@ -661,17 +589,12 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    
     default_start = max(min_db, max_db - timedelta(days=14)) if min_db < max_db else min_db
-    
     st.markdown("### 📅 Analysis Window")
-    date_range = st.slider("Select Range:", 
-                           min_value=min_db, max_value=max_db, 
-                           value=(default_start, max_db), format="MM/DD/YY")
+    date_range = st.slider("Select Range:", min_value=min_db, max_value=max_db, value=(default_start, max_db), format="MM/DD/YY")
     start_date, end_date = date_range
 
     st.subheader("📤 Ingest Data")
-    # Added "Inventory Audit (Detailed RC)" to the list
     u_type = st.selectbox("File Type:", [
         "Daily Transaction Report", "Device Activity Log (Pends)", 
         "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", 
@@ -687,32 +610,24 @@ with st.sidebar:
                     sql = "INSERT INTO attendance_punches (pk, raw_name, dt_date, start_dt, end_dt) VALUES (%(pk)s, %(raw_name)s, %(dt_date)s, %(start_dt)s, %(end_dt)s) ON CONFLICT (pk) DO NOTHING;"
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
                 else:
-                    st.error("❌ Could not parse any attendance records. Check file format.")
-
+                    st.error("❌ Could not parse any attendance records.")
             elif u_type == "Staff Schedule":
-                if uploaded.name.endswith('.xlsx'):
-                    raw = pd.read_excel(uploaded)
+                if uploaded.name.endswith('.xlsx'): raw = pd.read_excel(uploaded)
                 else:
-                    try:
-                        raw = pd.read_csv(uploaded, header=0)
+                    try: raw = pd.read_csv(uploaded, header=0)
                     except UnicodeDecodeError:
                         uploaded.seek(0)
                         raw = pd.read_csv(uploaded, header=0, encoding='latin1')
-                
                 clean = clean_schedule_data(raw)
                 sql = "INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(day_name)s, %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, %(note)s) ON CONFLICT (pk) DO NOTHING;"
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
-
             else:
-                if uploaded.name.endswith('.xlsx'):
-                    preview = pd.read_excel(uploaded, header=None, nrows=20)
+                if uploaded.name.endswith('.xlsx'): preview = pd.read_excel(uploaded, header=None, nrows=20)
                 else:
-                    try:
-                        preview = pd.read_csv(uploaded, header=None, nrows=20)
+                    try: preview = pd.read_csv(uploaded, header=None, nrows=20)
                     except UnicodeDecodeError:
                         uploaded.seek(0)
                         preview = pd.read_csv(uploaded, header=None, nrows=20, encoding='latin1')
-
                 header_idx = None
                 for idx, row in preview.iterrows():
                     s = str(row.values).lower()
@@ -722,15 +637,12 @@ with st.sidebar:
                     if u_type == "Inventory Audit (Detailed RC)" and "stationname" in s: header_idx = idx; break
                     if u_type == "Pharmacy Workflow Report" and "tranqueueid" in s: header_idx = idx; break
                 
-                if header_idx is None:
-                    st.error("❌ Could not detect valid header row. File might be formatted incorrectly.")
+                if header_idx is None: st.error("❌ Could not detect valid header row.")
                 else:
                     uploaded.seek(0)
-                    if uploaded.name.endswith('.xlsx'):
-                        raw = pd.read_excel(uploaded, header=header_idx)
+                    if uploaded.name.endswith('.xlsx'): raw = pd.read_excel(uploaded, header=header_idx)
                     else:
-                        try:
-                            raw = pd.read_csv(uploaded, header=header_idx)
+                        try: raw = pd.read_csv(uploaded, header=header_idx)
                         except UnicodeDecodeError:
                             uploaded.seek(0)
                             raw = pd.read_csv(uploaded, header=header_idx, encoding='latin1')
@@ -739,12 +651,10 @@ with st.sidebar:
                         clean = clean_dataframe(raw)
                         sql = "INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason, resolution_dt) VALUES (%(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s, %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s) ON CONFLICT (pk) DO NOTHING;"
                         execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Events")
-                    
                     elif u_type == "Device Activity Log (Pends)":
                         clean = clean_activity_log(raw)
                         sql = "INSERT INTO config_events (pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard) VALUES (%(pk)s, %(dt)s, %(user_name)s, %(device)s, %(med_id)s, %(location)s, %(action_type)s, %(activity_category)s, %(min_qty)s, %(max_qty)s, %(is_standard)s) ON CONFLICT (pk) DO NOTHING;"
                         execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Config")
-                    
                     elif u_type == "Inventory Audit (Prices)":
                         clean = clean_inventory_file(raw)
                         sql_audit = "INSERT INTO inventory_audit (pk, med_id, med_desc, med_class, unit_cost, qty_on_hand, min_lvl, max_lvl) VALUES (%(pk)s, %(med_id)s, %(med_desc)s, %(med_class)s, %(unit_cost)s, %(qty_on_hand)s, %(min_lvl)s, %(max_lvl)s) ON CONFLICT (pk) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, qty_on_hand = EXCLUDED.qty_on_hand;"
@@ -752,20 +662,34 @@ with st.sidebar:
                         cost_data = clean[['med_id', 'unit_cost']].rename(columns={'unit_cost': 'cost_per_unit'})
                         sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
                         execute_statement(sql_costs, cost_data.to_dict("records"), batch=True, table_name="Cost List")
-
+                    
                     elif u_type == "Inventory Audit (Detailed RC)":
                         clean = clean_detailed_inventory(raw)
+                        
+                        # --- 1. UPDATE PRICES (STRICT FILTER) ---
+                        # Only use prices from 'Pyxis Logistics' as requested
+                        logistics_only = clean[clean['source_system'] == 'Pyxis Logistics'].copy()
+                        
+                        if not logistics_only.empty:
+                            # Group by MedID and take the MAX price found in Logistics 
+                            # (Avoids $0.00 errors if multiple entries exist)
+                            price_updates = logistics_only.groupby('med_id')['unit_cost'].max().reset_index()
+                            price_updates = price_updates[price_updates['unit_cost'] > 0]
+                            price_updates.rename(columns={'unit_cost': 'cost_per_unit'}, inplace=True)
+                            
+                            if not price_updates.empty:
+                                sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
+                                execute_statement(sql_costs, price_updates.to_dict("records"), batch=True, table_name="Cost List (Logistics Only)")
+                                st.success(f"✅ Updated prices for {len(price_updates)} items using Pyxis Logistics data.")
+                        else:
+                            st.warning("⚠️ No 'Pyxis Logistics' rows found. Prices were NOT updated.")
+
+                        # --- 2. SAVE INVENTORY COUNTS ---
+                        # Drop 'source_system' before inserting to match existing DB table schema
+                        clean_for_db = clean.drop(columns=['source_system'])
+                        
                         sql_det = "INSERT INTO inventory_detailed (pk, station, med_id, med_desc, unit_cost, current_count, pocket_location) VALUES (%(pk)s, %(station)s, %(med_id)s, %(med_desc)s, %(unit_cost)s, %(current_count)s, %(pocket_location)s) ON CONFLICT (pk) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, current_count = EXCLUDED.current_count;"
-                        execute_statement(sql_det, clean.to_dict("records"), batch=True, table_name="Detailed Inventory")
-                        
-                        # 2. Extract Prices and Update Master Cost List (Using MAX price to avoid $0.00s)
-                        price_updates = clean.groupby('med_id')['unit_cost'].max().reset_index()
-                        price_updates = price_updates[price_updates['unit_cost'] > 0] # Only take valid prices
-                        price_updates.rename(columns={'unit_cost': 'cost_per_unit'}, inplace=True)
-                        
-                        if not price_updates.empty:
-                            sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
-                            execute_statement(sql_costs, price_updates.to_dict("records"), batch=True, table_name="Cost List Update")
+                        execute_statement(sql_det, clean_for_db.to_dict("records"), batch=True, table_name="Detailed Inventory")
 
                     elif u_type == "Pharmacy Workflow Report":
                         clean = clean_pharmacy_report(raw)
@@ -777,13 +701,6 @@ with st.sidebar:
 
         except Exception as e:
             st.error(f"Processing Error: {e}")
-
-# --- LOAD DATA ---
-df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
-
-if df_events.empty and df_config.empty and df_pharm.empty and df_sched.empty and df_att.empty:
-    st.info("👋 System Idle. Please upload data via the sidebar to begin analysis.")
-    st.stop()
 
 # 1. OVERVIEW
 if selected_page == "📊 Overview":
@@ -822,75 +739,47 @@ elif selected_page == "🎓 Student Project":
     st.caption("Tracking the value of inventory returned from Pyxis machines (45-day -> 28-day optimization).")
     
     if not df_events.empty:
-        # 1. User Selection
         all_users = sorted(df_events['user_name'].dropna().unique())
         selected_students = st.multiselect("Select Project Team (Students)", all_users)
-        
-        # 2. Action Filter (Default to Unloads)
         all_actions = sorted(df_events['event_type'].dropna().unique())
         default_actions = [x for x in all_actions if "UNLOAD" in x.upper() or "EMPTY" in x.upper()]
         selected_actions = st.multiselect("Select Actions", all_actions, default=default_actions)
         
-        # --- SMART LOGIC SETTINGS ---
         st.divider()
         st.markdown("#### 🧠 Smart Logic Settings")
         c_set1, c_set2 = st.columns(2)
-        
         with c_set1:
             st.markdown("**1. Inhaler Adjustment (Qty Fix)**")
-            adjust_inhalers = st.checkbox("➗ Adjust Inhaler Quantities", value=True, 
-                help="Divides quantity by 'Puffs' for items marked as HFA/Puff/Inhaler.")
+            adjust_inhalers = st.checkbox("➗ Adjust Inhaler Quantities", value=True, help="Divides quantity by 'Puffs' for items marked as HFA/Puff/Inhaler.")
             puffs_per_unit = st.number_input("Est. Puffs per Inhaler", value=120, min_value=1)
-
         with c_set2:
             st.markdown("**2. Bulk Pack Adjustment (Price Fix)**")
-            adjust_bulk = st.checkbox("💲 Adjust High-Cost Orals (Bulk Price)", value=True,
-                help="If a Tablet/Capsule costs more than the threshold, assume it's a pack price and divide it.")
-            cost_threshold = st.number_input("Max Reasonable Pill Cost ($)", value=10.0, min_value=1.0, step=1.0,
-                help="Any tablet costing MORE than this will be treated as a bulk pack.")
-            pack_divisor = st.number_input("Est. Pack Size (Divisor)", value=100, min_value=1,
-                help="Divide the high price by this number (e.g. $80 / 100 = $0.80/pill).")
+            adjust_bulk = st.checkbox("💲 Adjust High-Cost Orals (Bulk Price)", value=True, help="If a Tablet/Capsule costs more than the threshold, assume it's a pack price and divide it.")
+            cost_threshold = st.number_input("Max Reasonable Pill Cost ($)", value=10.0, min_value=1.0, step=1.0, help="Any tablet costing MORE than this will be treated as a bulk pack.")
+            pack_divisor = st.number_input("Est. Pack Size (Divisor)", value=100, min_value=1, help="Divide the high price by this number (e.g. $80 / 100 = $0.80/pill).")
 
         if selected_students and selected_actions:
-            # 4. Filter Data
             project_df = df_events[
                 (df_events['user_name'].isin(selected_students)) & 
                 (df_events['event_type'].isin(selected_actions))
             ].copy()
             
             if not project_df.empty:
-                # --- APPLY SMART LOGIC ---
-                
                 # A. QUANTITY ADJUSTMENT (Inhalers)
                 inhaler_mask = project_df['med_desc'].str.contains(r'puff|hfa|inhaler|actuation', case=False, na=False)
-                
                 if adjust_inhalers:
-                    project_df['Adj_Qty'] = np.where(
-                        (inhaler_mask) & (project_df['qty'] > 5), 
-                        project_df['qty'] / puffs_per_unit, 
-                        project_df['qty']
-                    )
-                    project_df['Qty_Note'] = np.where(
-                        (inhaler_mask) & (project_df['qty'] > 5), "Adj (Inhaler)", "Raw"
-                    )
+                    project_df['Adj_Qty'] = np.where((inhaler_mask) & (project_df['qty'] > 5), project_df['qty'] / puffs_per_unit, project_df['qty'])
+                    project_df['Qty_Note'] = np.where((inhaler_mask) & (project_df['qty'] > 5), "Adj (Inhaler)", "Raw")
                 else:
                     project_df['Adj_Qty'] = project_df['qty']
                     project_df['Qty_Note'] = "Raw"
 
                 # B. COST ADJUSTMENT (Bulk Packs)
-                # Logic: If description has 'tab' or 'cap' AND Cost > Threshold -> Divide Cost
                 oral_mask = project_df['med_desc'].str.contains(r'tab|cap', case=False, na=False)
                 high_cost_mask = project_df['cost_per_unit'] > cost_threshold
-                
                 if adjust_bulk:
-                    project_df['Adj_Cost'] = np.where(
-                        (oral_mask) & (high_cost_mask),
-                        project_df['cost_per_unit'] / pack_divisor,
-                        project_df['cost_per_unit']
-                    )
-                    project_df['Cost_Note'] = np.where(
-                        (oral_mask) & (high_cost_mask), f"Adj (Bulk/{pack_divisor})", "Raw"
-                    )
+                    project_df['Adj_Cost'] = np.where((oral_mask) & (high_cost_mask), project_df['cost_per_unit'] / pack_divisor, project_df['cost_per_unit'])
+                    project_df['Cost_Note'] = np.where((oral_mask) & (high_cost_mask), f"Adj (Bulk/{pack_divisor})", "Raw")
                 else:
                     project_df['Adj_Cost'] = project_df['cost_per_unit']
                     project_df['Cost_Note'] = "Raw"
@@ -898,7 +787,6 @@ elif selected_page == "🎓 Student Project":
                 # C. FINAL CALCULATION
                 project_df['Total Value'] = project_df['Adj_Qty'] * project_df['Adj_Cost']
                 
-                # --- METRICS ---
                 total_qty_adj = project_df['Adj_Qty'].sum()
                 total_value = project_df['Total Value'].sum()
                 
@@ -908,14 +796,12 @@ elif selected_page == "🎓 Student Project":
                 c2.metric("Total Value Saved", f"${total_value:,.2f}")
                 c3.metric("Transactions", len(project_df))
                 
-                # --- VISUALS ---
                 c_chart1, c_chart2 = st.columns(2)
                 with c_chart1:
                     st.subheader("🏆 Value by Student")
                     student_stats = project_df.groupby('user_name')['Total Value'].sum().reset_index()
                     fig1 = px.bar(student_stats, x='Total Value', y='user_name', orientation='h', text_auto='$.2f', title="Dollar Value Returned")
                     st.plotly_chart(fig1, use_container_width=True)
-                    
                 with c_chart2:
                     st.subheader("📍 Machines Optimized")
                     device_stats = project_df.groupby('device')['Adj_Qty'].sum().reset_index().sort_values('Adj_Qty', ascending=False).head(10)
@@ -923,51 +809,37 @@ elif selected_page == "🎓 Student Project":
                     fig2.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig2, use_container_width=True)
                 
-                # --- DETAILED TABLE ---
                 st.subheader("📋 Transaction Details")
                 st.caption("Check 'Notes' columns to see where smart logic changed the values.")
-                
                 cols_to_show = ['dt', 'user_name', 'device', 'med_desc', 'qty', 'Adj_Qty', 'cost_per_unit', 'Adj_Cost', 'Total Value', 'Qty_Note', 'Cost_Note']
-                
-                st.dataframe(
-                    project_df[cols_to_show].sort_values('Total Value', ascending=False),
-                    use_container_width=True,
-                    column_config={
-                        "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm"),
-                        "qty": st.column_config.NumberColumn("Qty (Raw)", format="%.0f"),
-                        "Adj_Qty": st.column_config.NumberColumn("Qty (Adj)", format="%.1f"),
-                        "cost_per_unit": st.column_config.NumberColumn("Cost (Raw)", format="$%.2f"),
-                        "Adj_Cost": st.column_config.NumberColumn("Cost (Adj)", format="$%.2f"),
-                        "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
-                    }
-                )
+                st.dataframe(project_df[cols_to_show].sort_values('Total Value', ascending=False), use_container_width=True, column_config={
+                    "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm"),
+                    "qty": st.column_config.NumberColumn("Qty (Raw)", format="%.0f"),
+                    "Adj_Qty": st.column_config.NumberColumn("Qty (Adj)", format="%.1f"),
+                    "cost_per_unit": st.column_config.NumberColumn("Cost (Raw)", format="$%.2f"),
+                    "Adj_Cost": st.column_config.NumberColumn("Cost (Adj)", format="$%.2f"),
+                    "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
+                })
 
-                # --- ALERTS ---
-                # 1. Missing Prices
                 missing_costs = project_df[project_df['Adj_Cost'] == 0].copy()
                 if not missing_costs.empty:
                     st.divider()
                     with st.expander(f"⚠️ Missing Prices ({len(missing_costs)} items)", expanded=False):
                         st.warning("These items have $0.00 cost and are NOT included in the total.")
                         st.dataframe(missing_costs[['med_id', 'med_desc', 'qty']].groupby(['med_id', 'med_desc']).sum(), use_container_width=True)
-
-                # 2. Logic Audit (Show what got adjusted)
-                adjusted_items = project_df[
-                    (project_df['Qty_Note'] != 'Raw') | (project_df['Cost_Note'] != 'Raw')
-                ].copy()
                 
+                adjusted_items = project_df[(project_df['Qty_Note'] != 'Raw') | (project_df['Cost_Note'] != 'Raw')].copy()
                 if not adjusted_items.empty:
                     with st.expander(f"🛠️ Logic Audit: Adjusted Items ({len(adjusted_items)} items)", expanded=False):
                         st.info("These items had their Quantity or Cost adjusted by the Smart Logic.")
-                        st.dataframe(
-                            adjusted_items[['med_desc', 'qty', 'Adj_Qty', 'cost_per_unit', 'Adj_Cost', 'Qty_Note', 'Cost_Note']], 
-                            use_container_width=True
-                        )
-
+                        st.dataframe(adjusted_items[['med_desc', 'qty', 'Adj_Qty', 'cost_per_unit', 'Adj_Cost', 'Qty_Note', 'Cost_Note']], use_container_width=True)
             else:
                 st.warning("No transactions found for these students with the selected actions.")
         else:
             st.info("Please select at least one student and one action to begin.")
+    else:
+        st.warning("Please upload a Daily Transaction Report to use this feature.")
+
 # 14. SHIFT LEADERBOARD
 elif selected_page == "🏆 Shift Leaderboard":
     st.header("🏆 Shift Performance Leaderboard")
