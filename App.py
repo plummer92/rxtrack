@@ -774,50 +774,96 @@ elif selected_page == "🎓 Student Project":
     st.caption("Tracking the value of inventory returned from Pyxis machines (45-day -> 28-day optimization).")
     
     if not df_events.empty:
+        # 1. User Selection
         all_users = sorted(df_events['user_name'].dropna().unique())
         selected_students = st.multiselect("Select Project Team (Students)", all_users)
         
+        # 2. Action Filter (Default to Unloads)
         all_actions = sorted(df_events['event_type'].dropna().unique())
         default_actions = [x for x in all_actions if "UNLOAD" in x.upper() or "EMPTY" in x.upper()]
         selected_actions = st.multiselect("Select Actions", all_actions, default=default_actions)
         
+        # 3. Smart Logic Settings
+        with st.expander("⚙️ Logic Settings (Inhaler Adjustment)", expanded=True):
+            adjust_inhalers = st.checkbox("Smart Adjust for Inhalers (Puffs vs Units)", value=True, 
+                help="If checked, items described as 'puff' or 'HFA' will have their quantity divided to reflect units instead of doses.")
+            puffs_per_unit = st.number_input("Est. Puffs per Inhaler (Divisor)", value=120, min_value=1, 
+                help="Standard number of doses to divide by (e.g. 120 or 200).")
+
         if selected_students and selected_actions:
+            # 4. Filter Data
             project_df = df_events[
                 (df_events['user_name'].isin(selected_students)) & 
                 (df_events['event_type'].isin(selected_actions))
             ].copy()
             
             if not project_df.empty:
-                project_df['Total Value'] = project_df['qty'] * project_df['cost_per_unit']
-                total_qty = project_df['qty'].sum()
+                # 5. Apply Smart Logic
+                # Identify Inhaler Rows based on keywords
+                inhaler_mask = project_df['med_desc'].str.contains(r'puff|hfa|inhaler|actuation', case=False, na=False)
+                
+                # Calculate Adjusted Quantity
+                # If it's an inhaler AND the qty is > 5 (assuming nobody unloads 5 full inhalers instantly vs 5 puffs), apply divisor
+                if adjust_inhalers:
+                    project_df['Adj_Qty'] = np.where(
+                        (inhaler_mask) & (project_df['qty'] > 5), 
+                        project_df['qty'] / puffs_per_unit, 
+                        project_df['qty']
+                    )
+                    project_df['Calculation Note'] = np.where(
+                        (inhaler_mask) & (project_df['qty'] > 5), 
+                        f"Adj (Qty/{puffs_per_unit})", 
+                        "Standard"
+                    )
+                else:
+                    project_df['Adj_Qty'] = project_df['qty']
+                    project_df['Calculation Note'] = "Raw"
+
+                # Calculate Financials
+                project_df['Total Value'] = project_df['Adj_Qty'] * project_df['cost_per_unit']
+                
+                total_qty_raw = project_df['qty'].sum()
+                total_units_adj = project_df['Adj_Qty'].sum()
                 total_value = project_df['Total Value'].sum()
                 
+                # 6. Metrics
                 st.divider()
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Total Items Removed", f"{total_qty:,.0f}")
+                c1.metric("Total Items (Adj. Units)", f"{total_units_adj:,.1f}", help=f"Raw Count: {total_qty_raw:,.0f}")
                 c2.metric("Total Value Saved", f"${total_value:,.2f}")
                 c3.metric("Transactions", len(project_df))
                 st.divider()
                 
+                # 7. Visuals
                 c_chart1, c_chart2 = st.columns(2)
+                
                 with c_chart1:
                     st.subheader("🏆 Value by Student")
                     student_stats = project_df.groupby('user_name')['Total Value'].sum().reset_index()
                     fig1 = px.bar(student_stats, x='Total Value', y='user_name', orientation='h', text_auto='$.2f', title="Dollar Value Returned")
                     st.plotly_chart(fig1, use_container_width=True)
+                    
                 with c_chart2:
                     st.subheader("📍 Machines Optimized")
-                    device_stats = project_df.groupby('device')['qty'].sum().reset_index().sort_values('qty', ascending=False).head(10)
-                    fig2 = px.bar(device_stats, x='qty', y='device', orientation='h', text_auto=True, title="Top 10 Machines (Qty Removed)")
+                    device_stats = project_df.groupby('device')['Adj_Qty'].sum().reset_index().sort_values('Adj_Qty', ascending=False).head(10)
+                    fig2 = px.bar(device_stats, x='Adj_Qty', y='device', orientation='h', text_auto='.1f', title="Top 10 Machines (Units Removed)")
                     fig2.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig2, use_container_width=True)
                 
+                # 8. Detailed Table
                 st.subheader("📋 Transaction Details")
+                st.caption("See 'Calculation Note' to identify where Inhaler logic was applied.")
+                
+                # Filter cols
+                cols_to_show = ['dt', 'user_name', 'device', 'med_desc', 'qty', 'Adj_Qty', 'cost_per_unit', 'Total Value', 'Calculation Note']
+                
                 st.dataframe(
-                    project_df[['dt', 'user_name', 'device', 'med_desc', 'qty', 'cost_per_unit', 'Total Value']].sort_values('Total Value', ascending=False),
+                    project_df[cols_to_show].sort_values('Total Value', ascending=False),
                     use_container_width=True,
                     column_config={
                         "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm"),
+                        "qty": st.column_config.NumberColumn("Raw Qty", format="%.0f"),
+                        "Adj_Qty": st.column_config.NumberColumn("Adj Units", format="%.1f"),
                         "cost_per_unit": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
                         "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
                     }
