@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v13.0 - Missing Price Report)
+# RXTRACK: EXECUTIVE DASHBOARD (v13.1 - Detailed Inventory Support)
 # Architecture: Quad-Table Strategy + Attendance + Pricing
 # Updates:
-#   1. Added 'Missing Prices' table to Student Project tab.
-#   2. Helps identify items with $0.00 cost to fix totals.
-#   3. Retains all previous functionality.
+#   1. Added 'Inventory Audit (Detailed RC)' support.
+#   2. Created new table 'inventory_detailed' for station-level data.
+#   3. Automatically updates master Price List from detailed reports.
 ###############################################################
 
 import streamlit as st
@@ -169,6 +169,7 @@ def init_db():
         for sql in schemas:
             cur.execute(sql)
         conn.commit()
+
 # --- UTILITY FUNCTIONS ---
 def seconds_to_mmss(seconds):
     if pd.isna(seconds) or seconds < 0: return "-"
@@ -249,33 +250,6 @@ def parse_shift_start(date_obj, shift_str):
     return None
 
 # --- DATA CLEANING ---
-
-def clean_detailed_inventory(df):
-    """Cleans the detailed Station-Level Inventory CSV."""
-    df = df.copy()
-    # Map columns based on your new file
-    colmap = {
-        "StationName": "station", "MedID": "med_id", "MedDescription": "med_desc",
-        "UnitCost": "unit_cost", "CurrentCount": "current_count", "DrawerSubdrawerPocket": "pocket_location"
-    }
-    df.rename(columns=colmap, inplace=True)
-    
-    # Ensure required columns exist
-    for c in ["station", "med_id", "med_desc", "unit_cost", "current_count", "pocket_location"]:
-        if c not in df.columns: df[c] = None
-        
-    # Clean Price Column (Remove '$' and ',')
-    if df['unit_cost'].dtype == object:
-        df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
-    
-    df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
-    df['current_count'] = pd.to_numeric(df['current_count'], errors='coerce').fillna(0)
-    
-    # Generate PK (Station + MedID + Pocket ensures uniqueness)
-    df['row_sig'] = df['station'].astype(str) + df['med_id'].astype(str) + df['pocket_location'].astype(str)
-    df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
-    
-    return df[['pk', 'station', 'med_id', 'med_desc', 'unit_cost', 'current_count', 'pocket_location']]
 def clean_dataframe(df):
     df = df.copy()
     colmap = {
@@ -475,6 +449,7 @@ def clean_attendance_file(file_obj):
     return df
 
 def clean_inventory_file(df):
+    """Cleans Inventory Audit CSV (Standard/Prices)."""
     df = df.copy()
     colmap = {
         "MedID": "med_id", "MedDescription": "med_desc", "MedClass": "med_class",
@@ -494,6 +469,29 @@ def clean_inventory_file(df):
     
     df['pk'] = df.apply(lambda x: str(x['med_id']), axis=1)
     return df[['pk', 'med_id', 'med_desc', 'med_class', 'unit_cost', 'qty_on_hand', 'min_lvl', 'max_lvl']]
+
+def clean_detailed_inventory(df):
+    """Cleans the detailed Station-Level Inventory CSV."""
+    df = df.copy()
+    colmap = {
+        "StationName": "station", "MedID": "med_id", "MedDescription": "med_desc",
+        "UnitCost": "unit_cost", "CurrentCount": "current_count", "DrawerSubdrawerPocket": "pocket_location"
+    }
+    df.rename(columns=colmap, inplace=True)
+    
+    for c in ["station", "med_id", "med_desc", "unit_cost", "current_count", "pocket_location"]:
+        if c not in df.columns: df[c] = None
+        
+    if df['unit_cost'].dtype == object:
+        df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
+    
+    df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
+    df['current_count'] = pd.to_numeric(df['current_count'], errors='coerce').fillna(0)
+    
+    df['row_sig'] = df['station'].astype(str) + df['med_id'].astype(str) + df['pocket_location'].astype(str)
+    df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+    
+    return df[['pk', 'station', 'med_id', 'med_desc', 'unit_cost', 'current_count', 'pocket_location']]
 
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
@@ -617,7 +615,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v13.0")
+    st.title("RxTrack v13.1")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -683,16 +681,14 @@ with st.sidebar:
     
     if uploaded and st.button(f"Process {u_type}"):
         try:
-            # --- 1. ATTENDANCE ---
             if u_type == "Attendance Tracking":
                 clean = clean_attendance_file(uploaded)
                 if not clean.empty:
                     sql = "INSERT INTO attendance_punches (pk, raw_name, dt_date, start_dt, end_dt) VALUES (%(pk)s, %(raw_name)s, %(dt_date)s, %(start_dt)s, %(end_dt)s) ON CONFLICT (pk) DO NOTHING;"
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
                 else:
-                    st.error("❌ Could not parse any attendance records.")
+                    st.error("❌ Could not parse any attendance records. Check file format.")
 
-            # --- 2. SCHEDULE ---
             elif u_type == "Staff Schedule":
                 if uploaded.name.endswith('.xlsx'):
                     raw = pd.read_excel(uploaded)
@@ -707,9 +703,7 @@ with st.sidebar:
                 sql = "INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(day_name)s, %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, %(note)s) ON CONFLICT (pk) DO NOTHING;"
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
 
-            # --- 3. OTHER FILES ---
             else:
-                # Detect Header
                 if uploaded.name.endswith('.xlsx'):
                     preview = pd.read_excel(uploaded, header=None, nrows=20)
                 else:
@@ -729,7 +723,7 @@ with st.sidebar:
                     if u_type == "Pharmacy Workflow Report" and "tranqueueid" in s: header_idx = idx; break
                 
                 if header_idx is None:
-                    st.error("❌ Could not detect valid header row.")
+                    st.error("❌ Could not detect valid header row. File might be formatted incorrectly.")
                 else:
                     uploaded.seek(0)
                     if uploaded.name.endswith('.xlsx'):
@@ -741,7 +735,6 @@ with st.sidebar:
                             uploaded.seek(0)
                             raw = pd.read_csv(uploaded, header=header_idx, encoding='latin1')
                     
-                    # LOGIC TREE
                     if u_type == "Daily Transaction Report":
                         clean = clean_dataframe(raw)
                         sql = "INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason, resolution_dt) VALUES (%(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s, %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s) ON CONFLICT (pk) DO NOTHING;"
@@ -756,16 +749,12 @@ with st.sidebar:
                         clean = clean_inventory_file(raw)
                         sql_audit = "INSERT INTO inventory_audit (pk, med_id, med_desc, med_class, unit_cost, qty_on_hand, min_lvl, max_lvl) VALUES (%(pk)s, %(med_id)s, %(med_desc)s, %(med_class)s, %(unit_cost)s, %(qty_on_hand)s, %(min_lvl)s, %(max_lvl)s) ON CONFLICT (pk) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, qty_on_hand = EXCLUDED.qty_on_hand;"
                         execute_statement(sql_audit, clean.to_dict("records"), batch=True, table_name="Inventory Audit")
-                        
-                        # Sync Costs
                         cost_data = clean[['med_id', 'unit_cost']].rename(columns={'unit_cost': 'cost_per_unit'})
                         sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
                         execute_statement(sql_costs, cost_data.to_dict("records"), batch=True, table_name="Cost List")
 
                     elif u_type == "Inventory Audit (Detailed RC)":
                         clean = clean_detailed_inventory(raw)
-                        
-                        # 1. Insert into Detailed Table
                         sql_det = "INSERT INTO inventory_detailed (pk, station, med_id, med_desc, unit_cost, current_count, pocket_location) VALUES (%(pk)s, %(station)s, %(med_id)s, %(med_desc)s, %(unit_cost)s, %(current_count)s, %(pocket_location)s) ON CONFLICT (pk) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, current_count = EXCLUDED.current_count;"
                         execute_statement(sql_det, clean.to_dict("records"), batch=True, table_name="Detailed Inventory")
                         
