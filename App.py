@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.7 - Smart Reconciliation)
+# RXTRACK: EXECUTIVE DASHBOARD (v12.8 - Student Project Tracker)
 # Architecture: Quad-Table Strategy + Attendance Tracking
 # Updates:
-#   1. Enhanced Return Reconciliation with Charts & Stats.
-#   2. Added "Show/Hide Matched" toggle to focus on errors.
-#   3. Retains all previous name/schedule/upload fixes.
+#   1. Added '🎓 Student Project' tab.
+#   2. Calculates Cost Savings/Value of mass unloads.
+#   3. Retains all previous fixes and database tools.
 ###############################################################
 
 import streamlit as st
@@ -534,7 +534,6 @@ def load_data(start_date, end_date):
     return df, results["config"], results["pharm"], results["schedule"], results["attendance"]
 
 def get_stats_range():
-    """Calculates the global date range across ALL tables."""
     sql = """
         WITH all_dates AS (
             SELECT dt::date as d FROM events WHERE dt IS NOT NULL
@@ -578,15 +577,15 @@ def get_present_dates(min_dt, max_dt):
 init_db()
 
 PAGES = [
-    "📊 Overview", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", "🛡️ Compliance", 
-    "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", 
+    "📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", 
+    "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", 
     "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", 
     "📈 Tech Progression", "📅 Attendance"
 ]
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12.7")
+    st.title("RxTrack v12.8")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -761,95 +760,138 @@ if selected_page == "📊 Overview":
             fig_pie.update_layout(showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
 
-# 14. SHIFT LEADERBOARD (NEW)
+# 15. STUDENT PROJECT (NEW)
+elif selected_page == "🎓 Student Project":
+    st.header("🎓 Student Optimization Project")
+    st.caption("Tracking the value of inventory returned from Pyxis machines (45-day -> 28-day optimization).")
+    
+    if not df_events.empty:
+        # 1. User Selection
+        all_users = sorted(df_events['user_name'].dropna().unique())
+        selected_students = st.multiselect("Select Project Team (Students)", all_users)
+        
+        # 2. Action Filter (Default to Unloads)
+        all_actions = sorted(df_events['event_type'].dropna().unique())
+        default_actions = [x for x in all_actions if "UNLOAD" in x.upper() or "EMPTY" in x.upper()]
+        selected_actions = st.multiselect("Select Actions", all_actions, default=default_actions)
+        
+        if selected_students and selected_actions:
+            # 3. Filter Data
+            project_df = df_events[
+                (df_events['user_name'].isin(selected_students)) & 
+                (df_events['event_type'].isin(selected_actions))
+            ].copy()
+            
+            if not project_df.empty:
+                # 4. Calculate Value
+                project_df['Total Value'] = project_df['qty'] * project_df['cost_per_unit']
+                
+                total_qty = project_df['qty'].sum()
+                total_value = project_df['Total Value'].sum()
+                
+                # 5. Metrics
+                st.divider()
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Items Removed", f"{total_qty:,.0f}")
+                c2.metric("Total Value Saved", f"${total_value:,.2f}")
+                c3.metric("Transactions", len(project_df))
+                st.divider()
+                
+                # 6. Visuals
+                c_chart1, c_chart2 = st.columns(2)
+                
+                with c_chart1:
+                    st.subheader("🏆 Value by Student")
+                    student_stats = project_df.groupby('user_name')['Total Value'].sum().reset_index()
+                    fig1 = px.bar(student_stats, x='Total Value', y='user_name', orientation='h', text_auto='$.2f', title="Dollar Value Returned")
+                    st.plotly_chart(fig1, use_container_width=True)
+                    
+                with c_chart2:
+                    st.subheader("📍 Machines Optimized")
+                    device_stats = project_df.groupby('device')['qty'].sum().reset_index().sort_values('qty', ascending=False).head(10)
+                    fig2 = px.bar(device_stats, x='qty', y='device', orientation='h', text_auto=True, title="Top 10 Machines (Qty Removed)")
+                    fig2.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig2, use_container_width=True)
+                
+                # 7. Detailed Table
+                st.subheader("📋 Transaction Details")
+                st.dataframe(
+                    project_df[['dt', 'user_name', 'device', 'med_desc', 'qty', 'cost_per_unit', 'Total Value']].sort_values('Total Value', ascending=False),
+                    use_container_width=True,
+                    column_config={
+                        "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm"),
+                        "cost_per_unit": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                        "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
+                    }
+                )
+            else:
+                st.warning("No transactions found for these students with the selected actions.")
+        else:
+            st.info("Please select at least one student and one action to begin.")
+    else:
+        st.warning("Please upload a Daily Transaction Report to use this feature.")
+
+# 14. SHIFT LEADERBOARD
 elif selected_page == "🏆 Shift Leaderboard":
     st.header("🏆 Shift Performance Leaderboard")
     st.caption("Identify top performers and high-volume staff by shift type.")
     
     if not df_sched.empty:
-        # 1. Prepare Activity Data (Transactions per User per Day)
         activity_data = []
-        
-        # Pyxis Counts
         if not df_events.empty:
             df_events['match_key'] = df_events['user_name'].apply(normalize_name)
             pyxis_counts = df_events.groupby([df_events['dt'].dt.date, 'match_key']).size().reset_index(name='pyxis_tx')
             pyxis_counts.columns = ['date_obj', 'match_key', 'pyxis_tx']
             activity_data.append(pyxis_counts)
-            
-        # Pharmacy Counts
         if not df_pharm.empty:
             df_pharm['match_key'] = df_pharm['user_name'].apply(normalize_name)
             pharm_counts = df_pharm.groupby([df_pharm['dt'].dt.date, 'match_key']).size().reset_index(name='pharm_tx')
             pharm_counts.columns = ['date_obj', 'match_key', 'pharm_tx']
             activity_data.append(pharm_counts)
             
-        # Merge Activity into One DF
         if activity_data:
             total_activity = activity_data[0]
             for df in activity_data[1:]:
                 total_activity = pd.merge(total_activity, df, on=['date_obj', 'match_key'], how='outer').fillna(0)
-            
             total_activity['total_tx'] = total_activity.get('pyxis_tx', 0) + total_activity.get('pharm_tx', 0)
         else:
             total_activity = pd.DataFrame(columns=['date_obj', 'match_key', 'total_tx'])
 
-        # 2. Prepare Schedule Data
         df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
         df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
-        
-        # Merge Schedule with Activity
-        # We want to know: For a given Shift Type, who worked it and how much did they do?
         merged = pd.merge(df_sched, total_activity, on=['date_obj', 'match_key'], how='left')
         merged['total_tx'] = merged['total_tx'].fillna(0)
         
-        # 3. Aggregation Logic
         valid_shifts = [s for s in merged['shift_type'].unique() if s and str(s).lower() not in ['x', 'nan', 'pto', 'off']]
         sel_shift = st.selectbox("Select Shift Type", sorted(valid_shifts))
-        
-        # Filter for selected shift
         shift_data = merged[merged['shift_type'] == sel_shift]
         
         if not shift_data.empty:
-            # Group by User
             stats = shift_data.groupby('staff_name').agg(
                 shifts_worked=('pk', 'count'),
                 total_transactions=('total_tx', 'sum'),
                 avg_tx_per_shift=('total_tx', 'mean')
             ).reset_index()
-            
-            # Filter out people with 0 shifts (sanity check)
             stats = stats[stats['shifts_worked'] > 0]
             
-            # 4. Visualization
             c1, c2 = st.columns(2)
-            
             with c1:
                 st.subheader("📊 Most Shifts Worked")
                 top_volume = stats.sort_values('shifts_worked', ascending=False).head(10)
-                fig_vol = px.bar(top_volume, x='shifts_worked', y='staff_name', orientation='h', 
-                                 title=f"Who works '{sel_shift}' the most?", text_auto=True)
+                fig_vol = px.bar(top_volume, x='shifts_worked', y='staff_name', orientation='h', title=f"Who works '{sel_shift}' the most?", text_auto=True)
                 fig_vol.update_layout(yaxis={'categoryorder':'total ascending', 'title': ''}, xaxis_title="Shifts Count")
                 st.plotly_chart(fig_vol, use_container_width=True)
-                
             with c2:
                 st.subheader("⚡ Efficiency (Tx per Shift)")
-                # Only show users with at least 3 shifts to avoid outliers from one busy day
                 top_eff = stats[stats['shifts_worked'] >= 3].sort_values('avg_tx_per_shift', ascending=False).head(10)
-                if top_eff.empty:
-                    top_eff = stats.sort_values('avg_tx_per_shift', ascending=False).head(10)
-                    st.caption("(Showing all users; filtered list was empty)")
-                
-                fig_eff = px.bar(top_eff, x='avg_tx_per_shift', y='staff_name', orientation='h',
-                                 title=f"Most Productive on '{sel_shift}'", text_auto='.0f', color='avg_tx_per_shift')
+                if top_eff.empty: top_eff = stats.sort_values('avg_tx_per_shift', ascending=False).head(10)
+                fig_eff = px.bar(top_eff, x='avg_tx_per_shift', y='staff_name', orientation='h', title=f"Most Productive on '{sel_shift}'", text_auto='.0f', color='avg_tx_per_shift')
                 fig_eff.update_layout(yaxis={'categoryorder':'total ascending', 'title': ''}, xaxis_title="Avg Transactions")
                 st.plotly_chart(fig_eff, use_container_width=True)
-                
             st.divider()
             st.write("Detailed Stats", stats.sort_values('shifts_worked', ascending=False))
         else:
             st.info(f"No data found for shift type: {sel_shift}")
-            
     else:
         st.warning("Please upload a Schedule file to use this feature.")
 
@@ -859,47 +901,27 @@ elif selected_page == "⏰ Tardies":
     st.caption("Matches 'Scheduled Start' with 'Actual Clock-in'. Automatically ignores consecutive shifts and admins.")
     
     if not df_sched.empty and not df_att.empty:
-        # 1. Normalize Names for Matching
         df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
         df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
-        
-        # 2. Ensure Date Types Match
         df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
         df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
-        
-        # 3. Merge Schedule and Attendance (Many-to-Many)
         merged = pd.merge(df_sched, df_att, on=['match_key', 'date_obj'], how='inner')
         
         if not merged.empty:
-            # 4. Parse Scheduled Times
             merged['scheduled_start_dt'] = merged.apply(lambda x: parse_shift_start(x['date_obj'], x['shift_type']), axis=1)
             merged.dropna(subset=['scheduled_start_dt'], inplace=True)
-            
-            # 5. Smart Matching: Find best match for each schedule row
             merged['actual_start_dt'] = pd.to_datetime(merged['start_dt'])
             merged['actual_end_dt'] = pd.to_datetime(merged['end_dt'])
-            
-            # Calculate time difference magnitude
             merged['diff_abs'] = (merged['actual_start_dt'] - merged['scheduled_start_dt']).abs()
-            
-            # Sort by smallest difference and keep the best match for each Scheduled Shift
             best_matches = merged.sort_values('diff_abs').drop_duplicates(subset=['pk_x'])
-            
             final_df = best_matches.copy()
-            
-            # 6. Calculate Delay
             final_df['delay_min'] = (final_df['actual_start_dt'] - final_df['scheduled_start_dt']).dt.total_seconds() / 60
-            
-            # 7. Consecutive Shift Logic (The "Double" Fix)
             final_df.sort_values(['match_key', 'actual_start_dt'], inplace=True)
             final_df['prev_end'] = final_df.groupby('match_key')['actual_end_dt'].shift(1)
             final_df['gap_min'] = (final_df['actual_start_dt'] - final_df['prev_end']).dt.total_seconds() / 60
             final_df['is_double'] = np.where((final_df['gap_min'].notnull()) & (final_df['gap_min'] < 30), True, False)
 
-            # 8. Filter Results
             grace_period = st.slider("Grace Period (minutes)", 0, 15, 5)
-            
-            # Filter: Delay > Grace AND Not a Double Shift AND Not Admin
             tardies = final_df[
                 (final_df['delay_min'] > grace_period) & 
                 (final_df['is_double'] == False) &
@@ -916,13 +938,8 @@ elif selected_page == "⏰ Tardies":
                 tardies['Late By'] = tardies['delay_min'].apply(lambda x: f"{int(x)} min")
                 tardies['Scheduled'] = tardies['scheduled_start_dt'].dt.strftime('%H:%M')
                 tardies['Actual'] = tardies['actual_start_dt'].dt.strftime('%H:%M')
-                
                 st.subheader("🚩 Late List")
-                st.dataframe(
-                    tardies[['date_obj', 'staff_name', 'shift_type', 'Scheduled', 'Actual', 'Late By']],
-                    use_container_width=True,
-                    column_config={"date_obj": "Date"}
-                )
+                st.dataframe(tardies[['date_obj', 'staff_name', 'shift_type', 'Scheduled', 'Actual', 'Late By']], use_container_width=True, column_config={"date_obj": "Date"})
             else:
                 st.success("🎉 No tardies found (after excluding doubles and admins)!")
         else:
@@ -949,14 +966,12 @@ elif selected_page == "🚀 Process Mining":
             path_counts = path_counts.sort_values('count', ascending=False).head(30)
             all_nodes = list(pd.concat([path_counts['prev_device'], path_counts['device']]).unique())
             node_map = {node: i for i, node in enumerate(all_nodes)}
-            
             fig = go.Figure(data=[go.Sankey(
                 node=dict(pad=15, thickness=20, line=dict(color="black", width=0.5), label=all_nodes, color="#1E90FF"),
                 link=dict(source=path_counts['prev_device'].map(node_map), target=path_counts['device'].map(node_map), value=path_counts['count'])
             )])
             fig.update_layout(title_text="Top 30 Workflow Paths", height=600)
             st.plotly_chart(fig, use_container_width=True)
-            
             st.divider()
             activity = moves.groupby([moves['dt'].dt.hour.rename('Hour'), 'device']).size().reset_index(name='count')
             fig_heat = px.density_heatmap(activity, x='Hour', y='device', z='count', nbinsx=24, color_continuous_scale='Viridis')
@@ -972,11 +987,7 @@ elif selected_page == "🛡️ Compliance":
             disc_df['abs_variance'] = disc_df['discrepancy_qty'].abs() * disc_df['cost_per_unit']
             total_loss = disc_df['abs_variance'].sum()
             c2.metric("Variance Value (Risk)", f"${total_loss:,.2f}")
-            st.dataframe(
-                disc_df[['dt', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason', 'cost_per_unit', 'abs_variance']],
-                use_container_width=True,
-                column_config={"abs_variance": st.column_config.NumberColumn("Risk Value", format="$%.2f")}
-            )
+            st.dataframe(disc_df[['dt', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason', 'cost_per_unit', 'abs_variance']], use_container_width=True, column_config={"abs_variance": st.column_config.NumberColumn("Risk Value", format="$%.2f")})
         else:
             st.success("✅ Zero discrepancies found!")
 
@@ -1011,7 +1022,6 @@ elif selected_page == "⚡ Efficiency":
 elif selected_page == "🔍 Session Explorer":
     st.header("🔍 Session Explorer")
     st.caption("Unified view of Pyxis and Pharmacy Workflow sessions.")
-
     if df_events.empty and df_pharm.empty:
         st.info("No data available.")
     else:
@@ -1020,7 +1030,6 @@ elif selected_page == "🔍 Session Explorer":
             px['source'] = 'Pyxis'
         else:
             px = pd.DataFrame(columns=['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk', 'source'])
-
         if not df_pharm.empty:
             ph = df_pharm[['user_name', 'dt', 'destination', 'priority', 'med_desc', 'qty', 'pk']].copy()
             ph.rename(columns={'priority': 'event_type', 'destination': 'target_dest'}, inplace=True)
@@ -1028,54 +1037,37 @@ elif selected_page == "🔍 Session Explorer":
             ph['source'] = 'Pharmacy'
         else:
             ph = pd.DataFrame(columns=['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk', 'source'])
-
         combined = pd.concat([px, ph], ignore_index=True)
         combined['dt'] = pd.to_datetime(combined['dt'])
         combined.sort_values(['user_name', 'dt'], inplace=True)
-        
         combined['prev_user'] = combined['user_name'].shift(1)
         combined['prev_device'] = combined['device'].shift(1)
         combined['prev_dt'] = combined['dt'].shift(1)
         combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
-        
-        combined['is_new_session'] = np.where(
-            (combined['user_name'] != combined['prev_user']) | 
-            (combined['device'] != combined['prev_device']) | 
-            (combined['gap'] > 1200), 1, 0
-        )
+        combined['is_new_session'] = np.where((combined['user_name'] != combined['prev_user']) | (combined['device'] != combined['prev_device']) | (combined['gap'] > 1200), 1, 0)
         combined['session_id'] = combined['is_new_session'].cumsum()
-
-        sessions = combined.groupby('session_id').agg({
-            'user_name': 'first', 'device': 'first', 'source': 'first',
-            'dt': ['min', 'max'], 'pk': 'count'
-        }).reset_index()
+        sessions = combined.groupby('session_id').agg({'user_name': 'first', 'device': 'first', 'source': 'first', 'dt': ['min', 'max'], 'pk': 'count'}).reset_index()
         sessions.columns = ['session_id', 'User', 'Device', 'Source', 'Start', 'End', 'Tx Count']
-        
         sessions['Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
         sessions['Duration'] = np.where(sessions['Duration'] < 10, 30, sessions['Duration'])
-        
         sessions = sessions.sort_values(['User', 'Start'])
         sessions['Next Start'] = sessions.groupby('User')['Start'].shift(-1)
         sessions['Walk Time'] = (sessions['Next Start'] - sessions['End']).dt.total_seconds()
-        
         c1, c2, c3 = st.columns(3)
         all_users = sorted(sessions['User'].dropna().unique())
         sel_u = c1.multiselect("Filter User", all_users, key="u_sess_uni")
         min_dur = c2.number_input("Min Duration (sec)", 0, 3600, 0)
         sel_source = c3.multiselect("Filter Source", ["Pyxis", "Pharmacy"], default=["Pyxis", "Pharmacy"])
-        
         view = sessions.copy()
         if sel_u: view = view[view['User'].isin(sel_u)]
         if min_dur: view = view[view['Duration'] >= min_dur]
         if sel_source: view = view[view['Source'].isin(sel_source)]
-        
         if len(sel_u) == 1:
             st.divider()
             total_active = view['Duration'].sum()
             pyxis_time = view[view['Source'] == 'Pyxis']['Duration'].sum()
             pharm_time = view[view['Source'] == 'Pharmacy']['Duration'].sum()
             top_device = view['Device'].mode()[0] if not view.empty else "N/A"
-            
             st.subheader(f"🧠 Shift Analysis: {sel_u[0].title()}")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Total Active Time", seconds_to_mmss(total_active))
@@ -1083,32 +1075,20 @@ elif selected_page == "🔍 Session Explorer":
             k3.metric("Pharmacy Time", seconds_to_mmss(pharm_time))
             k4.metric("Most Visited", top_device)
             st.divider()
-
         disp = view.copy().reset_index(drop=True)
         disp['Duration_Str'] = disp['Duration'].apply(seconds_to_mmss)
         disp['Walk Time'] = disp['Walk Time'].apply(seconds_to_mmss)
         disp['Start'] = disp['Start'].dt.strftime('%H:%M:%S')
         disp['End'] = disp['End'].dt.strftime('%H:%M:%S')
-        
         st.caption("👆 Click a row to see the exact transactions.")
-        event = st.dataframe(
-            disp[['session_id', 'User', 'Source', 'Device', 'Start', 'End', 'Tx Count', 'Duration_Str', 'Walk Time']],
-            use_container_width=True,
-            on_select="rerun", selection_mode="single-row", hide_index=True,
-            column_config={"Duration_Str": "Duration"}
-        )
-        
+        event = st.dataframe(disp[['session_id', 'User', 'Source', 'Device', 'Start', 'End', 'Tx Count', 'Duration_Str', 'Walk Time']], use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True, column_config={"Duration_Str": "Duration"})
         if len(event.selection.rows) > 0:
             idx = event.selection.rows[0]
             sel_id = disp.iloc[idx]['session_id']
             details = combined[combined['session_id'] == sel_id].sort_values('dt').copy()
             st.divider()
             st.subheader(f"🔬 Timeline: {details['device'].iloc[0]}")
-            st.dataframe(
-                details[['dt', 'source', 'event_type', 'med_desc', 'qty']],
-                use_container_width=True,
-                column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")}
-            )
+            st.dataframe(details[['dt', 'source', 'event_type', 'med_desc', 'qty']], use_container_width=True, column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")})
 
 # 9. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
@@ -1117,29 +1097,19 @@ elif selected_page == "🏥 Pharmacy Workflow":
         c_filter1, c_filter2 = st.columns(2)
         priorities = sorted(df_pharm['priority'].dropna().unique())
         sel_prio = c_filter1.multiselect("Filter Transaction Type (Priority)", priorities)
-        
         view_pharm = df_pharm.copy()
         if sel_prio: view_pharm = view_pharm[view_pharm['priority'].isin(sel_prio)]
-            
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Orders", len(view_pharm))
         c2.metric("Critical/STAT", len(view_pharm[view_pharm['priority'].str.contains('STAT|Critical', case=False, na=False)]))
         top_dest = view_pharm['destination'].mode()[0] if not view_pharm['destination'].empty else "N/A"
         c3.metric("Top Destination", top_dest)
-        
         st.dataframe(view_pharm, use_container_width=True)
-        
         st.divider()
         st.subheader("💡 Par Level Recommendations")
         stockout_only = df_pharm[df_pharm['priority'].str.contains(r'Stock\s*Out|Stockout', case=False, na=False)].copy()
-        
         if not stockout_only.empty:
-            stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(
-                med_desc=('med_desc', 'first'),
-                Stockout_Count=('pk', 'count'),
-                Avg_Stockout_Req=('qty', 'mean'),
-            ).reset_index().rename(columns={'destination': 'device'})
-
+            stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(med_desc=('med_desc', 'first'), Stockout_Count=('pk', 'count'), Avg_Stockout_Req=('qty', 'mean')).reset_index().rename(columns={'destination': 'device'})
             if not df_events.empty:
                 is_refill = df_events['event_type'].astype(str).str.contains(r'REFILL|LOAD|STOCK|ADD', case=False, na=False)
                 refill_stats = df_events[is_refill].groupby(['device', 'med_id'])['qty'].mean().reset_index(name='Avg_Refill_Qty')
@@ -1147,12 +1117,10 @@ elif selected_page == "🏥 Pharmacy Workflow":
             else:
                 recs = stockout_agg.copy()
                 recs['Avg_Refill_Qty'] = 0
-
             recs['Avg_Refill_Qty'] = recs['Avg_Refill_Qty'].fillna(0)
             base_capacity = np.where(recs['Avg_Refill_Qty'] > 0, recs['Avg_Refill_Qty'], recs['Avg_Stockout_Req'])
             recs['Suggested Min'] = np.clip(np.ceil(base_capacity * 1.5), 1, None)
             recs['Suggested Max'] = np.ceil(recs['Suggested Min'] * 2.5)
-            
             st.dataframe(recs[['device', 'med_desc', 'Stockout_Count', 'Suggested Min', 'Suggested Max']], use_container_width=True)
         else:
             st.success("No Stockouts found! Par levels look good.")
@@ -1161,163 +1129,78 @@ elif selected_page == "🏥 Pharmacy Workflow":
 elif selected_page == "🔄 Return Reconciliation":
     st.markdown("### 🔄 Unload vs. Return Reconciliation")
     filter_narc = st.checkbox("Exclude Controlled Substances", value=True)
-    
     if not df_events.empty and not df_pharm.empty:
-        # 1. Filter Floor Data (Pyxis) - Get Unloads and Empty Returns
         raw_unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
-        
-        # 2. Filter Pharmacy Data (Workflow) - Get Returns
         raw_returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
-        
-        # Optional: Exclude Narcs
         if filter_narc:
             pat = '|'.join(NARC_TERMS)
             raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
             raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
-            
-        # 3. Prepare for Aggregation
         raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
         raw_unloads['Date'] = raw_unloads['dt'].dt.date
-        
         raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
         raw_returns['Date'] = raw_returns['dt'].dt.date
-
-        # 4. Aggregate Floor Data
-        grp_unload = raw_unloads.groupby(['Date', 'norm_med_id']).agg({
-            'qty': 'sum', 
-            'med_desc': 'first',
-            'event_type': lambda x: ", ".join(sorted(x.astype(str).unique())) 
-        }).reset_index()
-        
-        # 5. Aggregate Pharmacy Data
-        grp_return = raw_returns.groupby(['Date', 'norm_med_id']).agg({
-            'qty': 'sum',
-            'med_desc': 'first'
-        }).reset_index()
-        
-        # 6. Merge Data
+        grp_unload = raw_unloads.groupby(['Date', 'norm_med_id']).agg({'qty': 'sum', 'med_desc': 'first', 'event_type': lambda x: ", ".join(sorted(x.astype(str).unique()))}).reset_index()
+        grp_return = raw_returns.groupby(['Date', 'norm_med_id']).agg({'qty': 'sum', 'med_desc': 'first'}).reset_index()
         merged = pd.merge(grp_unload, grp_return, on=['Date', 'norm_med_id'], how='outer', suffixes=('_floor', '_pharm'))
-        
-        # Handle Missing Data
         merged['med_desc'] = merged['med_desc_floor'].fillna(merged['med_desc_pharm']).fillna("Unknown Med")
         merged['qty_floor'] = merged['qty_floor'].fillna(0)
         merged['qty_pharm'] = merged['qty_pharm'].fillna(0)
         merged['event_type'] = merged['event_type'].fillna("Manual Pharm Return")
-        
-        # Calculate Variance and Status
         merged['Variance'] = merged['qty_pharm'] - merged['qty_floor']
         merged['Status'] = np.where(merged['Variance'] == 0, "✅ Matched", "❌ Variance")
+        merged.rename(columns={'event_type': 'Floor Action', 'qty_floor': 'Qty Unloaded', 'qty_pharm': 'Qty Returned'}, inplace=True)
         
-        # Rename for display
-        merged.rename(columns={
-            'event_type': 'Floor Action',
-            'qty_floor': 'Qty Unloaded',
-            'qty_pharm': 'Qty Returned'
-        }, inplace=True)
-
-        # --- DASHBOARD METRICS ---
         total_items = len(merged)
         matched_items = len(merged[merged['Variance'] == 0])
         match_rate = (matched_items / total_items * 100) if total_items > 0 else 0
-        
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Match Rate", f"{match_rate:.1f}%")
         c2.metric("Total Items", total_items)
         c3.metric("Discrepancies", total_items - matched_items, delta_color="inverse")
         c4.metric("Net Variance", f"{merged['Variance'].sum():.0f}")
         
-        # --- DAILY TREND CHART ---
         daily = merged.groupby(['Date', 'Status']).size().unstack(fill_value=0)
-        # Ensure columns exist even if data is missing
         for col in ["✅ Matched", "❌ Variance"]:
             if col not in daily.columns: daily[col] = 0
-            
         fig = go.Figure()
         fig.add_trace(go.Bar(x=daily.index, y=daily['✅ Matched'], name='Matched', marker_color='#4CAF50'))
         fig.add_trace(go.Bar(x=daily.index, y=daily['❌ Variance'], name='Variance', marker_color='#F44336'))
         fig.update_layout(barmode='stack', title="Daily Reconciliation Performance", height=300, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig, use_container_width=True)
         
-        # --- TABLE & FILTERS ---
         st.divider()
         show_all = st.checkbox("Show Matched Rows (Variance = 0)", value=False)
-        
         display_df = merged.copy()
         if not show_all:
             display_df = display_df[display_df['Variance'] != 0]
-            
         cols_display = ['Status', 'Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
-        
         st.caption("👆 Click a row to drill down into specific timestamps.")
-        event = st.dataframe(
-            display_df[cols_display].sort_values(['Date', 'Variance']), 
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            hide_index=True,
-            column_config={
-                "Date": st.column_config.DateColumn("Date"),
-                "Variance": st.column_config.NumberColumn("Variance", format="%.0f")
-            }
-        )
+        event = st.dataframe(display_df[cols_display].sort_values(['Date', 'Variance']), use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True, column_config={"Date": st.column_config.DateColumn("Date"), "Variance": st.column_config.NumberColumn("Variance", format="%.0f")})
         
-        # --- DRILL DOWN LOGIC ---
         if len(event.selection.rows) > 0:
             selected_index = event.selection.rows[0]
             row = display_df.iloc[selected_index]
-            
             sel_date = row['Date']
             sel_med_id = row['norm_med_id'] 
             sel_med_desc = row['med_desc']
-            
             st.divider()
             st.subheader(f"🔎 Audit Trail: {sel_med_desc}")
-            
             c1, c2 = st.columns(2)
-            
-            # Left: Pyxis Details
             with c1:
                 st.markdown("#### 🏥 Floor (Pyxis)")
-                floor_details = raw_unloads[
-                    (raw_unloads['Date'] == sel_date) & 
-                    (raw_unloads['norm_med_id'] == sel_med_id)
-                ].sort_values('dt')
-                
+                floor_details = raw_unloads[(raw_unloads['Date'] == sel_date) & (raw_unloads['norm_med_id'] == sel_med_id)].sort_values('dt')
                 if not floor_details.empty:
-                    st.dataframe(
-                        floor_details[['dt', 'device', 'user_name', 'qty', 'event_type']],
-                        use_container_width=True,
-                        column_config={
-                            "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
-                            "qty": st.column_config.NumberColumn("Qty", format="%.0f")
-                        },
-                        hide_index=True
-                    )
+                    st.dataframe(floor_details[['dt', 'device', 'user_name', 'qty', 'event_type']], use_container_width=True, column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"), "qty": st.column_config.NumberColumn("Qty", format="%.0f")}, hide_index=True)
                 else:
                     st.info("No Pyxis records found.")
-
-            # Right: Pharmacy Details
             with c2:
                 st.markdown("#### 💊 Pharmacy (Carousel/Packager)")
-                pharm_details = raw_returns[
-                    (raw_returns['Date'] == sel_date) & 
-                    (raw_returns['norm_med_id'] == sel_med_id)
-                ].sort_values('dt')
-                
+                pharm_details = raw_returns[(raw_returns['Date'] == sel_date) & (raw_returns['norm_med_id'] == sel_med_id)].sort_values('dt')
                 if not pharm_details.empty:
-                    st.dataframe(
-                        pharm_details[['dt', 'destination', 'user_name', 'qty']],
-                        use_container_width=True,
-                        column_config={
-                            "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
-                            "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
-                            "destination": "Location"
-                        },
-                        hide_index=True
-                    )
+                    st.dataframe(pharm_details[['dt', 'destination', 'user_name', 'qty']], use_container_width=True, column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"), "qty": st.column_config.NumberColumn("Qty", format="%.0f"), "destination": "Location"}, hide_index=True)
                 else:
                     st.info("No Pharmacy scan records found.")
-                    
     else:
         st.info("Need both Pyxis Transaction Reports and Pharmacy Workflow Reports to perform reconciliation.")
 
@@ -1329,7 +1212,6 @@ elif selected_page == "⚖️ Tech Comparison":
         c1, c2 = st.columns(2)
         u1 = c1.selectbox("User A", users, key="u1")
         u2 = c2.selectbox("User B", users, index=1 if len(users)>1 else 0, key="u2")
-        
         def get_metrics(user):
             sub = df_events[df_events['user_name'] == user]
             if sub.empty: return 0, 0, 0
@@ -1339,10 +1221,8 @@ elif selected_page == "⚖️ Tech Comparison":
             hours = (sub['dt'].max() - sub['dt'].min()).total_seconds() / 3600
             rate = tx_count / max(hours, 0.5) 
             return tx_count, avg_speed, rate
-            
         m_a = get_metrics(u1)
         m_b = get_metrics(u2)
-        
         col_a, col_b = st.columns(2)
         with col_a:
             st.subheader(u1)
@@ -1373,11 +1253,9 @@ elif selected_page == "📅 Attendance":
     if not df_sched.empty and not df_events.empty:
         df_events['match_key'] = df_events['user_name'].apply(normalize_name)
         df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
-        
         worked = df_events.groupby([df_events['dt'].dt.date.rename('date_obj'), 'match_key']).size().reset_index(name='tx_count')
         df_sched['date_obj'] = df_sched['dt'].dt.date
         merged = pd.merge(df_sched, worked, on=['date_obj', 'match_key'], how='outer')
-        
         def get_status(row):
             shift = str(row['shift_type']).upper()
             tx = row['tx_count'] if pd.notnull(row['tx_count']) else 0
@@ -1385,12 +1263,6 @@ elif selected_page == "📅 Attendance":
             if tx > 0: return "✅ Present"
             if pd.notna(row['shift_type']): return "❌ No Show / No Login"
             return "➕ Unscheduled"
-
         merged['Status'] = merged.apply(get_status, axis=1)
         merged = merged[~merged['staff_name'].fillna('Unknown').str.lower().isin(ADMIN_USERS)]
-        
-        st.dataframe(
-            merged[['date_obj', 'staff_name', 'shift_type', 'Status']].sort_values('date_obj', ascending=False),
-            use_container_width=True,
-            column_config={"date_obj": st.column_config.DateColumn("Date")}
-        )
+        st.dataframe(merged[['date_obj', 'staff_name', 'shift_type', 'Status']].sort_values('date_obj', ascending=False), use_container_width=True, column_config={"date_obj": st.column_config.DateColumn("Date")})
