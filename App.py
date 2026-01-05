@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.8 - Student Project Tracker)
-# Architecture: Quad-Table Strategy + Attendance Tracking
+# RXTRACK: EXECUTIVE DASHBOARD (v12.9 - Price Integration)
+# Architecture: Quad-Table Strategy + Attendance + Pricing
 # Updates:
-#   1. Added '🎓 Student Project' tab.
-#   2. Calculates Cost Savings/Value of mass unloads.
-#   3. Retains all previous fixes and database tools.
+#   1. Added 'Inventory Audit' table and upload logic.
+#   2. Parses UnitCost (removes '$') to enable financial metrics.
+#   3. Retains all previous tabs and fixes.
 ###############################################################
 
 import streamlit as st
@@ -154,6 +154,10 @@ def init_db():
         );""",
         """CREATE TABLE IF NOT EXISTS attendance_punches (
             pk TEXT PRIMARY KEY, raw_name TEXT, dt_date DATE, start_dt TIMESTAMP, end_dt TIMESTAMP
+        );""",
+        """CREATE TABLE IF NOT EXISTS inventory_audit (
+            pk TEXT PRIMARY KEY, med_id TEXT, med_desc TEXT, med_class TEXT, 
+            unit_cost FLOAT, qty_on_hand FLOAT, min_lvl FLOAT, max_lvl FLOAT
         );"""
     ]
     with db_cursor() as (conn, cur):
@@ -335,10 +339,6 @@ def clean_pharmacy_report(df):
     return df[["pk", "queue_id", "priority", "dt", "med_id", "med_desc", "destination", "user_name", "qty"]]
 
 def clean_schedule_data(df):
-    """
-    Cleans schedule data. 
-    IMPROVED: Handles cells with multiple names and specific time overrides (e.g. "Ali (1000-1830)").
-    """
     df = df.copy()
     if len(df.columns) > 2:
         df.rename(columns={df.columns[1]: 'Date', df.columns[2]: 'Day'}, inplace=True)
@@ -346,22 +346,18 @@ def clean_schedule_data(df):
     df = df.iloc[1:].dropna(subset=['Date'])
     df.drop(columns=[df.columns[0]], errors='ignore', inplace=True)
     
-    # Melt to long format
     long_df = df.melt(id_vars=['Date', 'Day'], var_name='col_header', value_name='raw_entry')
     long_df.dropna(subset=['raw_entry'], inplace=True)
     long_df = long_df[~long_df['raw_entry'].astype(str).str.lower().isin(['x', 'nan', '', ' '])]
     
     processed_rows = []
-    
     for _, row in long_df.iterrows():
         raw = str(row['raw_entry']).strip()
         header = str(row['col_header']).strip()
         dt = pd.to_datetime(row['Date'], errors='coerce').date()
         day_name = row['Day']
         
-        # 1. SPLIT LOGIC: Handle multiple people in one cell
         if re.search(r'\(\d', raw): 
-            # Example: "Ali (1000) Melissa (1200)"
             parts = [p.strip() + ')' for p in raw.split(')') if '(' in p]
         else:
             parts = [p.strip() for p in raw.split('\n') if p.strip()]
@@ -369,19 +365,18 @@ def clean_schedule_data(df):
         for part in parts:
             if not part or part == ')': continue
             
-            # 2. TIME EXTRACTION (Override)
             override_time = None
-            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part) # 1000-1830
+            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part)
             if m_range:
                 override_time = m_range.group(1)
                 clean_part = part.replace(m_range.group(0), '')
             else:
-                m_single = re.search(r'\((\d{4})\)', part) # (1000)
+                m_single = re.search(r'\((\d{4})\)', part)
                 if m_single:
                     override_time = m_single.group(1)
                     clean_part = part.replace(m_single.group(0), '')
                 else:
-                    m_short = re.search(r'\((\d{1,2})\s*-\s*\d{1,2}\)', part) # (10-6)
+                    m_short = re.search(r'\((\d{1,2})\s*-\s*\d{1,2}\)', part)
                     if m_short:
                         override_time = m_short.group(1)
                         clean_part = part.replace(m_short.group(0), '')
@@ -391,7 +386,6 @@ def clean_schedule_data(df):
             clean_part = clean_part.replace('()', '').strip()
             if clean_part.endswith(','): clean_part = clean_part[:-1]
             
-            # 3. META DATA
             assignment_type = "Shift"
             note = ""
             lower_part = clean_part.lower()
@@ -402,10 +396,8 @@ def clean_schedule_data(df):
             elif any(x in lower_part for x in ['pto', 'off', 'sick']):
                 assignment_type = "PTO"
             
-            # Determine Final Shift String (Override takes precedence)
             final_shift_str = override_time if override_time else header
             
-            # Generate PK manually to avoid applying row lambda
             row_str = f"{dt}|{clean_part}|{final_shift_str}"
             pk = hashlib.sha256(row_str.encode()).hexdigest()
             
@@ -414,7 +406,7 @@ def clean_schedule_data(df):
                 'dt': dt,
                 'day_name': day_name,
                 'staff_name': clean_part.title(),
-                'shift_type': final_shift_str, # Used for time parsing
+                'shift_type': final_shift_str,
                 'assignment_type': assignment_type,
                 'raw_entry': part,
                 'note': note
@@ -423,31 +415,23 @@ def clean_schedule_data(df):
     return pd.DataFrame(processed_rows)
 
 def clean_attendance_file(file_obj):
-    """Parses the specific Attendance Tracking CSV report format."""
     file_obj.seek(0)
     content = file_obj.read().decode('utf-8', errors='ignore')
     lines = content.splitlines()
-    
     data = []
-    
     name_pat = re.compile(r'Employee:\s*([A-Za-z\-,\s\.]+?)(?="|",|",Date)')
     date_pat = re.compile(r'Date:\s*(\d{1,2}/\d{1,2}/\d{4})')
     time_pat = re.compile(r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2})')
 
     for line in lines:
-        if "Employee:" not in line or "Date:" not in line:
-            continue
-            
+        if "Employee:" not in line or "Date:" not in line: continue
         m_name = name_pat.search(line)
         name = m_name.group(1).strip() if m_name else None
-        
         m_date = date_pat.search(line)
         date_str = m_date.group(1) if m_date else None
-        
         times = time_pat.findall(line)
         start_time = times[0] if len(times) > 0 else None
         end_time = times[1] if len(times) > 1 else None
-        
         if name and date_str and start_time:
             data.append({
                 "raw_name": name,
@@ -455,11 +439,35 @@ def clean_attendance_file(file_obj):
                 "start_dt": start_time,
                 "end_dt": end_time
             })
-            
     df = pd.DataFrame(data)
-    if not df.empty:
-        df["pk"] = df.apply(generate_pk, axis=1)
+    if not df.empty: df["pk"] = df.apply(generate_pk, axis=1)
     return df
+
+def clean_inventory_file(df):
+    """Cleans Inventory Audit CSV (Prices)."""
+    df = df.copy()
+    colmap = {
+        "MedID": "med_id", "MedDescription": "med_desc", "MedClass": "med_class",
+        "UnitCost": "unit_cost", "CurrentCount": "qty_on_hand",
+        "CurrentMin": "min_lvl", "CurrentMax": "max_lvl"
+    }
+    df.rename(columns=colmap, inplace=True)
+    
+    # Required Cols
+    for c in ["med_id", "med_desc", "unit_cost", "qty_on_hand", "min_lvl", "max_lvl"]:
+        if c not in df.columns: df[c] = None
+        
+    # Clean Price Column (Remove $)
+    if df['unit_cost'].dtype == object:
+        df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
+    
+    df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
+    df['qty_on_hand'] = pd.to_numeric(df['qty_on_hand'], errors='coerce').fillna(0)
+    
+    # Generate PK
+    df['pk'] = df.apply(lambda x: str(x['med_id']), axis=1) # Simple PK for this ref table
+    
+    return df[['pk', 'med_id', 'med_desc', 'med_class', 'unit_cost', 'qty_on_hand', 'min_lvl', 'max_lvl']]
 
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
@@ -585,7 +593,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12.8")
+    st.title("RxTrack v12.9")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -643,7 +651,7 @@ with st.sidebar:
     st.subheader("📤 Ingest Data")
     u_type = st.selectbox("File Type:", [
         "Daily Transaction Report", "Device Activity Log (Pends)", 
-        "Financial Price List", "Pharmacy Workflow Report", 
+        "Inventory Audit (Prices)", "Pharmacy Workflow Report", 
         "Staff Schedule", "Attendance Tracking"
     ])
     uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
@@ -687,7 +695,7 @@ with st.sidebar:
                     s = str(row.values).lower()
                     if u_type == "Daily Transaction Report" and "username" in s and "device" in s: header_idx = idx; break
                     if u_type == "Device Activity Log (Pends)" and "affectedelement" in s: header_idx = idx; break
-                    if u_type == "Financial Price List" and "cost" in s: header_idx = idx; break
+                    if u_type == "Inventory Audit (Prices)" and "unitcost" in s: header_idx = idx; break
                     if u_type == "Pharmacy Workflow Report" and "tranqueueid" in s: header_idx = idx; break
                 
                 if header_idx is None:
@@ -711,6 +719,17 @@ with st.sidebar:
                         clean = clean_activity_log(raw)
                         sql = "INSERT INTO config_events (pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard) VALUES (%(pk)s, %(dt)s, %(user_name)s, %(device)s, %(med_id)s, %(location)s, %(action_type)s, %(activity_category)s, %(min_qty)s, %(max_qty)s, %(is_standard)s) ON CONFLICT (pk) DO NOTHING;"
                         execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Config")
+                    elif u_type == "Inventory Audit (Prices)":
+                        clean = clean_inventory_file(raw)
+                        # 1. Update Full Audit Table
+                        sql_audit = "INSERT INTO inventory_audit (pk, med_id, med_desc, med_class, unit_cost, qty_on_hand, min_lvl, max_lvl) VALUES (%(pk)s, %(med_id)s, %(med_desc)s, %(med_class)s, %(unit_cost)s, %(qty_on_hand)s, %(min_lvl)s, %(max_lvl)s) ON CONFLICT (pk) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, qty_on_hand = EXCLUDED.qty_on_hand;"
+                        execute_statement(sql_audit, clean.to_dict("records"), batch=True, table_name="Inventory Audit")
+                        
+                        # 2. Sync to Med Costs (for calculations)
+                        cost_data = clean[['med_id', 'unit_cost']].rename(columns={'unit_cost': 'cost_per_unit'})
+                        sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
+                        execute_statement(sql_costs, cost_data.to_dict("records"), batch=True, table_name="Cost List")
+                        
                     elif u_type == "Pharmacy Workflow Report":
                         clean = clean_pharmacy_report(raw)
                         sql = "INSERT INTO pharmacy_orders (pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty) VALUES (%(pk)s, %(queue_id)s, %(priority)s, %(dt)s, %(med_id)s, %(med_desc)s, %(destination)s, %(user_name)s, %(qty)s) ON CONFLICT (pk) DO NOTHING;"
