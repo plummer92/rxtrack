@@ -831,12 +831,25 @@ elif selected_page == "🎓 Student Project":
         default_actions = [x for x in all_actions if "UNLOAD" in x.upper() or "EMPTY" in x.upper()]
         selected_actions = st.multiselect("Select Actions", all_actions, default=default_actions)
         
-        # 3. Smart Logic Settings
-        with st.expander("⚙️ Logic Settings (Inhaler Adjustment)", expanded=True):
-            adjust_inhalers = st.checkbox("Smart Adjust for Inhalers (Puffs vs Units)", value=True, 
-                help="If checked, items described as 'puff' or 'HFA' will have their quantity divided to reflect units instead of doses.")
-            puffs_per_unit = st.number_input("Est. Puffs per Inhaler (Divisor)", value=120, min_value=1, 
-                help="Standard number of doses to divide by (e.g. 120 or 200).")
+        # --- SMART LOGIC SETTINGS ---
+        st.divider()
+        st.markdown("#### 🧠 Smart Logic Settings")
+        c_set1, c_set2 = st.columns(2)
+        
+        with c_set1:
+            st.markdown("**1. Inhaler Adjustment (Qty Fix)**")
+            adjust_inhalers = st.checkbox("➗ Adjust Inhaler Quantities", value=True, 
+                help="Divides quantity by 'Puffs' for items marked as HFA/Puff/Inhaler.")
+            puffs_per_unit = st.number_input("Est. Puffs per Inhaler", value=120, min_value=1)
+
+        with c_set2:
+            st.markdown("**2. Bulk Pack Adjustment (Price Fix)**")
+            adjust_bulk = st.checkbox("💲 Adjust High-Cost Orals (Bulk Price)", value=True,
+                help="If a Tablet/Capsule costs more than the threshold, assume it's a pack price and divide it.")
+            cost_threshold = st.number_input("Max Reasonable Pill Cost ($)", value=10.0, min_value=1.0, step=1.0,
+                help="Any tablet costing MORE than this will be treated as a bulk pack.")
+            pack_divisor = st.number_input("Est. Pack Size (Divisor)", value=100, min_value=1,
+                help="Divide the high price by this number (e.g. $80 / 100 = $0.80/pill).")
 
         if selected_students and selected_actions:
             # 4. Filter Data
@@ -846,45 +859,57 @@ elif selected_page == "🎓 Student Project":
             ].copy()
             
             if not project_df.empty:
-                # 5. Apply Smart Logic
-                # Identify Inhaler Rows based on keywords
+                # --- APPLY SMART LOGIC ---
+                
+                # A. QUANTITY ADJUSTMENT (Inhalers)
                 inhaler_mask = project_df['med_desc'].str.contains(r'puff|hfa|inhaler|actuation', case=False, na=False)
                 
-                # Calculate Adjusted Quantity
-                # If it's an inhaler AND the qty is > 5 (assuming nobody unloads 5 full inhalers instantly vs 5 puffs), apply divisor
                 if adjust_inhalers:
                     project_df['Adj_Qty'] = np.where(
                         (inhaler_mask) & (project_df['qty'] > 5), 
                         project_df['qty'] / puffs_per_unit, 
                         project_df['qty']
                     )
-                    project_df['Calculation Note'] = np.where(
-                        (inhaler_mask) & (project_df['qty'] > 5), 
-                        f"Adj (Qty/{puffs_per_unit})", 
-                        "Standard"
+                    project_df['Qty_Note'] = np.where(
+                        (inhaler_mask) & (project_df['qty'] > 5), "Adj (Inhaler)", "Raw"
                     )
                 else:
                     project_df['Adj_Qty'] = project_df['qty']
-                    project_df['Calculation Note'] = "Raw"
+                    project_df['Qty_Note'] = "Raw"
 
-                # Calculate Financials
-                project_df['Total Value'] = project_df['Adj_Qty'] * project_df['cost_per_unit']
+                # B. COST ADJUSTMENT (Bulk Packs)
+                # Logic: If description has 'tab' or 'cap' AND Cost > Threshold -> Divide Cost
+                oral_mask = project_df['med_desc'].str.contains(r'tab|cap', case=False, na=False)
+                high_cost_mask = project_df['cost_per_unit'] > cost_threshold
                 
-                total_qty_raw = project_df['qty'].sum()
-                total_units_adj = project_df['Adj_Qty'].sum()
+                if adjust_bulk:
+                    project_df['Adj_Cost'] = np.where(
+                        (oral_mask) & (high_cost_mask),
+                        project_df['cost_per_unit'] / pack_divisor,
+                        project_df['cost_per_unit']
+                    )
+                    project_df['Cost_Note'] = np.where(
+                        (oral_mask) & (high_cost_mask), f"Adj (Bulk/{pack_divisor})", "Raw"
+                    )
+                else:
+                    project_df['Adj_Cost'] = project_df['cost_per_unit']
+                    project_df['Cost_Note'] = "Raw"
+
+                # C. FINAL CALCULATION
+                project_df['Total Value'] = project_df['Adj_Qty'] * project_df['Adj_Cost']
+                
+                # --- METRICS ---
+                total_qty_adj = project_df['Adj_Qty'].sum()
                 total_value = project_df['Total Value'].sum()
                 
-                # 6. Metrics
                 st.divider()
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Total Items (Adj. Units)", f"{total_units_adj:,.1f}", help=f"Raw Count: {total_qty_raw:,.0f}")
+                c1.metric("Total Items (Adj)", f"{total_qty_adj:,.1f}")
                 c2.metric("Total Value Saved", f"${total_value:,.2f}")
                 c3.metric("Transactions", len(project_df))
-                st.divider()
                 
-                # 7. Visuals
+                # --- VISUALS ---
                 c_chart1, c_chart2 = st.columns(2)
-                
                 with c_chart1:
                     st.subheader("🏆 Value by Student")
                     student_stats = project_df.groupby('user_name')['Total Value'].sum().reset_index()
@@ -898,46 +923,51 @@ elif selected_page == "🎓 Student Project":
                     fig2.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig2, use_container_width=True)
                 
-                # 8. Detailed Table
+                # --- DETAILED TABLE ---
                 st.subheader("📋 Transaction Details")
-                st.caption("See 'Calculation Note' to identify where Inhaler logic was applied.")
+                st.caption("Check 'Notes' columns to see where smart logic changed the values.")
                 
-                # Filter cols
-                cols_to_show = ['dt', 'user_name', 'device', 'med_desc', 'qty', 'Adj_Qty', 'cost_per_unit', 'Total Value', 'Calculation Note']
+                cols_to_show = ['dt', 'user_name', 'device', 'med_desc', 'qty', 'Adj_Qty', 'cost_per_unit', 'Adj_Cost', 'Total Value', 'Qty_Note', 'Cost_Note']
                 
                 st.dataframe(
                     project_df[cols_to_show].sort_values('Total Value', ascending=False),
                     use_container_width=True,
                     column_config={
                         "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm"),
-                        "qty": st.column_config.NumberColumn("Raw Qty", format="%.0f"),
-                        "Adj_Qty": st.column_config.NumberColumn("Adj Units", format="%.1f"),
-                        "cost_per_unit": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                        "qty": st.column_config.NumberColumn("Qty (Raw)", format="%.0f"),
+                        "Adj_Qty": st.column_config.NumberColumn("Qty (Adj)", format="%.1f"),
+                        "cost_per_unit": st.column_config.NumberColumn("Cost (Raw)", format="$%.2f"),
+                        "Adj_Cost": st.column_config.NumberColumn("Cost (Adj)", format="$%.2f"),
                         "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
                     }
                 )
 
-                # --- MISSING PRICES REPORT ---
-                missing_costs = project_df[project_df['cost_per_unit'] == 0].copy()
+                # --- ALERTS ---
+                # 1. Missing Prices
+                missing_costs = project_df[project_df['Adj_Cost'] == 0].copy()
                 if not missing_costs.empty:
                     st.divider()
-                    st.warning(f"⚠️ Found {len(missing_costs)} transactions with $0.00 cost. These are excluded from the total value.")
-                    
-                    missing_summary = missing_costs.groupby(['med_id', 'med_desc']).agg(
-                        Count=('qty', 'count'),
-                        Total_Qty=('qty', 'sum')
-                    ).reset_index()
-                    
-                    st.markdown("**Action Required:** Update prices for these items in your Inventory Audit file to get an accurate total.")
-                    st.dataframe(missing_summary, use_container_width=True)
+                    with st.expander(f"⚠️ Missing Prices ({len(missing_costs)} items)", expanded=False):
+                        st.warning("These items have $0.00 cost and are NOT included in the total.")
+                        st.dataframe(missing_costs[['med_id', 'med_desc', 'qty']].groupby(['med_id', 'med_desc']).sum(), use_container_width=True)
+
+                # 2. Logic Audit (Show what got adjusted)
+                adjusted_items = project_df[
+                    (project_df['Qty_Note'] != 'Raw') | (project_df['Cost_Note'] != 'Raw')
+                ].copy()
+                
+                if not adjusted_items.empty:
+                    with st.expander(f"🛠️ Logic Audit: Adjusted Items ({len(adjusted_items)} items)", expanded=False):
+                        st.info("These items had their Quantity or Cost adjusted by the Smart Logic.")
+                        st.dataframe(
+                            adjusted_items[['med_desc', 'qty', 'Adj_Qty', 'cost_per_unit', 'Adj_Cost', 'Qty_Note', 'Cost_Note']], 
+                            use_container_width=True
+                        )
 
             else:
                 st.warning("No transactions found for these students with the selected actions.")
         else:
             st.info("Please select at least one student and one action to begin.")
-    else:
-        st.warning("Please upload a Daily Transaction Report to use this feature.")
-
 # 14. SHIFT LEADERBOARD
 elif selected_page == "🏆 Shift Leaderboard":
     st.header("🏆 Shift Performance Leaderboard")
