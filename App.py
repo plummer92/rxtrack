@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v12.9 - Price Integration)
+# RXTRACK: EXECUTIVE DASHBOARD (v13.0 - Missing Price Report)
 # Architecture: Quad-Table Strategy + Attendance + Pricing
 # Updates:
-#   1. Added 'Inventory Audit' table and upload logic.
-#   2. Parses UnitCost (removes '$') to enable financial metrics.
-#   3. Retains all previous tabs and fixes.
+#   1. Added 'Missing Prices' table to Student Project tab.
+#   2. Helps identify items with $0.00 cost to fix totals.
+#   3. Retains all previous functionality.
 ###############################################################
 
 import streamlit as st
@@ -444,7 +444,6 @@ def clean_attendance_file(file_obj):
     return df
 
 def clean_inventory_file(df):
-    """Cleans Inventory Audit CSV (Prices)."""
     df = df.copy()
     colmap = {
         "MedID": "med_id", "MedDescription": "med_desc", "MedClass": "med_class",
@@ -453,26 +452,21 @@ def clean_inventory_file(df):
     }
     df.rename(columns=colmap, inplace=True)
     
-    # Required Cols
     for c in ["med_id", "med_desc", "unit_cost", "qty_on_hand", "min_lvl", "max_lvl"]:
         if c not in df.columns: df[c] = None
         
-    # Clean Price Column (Remove $)
     if df['unit_cost'].dtype == object:
         df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
     
     df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
     df['qty_on_hand'] = pd.to_numeric(df['qty_on_hand'], errors='coerce').fillna(0)
     
-    # Generate PK
-    df['pk'] = df.apply(lambda x: str(x['med_id']), axis=1) # Simple PK for this ref table
-    
+    df['pk'] = df.apply(lambda x: str(x['med_id']), axis=1)
     return df[['pk', 'med_id', 'med_desc', 'med_class', 'unit_cost', 'qty_on_hand', 'min_lvl', 'max_lvl']]
 
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
-    """Loads all necessary data in parallel queries logic."""
     queries = {
         "events": """
             SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, 
@@ -511,7 +505,6 @@ def load_data(start_date, end_date):
             except Exception:
                 results[key] = pd.DataFrame()
 
-    # Process Events
     df = results["events"]
     if not df.empty:
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
@@ -593,7 +586,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v12.9")
+    st.title("RxTrack v13.0")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -721,15 +714,11 @@ with st.sidebar:
                         execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Config")
                     elif u_type == "Inventory Audit (Prices)":
                         clean = clean_inventory_file(raw)
-                        # 1. Update Full Audit Table
                         sql_audit = "INSERT INTO inventory_audit (pk, med_id, med_desc, med_class, unit_cost, qty_on_hand, min_lvl, max_lvl) VALUES (%(pk)s, %(med_id)s, %(med_desc)s, %(med_class)s, %(unit_cost)s, %(qty_on_hand)s, %(min_lvl)s, %(max_lvl)s) ON CONFLICT (pk) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, qty_on_hand = EXCLUDED.qty_on_hand;"
                         execute_statement(sql_audit, clean.to_dict("records"), batch=True, table_name="Inventory Audit")
-                        
-                        # 2. Sync to Med Costs (for calculations)
                         cost_data = clean[['med_id', 'unit_cost']].rename(columns={'unit_cost': 'cost_per_unit'})
                         sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
                         execute_statement(sql_costs, cost_data.to_dict("records"), batch=True, table_name="Cost List")
-                        
                     elif u_type == "Pharmacy Workflow Report":
                         clean = clean_pharmacy_report(raw)
                         sql = "INSERT INTO pharmacy_orders (pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty) VALUES (%(pk)s, %(queue_id)s, %(priority)s, %(dt)s, %(med_id)s, %(med_desc)s, %(destination)s, %(user_name)s, %(qty)s) ON CONFLICT (pk) DO NOTHING;"
@@ -779,36 +768,30 @@ if selected_page == "📊 Overview":
             fig_pie.update_layout(showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
 
-# 15. STUDENT PROJECT (NEW)
+# 15. STUDENT PROJECT
 elif selected_page == "🎓 Student Project":
     st.header("🎓 Student Optimization Project")
     st.caption("Tracking the value of inventory returned from Pyxis machines (45-day -> 28-day optimization).")
     
     if not df_events.empty:
-        # 1. User Selection
         all_users = sorted(df_events['user_name'].dropna().unique())
         selected_students = st.multiselect("Select Project Team (Students)", all_users)
         
-        # 2. Action Filter (Default to Unloads)
         all_actions = sorted(df_events['event_type'].dropna().unique())
         default_actions = [x for x in all_actions if "UNLOAD" in x.upper() or "EMPTY" in x.upper()]
         selected_actions = st.multiselect("Select Actions", all_actions, default=default_actions)
         
         if selected_students and selected_actions:
-            # 3. Filter Data
             project_df = df_events[
                 (df_events['user_name'].isin(selected_students)) & 
                 (df_events['event_type'].isin(selected_actions))
             ].copy()
             
             if not project_df.empty:
-                # 4. Calculate Value
                 project_df['Total Value'] = project_df['qty'] * project_df['cost_per_unit']
-                
                 total_qty = project_df['qty'].sum()
                 total_value = project_df['Total Value'].sum()
                 
-                # 5. Metrics
                 st.divider()
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Total Items Removed", f"{total_qty:,.0f}")
@@ -816,15 +799,12 @@ elif selected_page == "🎓 Student Project":
                 c3.metric("Transactions", len(project_df))
                 st.divider()
                 
-                # 6. Visuals
                 c_chart1, c_chart2 = st.columns(2)
-                
                 with c_chart1:
                     st.subheader("🏆 Value by Student")
                     student_stats = project_df.groupby('user_name')['Total Value'].sum().reset_index()
                     fig1 = px.bar(student_stats, x='Total Value', y='user_name', orientation='h', text_auto='$.2f', title="Dollar Value Returned")
                     st.plotly_chart(fig1, use_container_width=True)
-                    
                 with c_chart2:
                     st.subheader("📍 Machines Optimized")
                     device_stats = project_df.groupby('device')['qty'].sum().reset_index().sort_values('qty', ascending=False).head(10)
@@ -832,7 +812,6 @@ elif selected_page == "🎓 Student Project":
                     fig2.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig2, use_container_width=True)
                 
-                # 7. Detailed Table
                 st.subheader("📋 Transaction Details")
                 st.dataframe(
                     project_df[['dt', 'user_name', 'device', 'med_desc', 'qty', 'cost_per_unit', 'Total Value']].sort_values('Total Value', ascending=False),
@@ -843,6 +822,21 @@ elif selected_page == "🎓 Student Project":
                         "Total Value": st.column_config.NumberColumn("Total Value", format="$%.2f")
                     }
                 )
+
+                # --- MISSING PRICES REPORT ---
+                missing_costs = project_df[project_df['cost_per_unit'] == 0].copy()
+                if not missing_costs.empty:
+                    st.divider()
+                    st.warning(f"⚠️ Found {len(missing_costs)} transactions with $0.00 cost. These are excluded from the total value.")
+                    
+                    missing_summary = missing_costs.groupby(['med_id', 'med_desc']).agg(
+                        Count=('qty', 'count'),
+                        Total_Qty=('qty', 'sum')
+                    ).reset_index()
+                    
+                    st.markdown("**Action Required:** Update prices for these items in your Inventory Audit file to get an accurate total.")
+                    st.dataframe(missing_summary, use_container_width=True)
+
             else:
                 st.warning("No transactions found for these students with the selected actions.")
         else:
