@@ -158,13 +158,17 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS inventory_audit (
             pk TEXT PRIMARY KEY, med_id TEXT, med_desc TEXT, med_class TEXT, 
             unit_cost FLOAT, qty_on_hand FLOAT, min_lvl FLOAT, max_lvl FLOAT
+        );""",
+        # --- NEW TABLE FOR DETAILED STATION INVENTORY ---
+        """CREATE TABLE IF NOT EXISTS inventory_detailed (
+            pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT, 
+            unit_cost FLOAT, current_count FLOAT, pocket_location TEXT
         );"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
             cur.execute(sql)
         conn.commit()
-
 # --- UTILITY FUNCTIONS ---
 def seconds_to_mmss(seconds):
     if pd.isna(seconds) or seconds < 0: return "-"
