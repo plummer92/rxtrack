@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v13.3 - Logistics Price Fix)
+# RXTRACK: EXECUTIVE DASHBOARD (v13.4 - Stability Fixes)
 # Architecture: Quad-Table Strategy + Attendance + Pricing
 # Updates:
-#   1. "Inventory Audit (Detailed RC)" now FILTERS for Pyxis Logistics.
-#   2. Corrects 'med_costs' table to use unit price vs bulk price.
-#   3. Retains all previous tabs (Student Project, Leaderboard, etc).
+#   1. Fixed 'NameError: df_events' by pre-initializing variables.
+#   2. Suppressed Pandas/SQLAlchemy warnings.
+#   3. Guaranteed data loading execution path.
 ###############################################################
 
 import streamlit as st
@@ -20,6 +20,7 @@ import gc
 import re
 import contextlib
 import io
+import warnings
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -28,6 +29,16 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Suppress DB/Pandas warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
+
+# --- INITIALIZE VARIABLES (Prevents NameError) ---
+df_events = pd.DataFrame()
+df_config = pd.DataFrame()
+df_pharm = pd.DataFrame()
+df_sched = pd.DataFrame()
+df_att = pd.DataFrame()
 
 # --- CONSTANTS ---
 NARC_TERMS = [
@@ -40,17 +51,15 @@ NARC_TERMS = [
 
 ADMIN_USERS = ['emily', 'joe', 'krista']
 
-# Nickname Mappings (LOWER CASE)
+# Nickname Mappings
 NAME_MAPPINGS = {
-    "phi": "ali",          
-    "rebekah": "bekah",
+    "phi": "ali", "ho": "ali", "rebekah": "bekah",
     "nugent": "kathy", "kathleen": "kathy",
     "spain": "dee", "deloris": "dee",
     "jabusch": "dan", "daniel": "dan",
     "nicholas": "nick"     
 }
 
-# Names that REQUIRE a last initial to distinguish duplicates
 AMBIGUOUS_NAMES = [
     "melissa", "emily", "sarah", "megan", "erin", "kyle", 
     "jessica", "andy", "heather", "michelle", "taylor"
@@ -108,14 +117,6 @@ def db_cursor():
         if conn:
             conn.close()
 
-def run_query(query, params=None):
-    """Executes a SELECT query and returns a pandas DataFrame."""
-    try:
-        with db_cursor() as (conn, cur):
-            return pd.read_sql(query, conn, params=params)
-    except Exception:
-        return pd.DataFrame()
-
 def execute_statement(sql, params, batch=False, table_name="Data"):
     """Executes INSERT/UPDATE statements."""
     try:
@@ -168,6 +169,14 @@ def init_db():
         for sql in schemas:
             cur.execute(sql)
         conn.commit()
+
+def run_query(query, params=None):
+    """Executes a SELECT query and returns a pandas DataFrame."""
+    try:
+        with db_cursor() as (conn, cur):
+            return pd.read_sql(query, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
 
 # --- UTILITY FUNCTIONS ---
 def seconds_to_mmss(seconds):
@@ -392,7 +401,6 @@ def clean_attendance_file(file_obj):
     return df
 
 def clean_inventory_file(df):
-    """Cleans Inventory Audit CSV (Standard/Prices)."""
     df = df.copy()
     colmap = {"MedID": "med_id", "MedDescription": "med_desc", "MedClass": "med_class", "UnitCost": "unit_cost", "CurrentCount": "qty_on_hand", "CurrentMin": "min_lvl", "CurrentMax": "max_lvl"}
     df.rename(columns=colmap, inplace=True)
@@ -406,11 +414,10 @@ def clean_inventory_file(df):
     return df[['pk', 'med_id', 'med_desc', 'med_class', 'unit_cost', 'qty_on_hand', 'min_lvl', 'max_lvl']]
 
 def clean_detailed_inventory(df):
-    """Cleans the detailed Station-Level Inventory CSV (v13.3 - Added SourceSystem)."""
     df = df.copy()
     colmap = {
         "StationName": "station", 
-        "SourceSystem": "source_system",  # Added for filtering
+        "SourceSystem": "source_system",
         "MedID": "med_id", 
         "MedDescription": "med_desc", 
         "UnitCost": "unit_cost", 
@@ -418,21 +425,15 @@ def clean_detailed_inventory(df):
         "DrawerSubdrawerPocket": "pocket_location"
     }
     df.rename(columns=colmap, inplace=True)
-    
-    # Required columns
     required = ["station", "source_system", "med_id", "med_desc", "unit_cost", "current_count", "pocket_location"]
     for c in required:
         if c not in df.columns: df[c] = None
-        
     if df['unit_cost'].dtype == object:
         df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
-    
     df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
     df['current_count'] = pd.to_numeric(df['current_count'], errors='coerce').fillna(0)
-    
     df['row_sig'] = df['station'].astype(str) + df['med_id'].astype(str) + df['pocket_location'].astype(str)
     df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
-    
     return df[required + ['pk']]
 
 # --- DATA LOADERS (CACHED) ---
@@ -546,7 +547,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v13.3")
+    st.title("RxTrack v13.4")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -662,35 +663,22 @@ with st.sidebar:
                         cost_data = clean[['med_id', 'unit_cost']].rename(columns={'unit_cost': 'cost_per_unit'})
                         sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
                         execute_statement(sql_costs, cost_data.to_dict("records"), batch=True, table_name="Cost List")
-                    
                     elif u_type == "Inventory Audit (Detailed RC)":
                         clean = clean_detailed_inventory(raw)
-                        
-                        # --- 1. UPDATE PRICES (STRICT FILTER) ---
-                        # Only use prices from 'Pyxis Logistics' as requested
                         logistics_only = clean[clean['source_system'] == 'Pyxis Logistics'].copy()
-                        
                         if not logistics_only.empty:
-                            # Group by MedID and take the MAX price found in Logistics 
-                            # (Avoids $0.00 errors if multiple entries exist)
                             price_updates = logistics_only.groupby('med_id')['unit_cost'].max().reset_index()
                             price_updates = price_updates[price_updates['unit_cost'] > 0]
                             price_updates.rename(columns={'unit_cost': 'cost_per_unit'}, inplace=True)
-                            
                             if not price_updates.empty:
                                 sql_costs = "INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(cost_per_unit)s) ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"
                                 execute_statement(sql_costs, price_updates.to_dict("records"), batch=True, table_name="Cost List (Logistics Only)")
                                 st.success(f"✅ Updated prices for {len(price_updates)} items using Pyxis Logistics data.")
                         else:
                             st.warning("⚠️ No 'Pyxis Logistics' rows found. Prices were NOT updated.")
-
-                        # --- 2. SAVE INVENTORY COUNTS ---
-                        # Drop 'source_system' before inserting to match existing DB table schema
                         clean_for_db = clean.drop(columns=['source_system'])
-                        
                         sql_det = "INSERT INTO inventory_detailed (pk, station, med_id, med_desc, unit_cost, current_count, pocket_location) VALUES (%(pk)s, %(station)s, %(med_id)s, %(med_desc)s, %(unit_cost)s, %(current_count)s, %(pocket_location)s) ON CONFLICT (pk) DO UPDATE SET unit_cost = EXCLUDED.unit_cost, current_count = EXCLUDED.current_count;"
                         execute_statement(sql_det, clean_for_db.to_dict("records"), batch=True, table_name="Detailed Inventory")
-
                     elif u_type == "Pharmacy Workflow Report":
                         clean = clean_pharmacy_report(raw)
                         sql = "INSERT INTO pharmacy_orders (pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty) VALUES (%(pk)s, %(queue_id)s, %(priority)s, %(dt)s, %(med_id)s, %(med_desc)s, %(destination)s, %(user_name)s, %(qty)s) ON CONFLICT (pk) DO NOTHING;"
@@ -701,6 +689,14 @@ with st.sidebar:
 
         except Exception as e:
             st.error(f"Processing Error: {e}")
+
+# --- EXECUTE DATA LOADER ---
+# This ensures variables are always populated with something (even if empty)
+if 'start_date' in locals() and 'end_date' in locals():
+    try:
+        df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
 
 # 1. OVERVIEW
 if selected_page == "📊 Overview":
