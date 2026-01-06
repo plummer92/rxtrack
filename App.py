@@ -545,37 +545,53 @@ PAGES = [
     "📈 Tech Progression", "📅 Attendance"
 ]
 
-with st.sidebar:
-    st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v13.4")
-    st.caption("Pharmacy Workflow Intelligence")
+st.divider()
+    st.markdown("### 📅 Analysis Window")
     
-    st.markdown("### 🧭 Navigation")
-    selected_page = st.radio("Go to:", PAGES, label_visibility="collapsed")
-    st.divider()
-    
-    n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
-    
-    with st.expander("💾 Database Status", expanded=False):
-        c1, c2 = st.columns(2)
-        c1.metric("Pyxis Events", f"{n_events:,}")
-        c2.metric("Pharm Orders", f"{n_pharm:,}")
-        c3, c4 = st.columns(2)
-        c3.metric("Sched. Shifts", f"{n_sched:,}")
-        c4.metric("Time Punches", f"{n_att:,}")
-        present_dates = get_present_dates(min_db, max_db)
-        if min_db and max_db and min_db <= max_db:
-            delta = (max_db - min_db).days
-            cal_start = max_db - timedelta(days=90) if delta > 90 else min_db
-            cal_html = '<div class="cal-grid">'
-            curr = cal_start
-            while curr <= max_db:
-                color = "cal-present" if curr in present_dates else "cal-missing"
-                cal_html += f'<div class="cal-day {color}" title="{curr}"></div>'
-                curr += timedelta(days=1)
-            cal_html += '</div>'
-            st.markdown(cal_html, unsafe_allow_html=True)
+    # 1. Choose Filter Mode
+    filter_mode = st.radio(
+        "Filter Mode", 
+        ["Range", "Week", "Day"], 
+        horizontal=True, 
+        label_visibility="collapsed"
+    )
 
+    # 2. Logic for each mode
+    if filter_mode == "Range":
+        default_start = max(min_db, max_db - timedelta(days=14)) if min_db < max_db else min_db
+        date_range = st.slider(
+            "Select Range:", 
+            min_value=min_db, 
+            max_value=max_db, 
+            value=(default_start, max_db), 
+            format="MM/DD/YY"
+        )
+        start_date, end_date = date_range
+
+    elif filter_mode == "Week":
+        # Defaults to the most recent data week
+        default_week = max_db - timedelta(days=7) if max_db else date.today()
+        week_start = st.date_input(
+            "Select Week (Start Date):", 
+            value=default_week, 
+            min_value=min_db, 
+            max_value=max_db, 
+            format="MM/DD/YYYY"
+        )
+        start_date = week_start
+        end_date = week_start + timedelta(days=6)
+        st.info(f"📅 {start_date.strftime('%m/%d')} - {end_date.strftime('%m/%d')}")
+
+    else: # "Day" Mode
+        single_day = st.date_input(
+            "Select Day:", 
+            value=max_db, 
+            min_value=min_db, 
+            max_value=max_db, 
+            format="MM/DD/YYYY"
+        )
+        start_date = single_day
+        end_date = single_day
     with st.expander("🗑️ Database Maintenance", expanded=False):
         st.warning("Clears uploaded data from the database.")
         if st.button("Clear Schedule Data"):
