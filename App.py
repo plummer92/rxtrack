@@ -546,7 +546,7 @@ PAGES = [
 ]
 
 st.divider()
-    st.markdown("### 📅 Analysis Window")
+st.markdown("### 📅 Analysis Window")
     
     # 1. Choose Filter Mode
     filter_mode = st.radio(
