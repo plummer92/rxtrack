@@ -1140,22 +1140,81 @@ elif selected_page == "🔍 Session Explorer":
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
         st.markdown("### 🏥 Central Pharmacy Workflow")
+        
+        # --- Top Filters ---
         c_filter1, c_filter2 = st.columns(2)
         priorities = sorted(df_pharm['priority'].dropna().unique())
         sel_prio = c_filter1.multiselect("Filter Transaction Type (Priority)", priorities)
+        
         view_pharm = df_pharm.copy()
-        if sel_prio: view_pharm = view_pharm[view_pharm['priority'].isin(sel_prio)]
+        if sel_prio: 
+            view_pharm = view_pharm[view_pharm['priority'].isin(sel_prio)]
+            
+        # --- Metrics ---
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Orders", len(view_pharm))
         c2.metric("Critical/STAT", len(view_pharm[view_pharm['priority'].str.contains('STAT|Critical', case=False, na=False)]))
         top_dest = view_pharm['destination'].mode()[0] if not view_pharm['destination'].empty else "N/A"
         c3.metric("Top Destination", top_dest)
+        
+        # --- Main Data Table ---
         st.dataframe(view_pharm, use_container_width=True)
+        
+        # --- NEW SECTION: Daily Return Counts ---
+        st.divider()
+        st.subheader("🔙 Daily Return Volume by User")
+        
+        # Filter strictly for 'Returns'
+        returns_only = df_pharm[df_pharm['priority'] == 'Returns'].copy()
+        
+        if not returns_only.empty:
+            # Create a nice summary table
+            returns_only['Date'] = returns_only['dt'].dt.date
+            user_returns = returns_only.groupby(['Date', 'user_name']).size().reset_index(name='Return Count')
+            user_returns = user_returns.sort_values(['Date', 'Return Count'], ascending=[False, False])
+            
+            # Split layout: Table on left, Chart on right
+            rc1, rc2 = st.columns([1, 2])
+            
+            with rc1:
+                st.caption("Breakdown by Day & User")
+                st.dataframe(
+                    user_returns, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "Date": st.column_config.DateColumn("Date"),
+                        "Return Count": st.column_config.NumberColumn("Returns", format="%d")
+                    }
+                )
+            
+            with rc2:
+                fig_ret = px.bar(
+                    user_returns, 
+                    x='Date', 
+                    y='Return Count', 
+                    color='user_name', 
+                    title="Daily Returns by User",
+                    text='Return Count',
+                    barmode='group'
+                )
+                fig_ret.update_layout(xaxis_title="", yaxis_title="Count")
+                st.plotly_chart(fig_ret, use_container_width=True)
+        else:
+            st.info("ℹ️ No 'Returns' transactions found in the uploaded data.")
+
+        # --- Par Level Recommendations ---
         st.divider()
         st.subheader("💡 Par Level Recommendations")
         stockout_only = df_pharm[df_pharm['priority'].str.contains(r'Stock\s*Out|Stockout', case=False, na=False)].copy()
+        
         if not stockout_only.empty:
-            stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(med_desc=('med_desc', 'first'), Stockout_Count=('pk', 'count'), Avg_Stockout_Req=('qty', 'mean')).reset_index().rename(columns={'destination': 'device'})
+            stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(
+                med_desc=('med_desc', 'first'), 
+                Stockout_Count=('pk', 'count'), 
+                Avg_Stockout_Req=('qty', 'mean')
+            ).reset_index().rename(columns={'destination': 'device'})
+            
             if not df_events.empty:
                 is_refill = df_events['event_type'].astype(str).str.contains(r'REFILL|LOAD|STOCK|ADD', case=False, na=False)
                 refill_stats = df_events[is_refill].groupby(['device', 'med_id'])['qty'].mean().reset_index(name='Avg_Refill_Qty')
@@ -1163,10 +1222,12 @@ elif selected_page == "🏥 Pharmacy Workflow":
             else:
                 recs = stockout_agg.copy()
                 recs['Avg_Refill_Qty'] = 0
+                
             recs['Avg_Refill_Qty'] = recs['Avg_Refill_Qty'].fillna(0)
             base_capacity = np.where(recs['Avg_Refill_Qty'] > 0, recs['Avg_Refill_Qty'], recs['Avg_Stockout_Req'])
             recs['Suggested Min'] = np.clip(np.ceil(base_capacity * 1.5), 1, None)
             recs['Suggested Max'] = np.ceil(recs['Suggested Min'] * 2.5)
+            
             st.dataframe(recs[['device', 'med_desc', 'Stockout_Count', 'Suggested Min', 'Suggested Max']], use_container_width=True)
         else:
             st.success("No Stockouts found! Par levels look good.")
