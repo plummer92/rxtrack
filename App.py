@@ -1390,7 +1390,6 @@ elif selected_page == "🔄 Return Reconciliation":
                     st.info("No Pharmacy scan records found.")
     else:
         st.info("Need both Pyxis Transaction Reports and Pharmacy Workflow Reports to perform reconciliation.")
-
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
     st.markdown("### ⚖️ Head-to-Head Comparison")
