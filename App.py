@@ -1,10 +1,10 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v14.0 - Manager Tools)
-# Architecture: Quad-Table Strategy + Attendance + Pricing + Audits
-# New Features:
-#   1. Digital Audit Form (Input directly in app).
-#   2. Random "Who to Audit" Picker.
-#   3. Tech of the Quarter Algorithm (Audits + Attendance + Vol).
+# RXTRACK: EXECUTIVE DASHBOARD (v13.6 - Smart Audit Targeting)
+# Architecture: Schedule-Driven Audits + Dynamic Workflows
+# Updates:
+#   1. 'Smart Targets': auto-recommends audits based on today's schedule.
+#   2. Dynamic Audit Templates (Standard, IV Room, Morning, etc.).
+#   3. Full integration of Audit + Attendance for Quarterly Awards.
 ###############################################################
 
 import streamlit as st
@@ -21,11 +21,10 @@ import re
 import contextlib
 import io
 import warnings
-import random
 
 # --- CONFIGURATION ---
 st.set_page_config(
-    page_title="RxTrack: Workforce & Efficiency", 
+    page_title="RxTrack: Smart Audits", 
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -53,7 +52,6 @@ NARC_TERMS = [
 
 ADMIN_USERS = ['emily', 'joe', 'krista']
 
-# Nickname Mappings
 NAME_MAPPINGS = {
     "phi": "ali", "ho": "ali", "rebekah": "bekah",
     "nugent": "kathy", "kathleen": "kathy",
@@ -66,6 +64,53 @@ AMBIGUOUS_NAMES = [
     "melissa", "emily", "sarah", "megan", "erin", "kyle", 
     "jessica", "andy", "heather", "michelle", "taylor"
 ]
+
+# --- AUDIT TEMPLATES (WORKFLOWS) ---
+# Define your specific shift parameters here
+AUDIT_TEMPLATES = {
+    "Standard Pyxis Compliance": {
+        "score_max": 100,
+        "criteria": [
+            "Correct Count maintained?",
+            "Correct Outdates (None Expired)?",
+            "Stock Rotated properly?",
+            "Bins Not Overfilled?",
+            "Return Bin Emptied?"
+        ],
+        "has_drug_check": True
+    },
+    "IV Room / Aseptic": {
+        "score_max": 100,
+        "criteria": [
+            "Proper Garbing (PPE)?",
+            "Aseptic Technique Observed?",
+            "Hood Cleaning Logged?",
+            "No Personal Items in Buffer Area?",
+            "Vials Swabbed Correctly?"
+        ],
+        "has_drug_check": False
+    },
+    "Morning Workflow": {
+        "score_max": 50,
+        "criteria": [
+            "Queue Cleared < 9am?",
+            "Phone Answered Promptly?",
+            "Crash Cart Restock Complete?",
+            "Handover Notes Review?"
+        ],
+        "has_drug_check": False
+    },
+    "Night Shift Security": {
+        "score_max": 50,
+        "criteria": [
+            "Perpetual Inventory Completed?",
+            "Narcotic Vault Locked?",
+            "Rounds Completed on Time?",
+            "Fridge Temps Logged?"
+        ],
+        "has_drug_check": False
+    }
+}
 
 # --- CUSTOM CSS ---
 st.markdown("""
@@ -106,7 +151,6 @@ st.markdown("""
 # --- DATABASE HELPERS ---
 @contextlib.contextmanager
 def db_cursor():
-    """Context manager for database connections."""
     conn = None
     try:
         conn = psycopg2.connect(st.secrets["neon"]["db_url"])
@@ -120,7 +164,6 @@ def db_cursor():
             conn.close()
 
 def execute_statement(sql, params, batch=False, table_name="Data"):
-    """Executes INSERT/UPDATE statements."""
     try:
         with db_cursor() as (conn, cur):
             if batch:
@@ -133,7 +176,6 @@ def execute_statement(sql, params, batch=False, table_name="Data"):
         st.error(f"⚠️ Error executing {table_name}: {e}")
 
 def init_db():
-    """Initializes tables if they do not exist."""
     schemas = [
         """CREATE TABLE IF NOT EXISTS events (
             pk TEXT PRIMARY KEY, user_name TEXT, device TEXT, med_id TEXT, med_desc TEXT, 
@@ -176,6 +218,13 @@ def init_db():
         for sql in schemas:
             cur.execute(sql)
         conn.commit()
+
+def run_query(query, params=None):
+    try:
+        with db_cursor() as (conn, cur):
+            return pd.read_sql(query, conn, params=params)
+    except Exception:
+        return pd.DataFrame()
 
 # --- UTILITY FUNCTIONS ---
 def seconds_to_mmss(seconds):
@@ -435,45 +484,6 @@ def clean_detailed_inventory(df):
     df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
     return df[required + ['pk']]
 
-def clean_audit_file(df, filename):
-    df = df.copy()
-    audit_date = date.today()
-    tech_name = "Unknown"
-    date_match = re.search(r'(\d{1,2})[\.\-](\d{1,2})[\.\-](\d{2,4})', filename)
-    if date_match:
-        try:
-            m, d, y = date_match.groups()
-            if len(y) == 2: y = f"20{y}"
-            audit_date = date(int(y), int(m), int(d))
-            name_part = filename[:date_match.start()].strip()
-            tech_name = normalize_name(name_part)
-        except:
-            pass
-    cols = [c.lower() for c in df.columns]
-    col_map = {}
-    for c in df.columns:
-        cl = c.lower()
-        if 'category' in cl or 'area' in cl or 'section' in cl: col_map[c] = 'category'
-        elif 'question' in cl or 'item' in cl or 'criteria' in cl: col_map[c] = 'question'
-        elif 'result' in cl or 'score' in cl or 'status' in cl: col_map[c] = 'result'
-        elif 'comment' in cl or 'note' in cl: col_map[c] = 'note'
-    df.rename(columns=col_map, inplace=True)
-    required = ['category', 'question', 'result']
-    for r in required:
-        if r not in df.columns: df[r] = "Unknown"
-    if 'note' not in df.columns: df['note'] = ""
-    def get_points(res):
-        s = str(res).lower().strip()
-        if s in ['yes', 'pass', 'compliant', 'ok', '1', '1.0']: return 1.0
-        return 0.0
-    df['points_earned'] = df['result'].apply(get_points)
-    df['points_possible'] = 1.0
-    df['audit_dt'] = audit_date
-    df['technician'] = tech_name
-    df['row_sig'] = df['audit_dt'].astype(str) + df['technician'] + df['question']
-    df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
-    return df[['pk', 'audit_dt', 'technician', 'category', 'question', 'result', 'points_earned', 'points_possible', 'note']]
-
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
@@ -582,7 +592,8 @@ def get_present_dates(min_dt, max_dt):
 init_db()
 
 PAGES = [
-    "📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "📝 Manager Tools", "⏰ Tardies", "🚀 Process Mining", 
+    "📊 Overview", "📝 Smart Audits", "🏆 Tech of the Quarter", 
+    "🎓 Student Project", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", 
     "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", 
     "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", 
     "📈 Tech Progression", "📅 Attendance"
@@ -590,8 +601,8 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v14.0")
-    st.caption("Manager's Edition")
+    st.title("RxTrack v13.6")
+    st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
     selected_page = st.radio("Go to:", PAGES, label_visibility="collapsed")
@@ -618,6 +629,19 @@ with st.sidebar:
                 curr += timedelta(days=1)
             cal_html += '</div>'
             st.markdown(cal_html, unsafe_allow_html=True)
+
+    with st.expander("🗑️ Database Maintenance", expanded=False):
+        st.warning("Clears uploaded data from the database.")
+        if st.button("Clear Schedule Data"):
+            execute_statement("DELETE FROM staff_schedule", [])
+            st.toast("Schedule cleared! Re-upload file now.", icon="🗑️")
+            st.cache_data.clear()
+            st.rerun()
+        if st.button("Clear Attendance Data"):
+            execute_statement("DELETE FROM attendance_punches", [])
+            st.toast("Attendance cleared! Re-upload file now.", icon="🗑️")
+            st.cache_data.clear()
+            st.rerun()
 
     st.divider()
     st.markdown("### 📅 Analysis Window")
@@ -666,26 +690,12 @@ with st.sidebar:
         )
         start_date = single_day
         end_date = single_day
-    
-    with st.expander("🗑️ Database Maintenance", expanded=False):
-        st.warning("Clears uploaded data from the database.")
-        if st.button("Clear Schedule Data"):
-            execute_statement("DELETE FROM staff_schedule", [])
-            st.toast("Schedule cleared! Re-upload file now.", icon="🗑️")
-            st.cache_data.clear()
-            st.rerun()
-        if st.button("Clear Attendance Data"):
-            execute_statement("DELETE FROM attendance_punches", [])
-            st.toast("Attendance cleared! Re-upload file now.", icon="🗑️")
-            st.cache_data.clear()
-            st.rerun()
 
     st.subheader("📤 Ingest Data")
     u_type = st.selectbox("File Type:", [
         "Daily Transaction Report", "Device Activity Log (Pends)", 
         "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", 
-        "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking",
-        "Technician Audit"
+        "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking"
     ])
     uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
     
@@ -698,10 +708,6 @@ with st.sidebar:
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
                 else:
                     st.error("❌ Could not parse any attendance records.")
-            elif u_type == "Technician Audit":
-                clean = clean_audit_file(pd.read_csv(uploaded), uploaded.name)
-                sql = "INSERT INTO tech_audits (pk, audit_dt, technician, category, question, result, points_earned, points_possible, note) VALUES (%(pk)s, %(audit_dt)s, %(technician)s, %(category)s, %(question)s, %(result)s, %(points_earned)s, %(points_possible)s, %(note)s) ON CONFLICT (pk) DO UPDATE SET result=EXCLUDED.result, points_earned=EXCLUDED.points_earned, note=EXCLUDED.note;"
-                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Audits")
             elif u_type == "Staff Schedule":
                 if uploaded.name.endswith('.xlsx'): raw = pd.read_excel(uploaded)
                 else:
@@ -818,6 +824,205 @@ if selected_page == "📊 Overview":
             fig_pie = px.pie(type_counts, names='event_type', values='count', hole=0.4)
             fig_pie.update_layout(showlegend=False)
             st.plotly_chart(fig_pie, use_container_width=True)
+
+# 2. SMART AUDITS (Live + Schedule Integration)
+elif selected_page == "📝 Smart Audits":
+    st.header("📝 Smart Audit Targeting")
+    st.caption("Identify who to audit based on today's schedule and shift type.")
+
+    today = date.today()
+    
+    # A. HEADHUNTER: Find who is working TODAY
+    todays_shift = pd.DataFrame()
+    if not df_sched.empty:
+        todays_shift = df_sched[df_sched['dt'] == today].copy()
+    
+    c_list, c_form = st.columns([1, 2])
+    
+    # --- LEFT COLUMN: TARGET LIST ---
+    with c_list:
+        st.subheader("🎯 Today's Roster")
+        if not todays_shift.empty:
+            # Sort nicely
+            todays_shift.sort_values(['shift_type', 'staff_name'], inplace=True)
+            
+            # Create a selection list with shift context
+            options = []
+            staff_map = {}
+            for _, row in todays_shift.iterrows():
+                label = f"{row['staff_name']} ({row['shift_type']})"
+                options.append(label)
+                staff_map[label] = row['shift_type']
+            
+            selected_target = st.radio("Select Target:", options)
+            
+            # Determine recommended workflow based on shift keywords
+            sel_shift = staff_map.get(selected_target, "").lower()
+            rec_workflow = "Standard Pyxis Compliance" # Default
+            if "iv" in sel_shift or "clean" in sel_shift: rec_workflow = "IV Room / Aseptic"
+            elif "7a" in sel_shift or "morning" in sel_shift: rec_workflow = "Morning Workflow"
+            elif "night" in sel_shift or "10p" in sel_shift: rec_workflow = "Night Shift Security"
+            
+            st.info(f"💡 Recommendation: **{rec_workflow}**")
+            
+        else:
+            st.warning("No schedule data for today.")
+            selected_target = None
+            rec_workflow = "Standard Pyxis Compliance"
+
+    # --- RIGHT COLUMN: THE FORM ---
+    with c_form:
+        st.subheader("📋 Audit Checklist")
+        
+        # Auditor Info
+        c_aud1, c_aud2 = st.columns(2)
+        auditor_name = c_aud1.text_input("Auditor Name", value="Current User")
+        workflow_type = c_aud2.selectbox("Audit Workflow", list(AUDIT_TEMPLATES.keys()), index=list(AUDIT_TEMPLATES.keys()).index(rec_workflow))
+        
+        # Load Template
+        template = AUDIT_TEMPLATES[workflow_type]
+        
+        with st.form("smart_audit_form", clear_on_submit=True):
+            total_points = 0
+            possible_points = 0
+            
+            # 1. Drug Check Section (If applicable)
+            if template["has_drug_check"]:
+                st.markdown("#### 💊 5-Drug Random Check")
+                # We'll treat this as a single scored block for simplicity
+                c_d1, c_d2 = st.columns([3, 1])
+                drug_notes = c_d1.text_input("Drugs Checked (Comma Separated)", placeholder="e.g. Atorvastatin, Metoprolol...")
+                drug_score = c_d2.slider("Drug Score (0-50)", 0, 50, 50)
+                total_points += drug_score
+                possible_points += 50
+            
+            # 2. Criteria Checklist
+            st.markdown(f"#### ✅ {workflow_type} Criteria")
+            checks = []
+            for criterion in template["criteria"]:
+                # Each check is worth 10 points
+                if st.checkbox(criterion, value=True):
+                    total_points += 10
+                possible_points += 10
+            
+            final_note = st.text_area("Final Observations / Coaching Notes")
+            
+            # Footer
+            st.divider()
+            submitted = st.form_submit_button("💾 Submit Audit Record")
+            
+            if submitted:
+                if not selected_target:
+                    st.error("Select a staff member from the left list.")
+                else:
+                    # Parse name from label "Name (Shift)"
+                    real_name = selected_target.split(" (")[0]
+                    
+                    # Pass/Fail Logic (80% threshold)
+                    is_pass = (total_points / possible_points) >= 0.8
+                    
+                    # Generate DB Row
+                    row_data = {
+                        "pk": hashlib.sha256(f"{today}{real_name}{datetime.now()}".encode()).hexdigest(),
+                        "audit_dt": today,
+                        "technician": normalize_name(real_name),
+                        "category": workflow_type,
+                        "question": "Full Audit Summary",
+                        "result": "Pass" if is_pass else "Fail",
+                        "points_earned": total_points,
+                        "points_possible": possible_points,
+                        "note": f"{final_note} [Workflow: {workflow_type}]"
+                    }
+                    
+                    sql = """
+                        INSERT INTO tech_audits (pk, audit_dt, technician, category, question, result, points_earned, points_possible, note)
+                        VALUES (%(pk)s, %(audit_dt)s, %(technician)s, %(category)s, %(question)s, %(result)s, %(points_earned)s, %(points_possible)s, %(note)s)
+                    """
+                    execute_statement(sql, row_data, table_name="Smart Audit")
+                    st.success(f"✅ Audit saved for {real_name}! Score: {total_points}/{possible_points}")
+                    st.cache_data.clear()
+
+# 3. TECH OF THE QUARTER
+elif selected_page == "🏆 Tech of the Quarter":
+    st.header("🏆 Tech of the Quarter")
+    st.caption("Automated ranking based on Audit Scores (Quality) + Attendance (Reliability).")
+    
+    if df_audits.empty:
+        st.info("No audits found. Use the 'Smart Audits' tab to start scoring staff.")
+    else:
+        # 1. Date Filter for Quarter
+        q_col1, q_col2 = st.columns(2)
+        start_q = q_col1.date_input("Start Date", value=date(date.today().year, 1, 1))
+        end_q = q_col2.date_input("End Date", value=date.today())
+        
+        # 2. Filter Data
+        q_audits = df_audits[(df_audits['audit_dt'] >= start_q) & (df_audits['audit_dt'] <= end_q)].copy()
+        
+        if not q_audits.empty:
+            # A. Calculate Audit Score (Average %)
+            q_audits['score_pct'] = (q_audits['points_earned'] / q_audits['points_possible']) * 100
+            audit_rank = q_audits.groupby('technician')['score_pct'].mean().reset_index(name='Avg Audit Score')
+            
+            # B. Calculate Attendance Score (Tardies)
+            # We look for tardies in the same date range
+            att_rank = pd.DataFrame({'technician': audit_rank['technician']}) # Start with audited techs
+            
+            if not df_sched.empty and not df_att.empty:
+                # Reuse Tardy Logic slightly modified for speed
+                df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
+                df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
+                df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
+                df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
+                
+                # Filter schedule for range
+                sched_range = df_sched[(df_sched['date_obj'] >= start_q) & (df_sched['date_obj'] <= end_q)]
+                
+                merged = pd.merge(sched_range, df_att, on=['match_key', 'date_obj'], how='inner')
+                if not merged.empty:
+                    merged['scheduled_start_dt'] = merged.apply(lambda x: parse_shift_start(x['date_obj'], x['shift_type']), axis=1)
+                    merged.dropna(subset=['scheduled_start_dt'], inplace=True)
+                    merged['actual_start_dt'] = pd.to_datetime(merged['start_dt'])
+                    merged['delay_min'] = (merged['actual_start_dt'] - merged['scheduled_start_dt']).dt.total_seconds() / 60
+                    
+                    # Tardy count per tech
+                    tardies = merged[merged['delay_min'] > 5].groupby('match_key').size().reset_index(name='Tardy Count')
+                    att_rank = pd.merge(att_rank, tardies, left_on='technician', right_on='match_key', how='left').fillna(0)
+                    att_rank['Tardy Count'] = att_rank['Tardy Count'].fillna(0)
+                else:
+                    att_rank['Tardy Count'] = 0
+            else:
+                att_rank['Tardy Count'] = 0
+                
+            # C. Combine Scores
+            # Formula: Audit Score (0-100) - (Tardies * 5 points penalty)
+            final_df = pd.merge(audit_rank, att_rank[['technician', 'Tardy Count']], on='technician', how='left')
+            final_df['Tardy Penalty'] = final_df['Tardy Count'] * 5
+            final_df['Final Score'] = final_df['Avg Audit Score'] - final_df['Tardy Penalty']
+            final_df = final_df.sort_values('Final Score', ascending=False).reset_index(drop=True)
+            
+            # D. Display Winner
+            if not final_df.empty:
+                winner = final_df.iloc[0]
+                st.balloons()
+                st.success(f"🏆 The Tech of the Quarter is: **{winner['technician'].upper()}** (Score: {winner['Final Score']:.1f})")
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Audit Average", f"{winner['Avg Audit Score']:.1f}%")
+                c2.metric("Tardies", f"{int(winner['Tardy Count'])}")
+                c3.metric("Final Score", f"{winner['Final Score']:.1f}")
+                
+                st.divider()
+                st.subheader("📊 Full Leaderboard")
+                st.dataframe(
+                    final_df[['technician', 'Avg Audit Score', 'Tardy Count', 'Final Score']],
+                    use_container_width=True,
+                    column_config={
+                        "Avg Audit Score": st.column_config.NumberColumn("Audit Quality", format="%.1f%%"),
+                        "Final Score": st.column_config.ProgressColumn("Overall Rating", min_value=0, max_value=100, format="%.1f")
+                    }
+                )
+        else:
+            st.warning("No audit data found for this specific date range.")
 
 # 15. STUDENT PROJECT
 elif selected_page == "🎓 Student Project":
@@ -989,195 +1194,6 @@ elif selected_page == "🏆 Shift Leaderboard":
             st.info(f"No data found for shift type: {sel_shift}")
     else:
         st.warning("Please upload a Schedule file to use this feature.")
-
-# 16. MANAGER TOOLS (Merged)
-elif selected_page == "📝 Manager Tools":
-    st.header("📝 Manager Tools & Awards")
-    
-    tabs = st.tabs(["🎲 Pick Audit Target", "📝 Digital Audit Form", "🏆 Tech of the Quarter"])
-    
-    # --- TAB 1: RANDOM PICKER ---
-    with tabs[0]:
-        st.subheader("🎲 Random Tech Selector")
-        st.caption("Selects a technician active in the last 7 days.")
-        if not df_events.empty:
-            active_users = df_events[df_events['dt'] > (df_events['dt'].max() - timedelta(days=7))]['user_name'].unique()
-            active_users = [u for u in active_users if u not in ADMIN_USERS]
-            if st.button("🎲 Pick Someone to Audit", use_container_width=True):
-                if len(active_users) > 0:
-                    winner = random.choice(active_users)
-                    st.balloons()
-                    st.success(f"🎯 TODAY'S TARGET: **{winner.upper()}**")
-                else:
-                    st.warning("No active users found in the last 7 days.")
-        else:
-            st.info("Upload 'Daily Transaction Report' to use the picker.")
-
-    # --- TAB 2: DIGITAL AUDIT FORM ---
-    with tabs[1]:
-        st.subheader("📝 New Audit Entry (5-Drug Check)")
-        
-        all_techs = sorted(df_events['user_name'].unique()) if not df_events.empty else ["Unknown"]
-        
-        with st.form("audit_form"):
-            c_head1, c_head2 = st.columns(2)
-            sel_tech = c_head1.selectbox("Technician", all_techs)
-            audit_date = c_head2.date_input("Audit Date", date.today())
-            
-            st.divider()
-            st.markdown("##### 💊 5-Drug Check")
-            
-            # Dynamic Rows for 5 Drugs
-            drug_entries = []
-            for i in range(1, 6):
-                c_d1, c_d2 = st.columns([2, 1])
-                d_name = c_d1.text_input(f"Drug #{i} Name")
-                d_loc = c_d2.text_input(f"Drug #{i} Location/ID")
-                
-                c_checks = st.columns(5)
-                # Checkboxes return True/False
-                chk_drug = c_checks[0].checkbox("Correct Drug", key=f"d{i}_1")
-                chk_count = c_checks[1].checkbox("Correct Count", key=f"d{i}_2")
-                chk_date = c_checks[2].checkbox("Correct Date", key=f"d{i}_3")
-                chk_rot = c_checks[3].checkbox("Rotated", key=f"d{i}_4")
-                chk_fill = c_checks[4].checkbox("Not Overfilled", key=f"d{i}_5")
-                
-                if d_name: # Only save if name entered
-                    drug_entries.append({
-                        "name": d_name, "loc": d_loc,
-                        "checks": [chk_drug, chk_count, chk_date, chk_rot, chk_fill]
-                    })
-            
-            st.divider()
-            st.markdown("##### 📋 General Checks")
-            c_g1, c_g2, c_g3, c_g4 = st.columns(4)
-            g_out = c_g1.checkbox("Outdates Checked")
-            g_cas = c_g2.checkbox("Cassette Checked")
-            g_45 = c_g3.checkbox("45-Day Report")
-            g_bin = c_g4.checkbox("Return Bin Emptied")
-            
-            notes = st.text_area("Findings / Comments")
-            
-            submitted = st.form_submit_button("💾 Save Audit Result", use_container_width=True)
-            
-            if submitted:
-                # Calculate Score
-                total_points = 0
-                max_points = 0
-                
-                records = []
-                
-                # Drug Points (5 drugs * 5 checks = 25 points max usually scaled to 50)
-                # Let's map to schema: category=DrugName, question=CheckType
-                check_names = ["Correct Drug", "Correct Count", "Correct Date", "Rotated", "Not Overfilled"]
-                
-                for entry in drug_entries:
-                    for idx, passed in enumerate(entry['checks']):
-                        max_points += 1
-                        pts = 1 if passed else 0
-                        total_points += pts
-                        records.append({
-                            "pk": hashlib.sha256(f"{audit_date}|{sel_tech}|{entry['name']}|{check_names[idx]}".encode()).hexdigest(),
-                            "audit_dt": audit_date, "technician": sel_tech,
-                            "category": entry['name'], "question": check_names[idx],
-                            "result": "Pass" if passed else "Fail",
-                            "points_earned": pts, "points_possible": 1, "note": notes
-                        })
-                
-                # General Points
-                gen_checks = [("Outdates", g_out), ("Cassettes", g_cas), ("45 Day", g_45), ("Return Bin", g_bin)]
-                for name, passed in gen_checks:
-                    max_points += 1
-                    pts = 1 if passed else 0
-                    total_points += pts
-                    records.append({
-                        "pk": hashlib.sha256(f"{audit_date}|{sel_tech}|General|{name}".encode()).hexdigest(),
-                        "audit_dt": audit_date, "technician": sel_tech,
-                        "category": "General", "question": name,
-                        "result": "Pass" if passed else "Fail",
-                        "points_earned": pts, "points_possible": 1, "note": notes
-                    })
-
-                if records:
-                    sql = """
-                        INSERT INTO tech_audits (pk, audit_dt, technician, category, question, result, points_earned, points_possible, note)
-                        VALUES (%(pk)s, %(audit_dt)s, %(technician)s, %(category)s, %(question)s, %(result)s, %(points_earned)s, %(points_possible)s, %(note)s)
-                        ON CONFLICT (pk) DO UPDATE SET result=EXCLUDED.result, points_earned=EXCLUDED.points_earned, note=EXCLUDED.note;
-                    """
-                    execute_statement(sql, records, batch=True, table_name="Audit Form")
-                    final_score = (total_points / max_points * 100) if max_points > 0 else 0
-                    st.success(f"✅ Audit Saved! Final Score: {final_score:.1f}%")
-                    st.cache_data.clear()
-                else:
-                    st.warning("Please enter at least one drug to save.")
-
-    # --- TAB 3: TECH OF THE QUARTER ---
-    with tabs[2]:
-        st.subheader("🏆 Tech of the Quarter Calculation")
-        st.info("Algorithm: (Audit Average * 0.6) + (Attendance Score * 0.2) + (Volume Score * 0.2)")
-        
-        if not df_audits.empty and not df_att.empty:
-            # 1. Audit Score (Avg %)
-            audit_stats = df_audits.groupby('technician').agg({'points_earned': 'sum', 'points_possible': 'sum'}).reset_index()
-            audit_stats['Audit_Pct'] = (audit_stats['points_earned'] / audit_stats['points_possible'] * 100).fillna(0)
-            
-            # 2. Attendance Score (Start at 100, -5 per tardy)
-            # Find tardies first (re-using logic from Tardies page)
-            if not df_sched.empty:
-                df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
-                df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
-                df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
-                df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
-                merged = pd.merge(df_sched, df_att, on=['match_key', 'date_obj'], how='inner')
-                merged['scheduled'] = merged.apply(lambda x: parse_shift_start(x['date_obj'], x['shift_type']), axis=1)
-                merged['actual'] = pd.to_datetime(merged['start_dt'])
-                merged.dropna(subset=['scheduled'], inplace=True)
-                merged['late_min'] = (merged['actual'] - merged['scheduled']).dt.total_seconds() / 60
-                
-                tardy_counts = merged[merged['late_min'] > 5].groupby('match_key').size().reset_index(name='tardy_count')
-                tardy_counts.rename(columns={'match_key': 'technician'}, inplace=True)
-            else:
-                tardy_counts = pd.DataFrame(columns=['technician', 'tardy_count'])
-            
-            # 3. Volume Score (Normalized 0-100 based on max volume)
-            if not df_events.empty:
-                df_events['match_key'] = df_events['user_name'].apply(normalize_name)
-                vol_stats = df_events.groupby('match_key').size().reset_index(name='tx_count')
-                max_vol = vol_stats['tx_count'].max()
-                vol_stats['Vol_Score'] = (vol_stats['tx_count'] / max_vol * 100)
-                vol_stats.rename(columns={'match_key': 'technician'}, inplace=True)
-            else:
-                vol_stats = pd.DataFrame(columns=['technician', 'Vol_Score'])
-
-            # MERGE ALL
-            final_df = pd.merge(audit_stats[['technician', 'Audit_Pct']], tardy_counts, on='technician', how='outer').fillna(0)
-            final_df = pd.merge(final_df, vol_stats, on='technician', how='outer').fillna(0)
-            
-            # Apply Weights
-            final_df['Att_Score'] = 100 - (final_df['tardy_count'] * 5)
-            final_df['Final_Score'] = (final_df['Audit_Pct'] * 0.6) + (final_df['Att_Score'] * 0.2) + (final_df['Vol_Score'] * 0.2)
-            
-            final_df = final_df.sort_values('Final_Score', ascending=False).reset_index(drop=True)
-            final_df = final_df[~final_df['technician'].isin(ADMIN_USERS)]
-            
-            # Display Winner
-            if not final_df.empty:
-                winner = final_df.iloc[0]
-                st.markdown(f"### 🎉 WINNER: {winner['technician'].upper()}")
-                st.metric("Manager Score", f"{winner['Final_Score']:.1f}")
-                
-                st.dataframe(
-                    final_df[['technician', 'Final_Score', 'Audit_Pct', 'tardy_count', 'Vol_Score']], 
-                    use_container_width=True,
-                    column_config={
-                        "Final_Score": st.column_config.ProgressColumn("Manager Score", format="%.1f", min_value=0, max_value=100),
-                        "Audit_Pct": st.column_config.NumberColumn("Audit Avg", format="%.1f%%"),
-                        "tardy_count": "Tardies",
-                        "Vol_Score": st.column_config.NumberColumn("Vol Index", format="%.0f")
-                    }
-                )
-        else:
-            st.warning("Need Audit, Attendance, and Event data to calculate winner.")
 
 # 2. TARDIES
 elif selected_page == "⏰ Tardies":
