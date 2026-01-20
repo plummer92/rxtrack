@@ -1,11 +1,9 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v13.6 - Smart Audit Targeting)
-# Architecture: Schedule-Driven Audits + Dynamic Workflows
+# RXTRACK: EXECUTIVE DASHBOARD (v14.4 - Smart Trace)
 # Updates:
-#   1. 'Smart Targets': auto-recommends audits based on today's schedule.
-#   2. Dynamic Audit Templates (Standard, IV Room, Morning, etc.).
-#   3. Full integration of Audit + Attendance for Quarterly Awards.
-#   4. Updated Return Reconciliation with Unload->Load logic.
+#   1. Smart Return Tracing (Lookback + Lag Time).
+#   2. Fixed Syntax/Indentation Errors.
+#   3. Optimized Memory & Performance.
 ###############################################################
 
 import streamlit as st
@@ -327,6 +325,72 @@ def get_reconciled_returns(df):
     df_final = df_clean.drop(index=list(drop_indices))
     return df_final[df_final['event_type'] == 'Unload']
 
+def smart_match_returns(unloads, returns, lookback_hours=72):
+    """
+    Matches Pharmacy Returns to Pyxis Unloads using a time window.
+    """
+    if unloads.empty or returns.empty: return unloads, returns
+    
+    # Prepare Dataframes
+    u_df = unloads.copy()
+    u_df['match_id'] = None
+    u_df = u_df.sort_values('dt')
+    
+    r_df = returns.copy()
+    r_df['match_id'] = None
+    r_df['suspected_source'] = None
+    r_df['source_user'] = None
+    r_df['unload_dt'] = None
+    r_df['lag_str'] = None
+    r_df = r_df.sort_values('dt')
+    
+    # Iterate through Returns to find their source
+    for r_idx, r_row in r_df.iterrows():
+        r_time = r_row['dt']
+        r_med = r_row['norm_med_id'] 
+        r_qty = r_row['qty']
+        
+        # Candidate Filters
+        candidates = u_df[
+            (u_df['norm_med_id'] == r_med) &
+            (u_df['dt'] < r_time) &
+            (u_df['dt'] >= r_time - timedelta(hours=lookback_hours)) &
+            (u_df['match_id'].isnull())
+        ].copy()
+        
+        if not candidates.empty:
+            # SCORING MATCHES
+            exact_qty_matches = candidates[candidates['qty'] == r_qty]
+            if not exact_qty_matches.empty:
+                best_match_idx = exact_qty_matches.index[-1] 
+            else:
+                best_match_idx = candidates.index[-1]
+                
+            # Link them
+            match_row = u_df.loc[best_match_idx]
+            match_id = f"{r_idx}-{best_match_idx}"
+            
+            u_df.at[best_match_idx, 'match_id'] = match_id
+            
+            r_df.at[r_idx, 'match_id'] = match_id
+            r_df.at[r_idx, 'suspected_source'] = match_row['device']
+            r_df.at[r_idx, 'source_user'] = match_row['user_name']
+            r_df.at[r_idx, 'unload_dt'] = match_row['dt']
+            
+            # Calculate Lag
+            lag = r_time - match_row['dt']
+            days = lag.days
+            hours, remainder = divmod(lag.seconds, 3600)
+            mins = remainder // 60
+            
+            lag_str = ""
+            if days > 0: lag_str += f"{days}d "
+            if hours > 0: lag_str += f"{hours}h "
+            lag_str += f"{mins}m"
+            r_df.at[r_idx, 'lag_str'] = lag_str
+
+    return u_df, r_df
+
 # --- DATA CLEANING ---
 def clean_dataframe(df):
     df = df.copy()
@@ -639,7 +703,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v13.6")
+    st.title("RxTrack v14.4")
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
@@ -1524,92 +1588,6 @@ elif selected_page == "🏥 Pharmacy Workflow":
         else:
             st.success("No Stockouts found! Par levels look good.")
 
-# ... (Keep previous code unchanged) ...
-
-# --- HELPER: SMART MATCHING ALGORITHM ---
-def smart_match_returns(unloads, returns, lookback_hours=72):
-    """
-    Matches Pharmacy Returns to Pyxis Unloads using a time window.
-    Prioritizes:
-    1. Same Med
-    2. Unload Time < Return Time
-    3. Exact Quantity Match
-    4. Time Proximity
-    """
-    # Prepare Dataframes
-    u_df = unloads.copy()
-    u_df['match_id'] = None
-    u_df = u_df.sort_values('dt')
-    
-    r_df = returns.copy()
-    r_df['match_id'] = None
-    r_df['suspected_source'] = None
-    r_df['source_user'] = None
-    r_df['unload_dt'] = None
-    r_df['lag_str'] = None
-    r_df = r_df.sort_values('dt')
-    
-    # Iterate through Returns to find their source
-    for r_idx, r_row in r_df.iterrows():
-        r_time = r_row['dt']
-        r_med = r_row['med_id'] # Assumes normalized ID
-        r_qty = r_row['qty']
-        
-        # Candidate Filters:
-        # 1. Same Med
-        # 2. Unload is BEFORE Return
-        # 3. Unload is within lookback window
-        # 4. Unload is NOT already matched
-        candidates = u_df[
-            (u_df['norm_med_id'] == r_med) &
-            (u_df['dt'] < r_time) &
-            (u_df['dt'] >= r_time - timedelta(hours=lookback_hours)) &
-            (u_df['match_id'].isnull())
-        ].copy()
-        
-        if not candidates.empty:
-            # SCORING MATCHES
-            # 1. Check for Exact Quantity Match (Priority #1)
-            # 2. If multiple exact qty, pick most recent (Priority #2)
-            
-            exact_qty_matches = candidates[candidates['qty'] == r_qty]
-            
-            if not exact_qty_matches.empty:
-                # Pick the most recent one (closest in time)
-                best_match_idx = exact_qty_matches.index[-1] 
-            else:
-                # OPTIONAL: Allow fuzzy quantity matching? 
-                # For now, let's stick to exact qty to be safe, or just pick the most recent if you trust the flow.
-                # Let's pick the most recent candidate even if qty is diff (Variance)
-                best_match_idx = candidates.index[-1]
-                
-            # Link them
-            match_row = u_df.loc[best_match_idx]
-            match_id = f"{r_idx}-{best_match_idx}"
-            
-            # Update Unload DF (Mark as matched)
-            u_df.at[best_match_idx, 'match_id'] = match_id
-            
-            # Update Return DF (Record Source)
-            r_df.at[r_idx, 'match_id'] = match_id
-            r_df.at[r_idx, 'suspected_source'] = match_row['device']
-            r_df.at[r_idx, 'source_user'] = match_row['user_name']
-            r_df.at[r_idx, 'unload_dt'] = match_row['dt']
-            
-            # Calculate Lag
-            lag = r_time - match_row['dt']
-            days = lag.days
-            hours, remainder = divmod(lag.seconds, 3600)
-            mins = remainder // 60
-            
-            lag_str = ""
-            if days > 0: lag_str += f"{days}d "
-            if hours > 0: lag_str += f"{hours}h "
-            lag_str += f"{mins}m"
-            r_df.at[r_idx, 'lag_str'] = lag_str
-
-    return u_df, r_df
-
 # 10. RETURN RECONCILIATION
 elif selected_page == "🔄 Return Reconciliation":
     st.markdown("### 🔄 Return Reconciliation (Smart Trace)")
@@ -1713,6 +1691,7 @@ elif selected_page == "🔄 Return Reconciliation":
 
     else:
         st.info("Need both Pyxis and Pharmacy data to run reconciliation.")
+
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
     st.markdown("### ⚖️ Head-to-Head Comparison")
