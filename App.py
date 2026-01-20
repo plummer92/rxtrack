@@ -1729,7 +1729,7 @@ elif selected_page == "🔄 Return Reconciliation":
                 st.warning(f"Note: 'Mystery Returns' are items scanned in Pharmacy that could not be matched to a specific Pyxis unload within the last {lookback} hours.")
 
     else:
-        st.info("Need both Pyxis and Pharmacy data to run reconciliation.")info("Need both Pyxis and Pharmacy data to run reconciliation.")
+        st.info("Need both Pyxis and Pharmacy data to run reconciliation.")
 
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
