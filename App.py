@@ -1405,12 +1405,6 @@ elif selected_page == "📥 Pends Analyzer":
         if d_filter: view = view[view['device'].isin(d_filter)]
         st.dataframe(view, use_container_width=True)
 
-# 6. LOAD/UNLOAD
-elif selected_page == "🚚 Load/Unload":
-    if not df_events.empty:
-        loads = df_events[df_events['event_type'].str.contains('load|unload', case=False, na=False)]
-        st.dataframe(loads[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']], use_container_width=True)
-
 # 7. EFFICIENCY
 elif selected_page == "⚡ Efficiency":
     if not df_events.empty:
@@ -1588,10 +1582,10 @@ elif selected_page == "🏥 Pharmacy Workflow":
         else:
             st.success("No Stockouts found! Par levels look good.")
 
-# 10. RETURN RECONCILIATION
+# 10. MERGED: MED TRACE & RECONCILIATION
 elif selected_page == "🔄 Return Reconciliation":
-    st.markdown("### 🔄 Return Reconciliation (Smart Trace)")
-    st.caption("Matches Pharmacy scans to Pyxis Unloads using a time window (72h default).")
+    st.markdown("### 🔄 Medication Footprint & Trace")
+    st.caption("Track the movement of medications from Pyxis Unload -> Pharmacy Return.")
 
     # --- Configuration ---
     c_conf1, c_conf2, c_conf3 = st.columns(3)
@@ -1599,137 +1593,174 @@ elif selected_page == "🔄 Return Reconciliation":
     adjust_inhalers = c_conf2.checkbox("Smart Fix: Inhalers (Puffs)", value=True)
     lookback = c_conf3.slider("Lookback Window (Hours)", 24, 168, 72, help="How far back to look for the Pyxis Unload.")
 
-    if not df_events.empty and not df_pharm.empty:
-        # 1. Get RECONCILED Unloads (Matches logic: No Cancelled, No Unload->Load)
-        raw_unloads = get_reconciled_returns(df_events).copy()
+    if not df_events.empty:
+        # 1. PREPARE DATA (Include Unloads AND Empty Return Bins)
+        # We look for any event that implies taking items OUT of the machine for return
+        trace_types = ['Unload', 'Empty Return Bin', 'Destock']
         
-        # 2. Get Pharmacy Returns
-        raw_returns = df_pharm[df_pharm['priority'].str.contains('Return', case=False, na=False)].copy()
+        # Filter for relevant events
+        mask_trace = df_events['event_type'].str.contains('|'.join(trace_types), case=False, na=False)
+        raw_movements = df_events[mask_trace].copy()
         
-        # 3. Exclude Narcs if requested
-        if filter_narc:
-            pat = '|'.join(NARC_TERMS)
-            raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
-            raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
-            
-        # 4. Apply Smart Unit Logic (Fix Inhalers)
-        if adjust_inhalers:
-            inhaler_mask = raw_unloads['med_desc'].str.contains(r'puff|hfa|inhaler|actuation', case=False, na=False)
-            raw_unloads['qty'] = np.where((inhaler_mask) & (raw_unloads['qty'] > 10), raw_unloads['qty'] / 120, raw_unloads['qty'])
+        # Remove "Cancelled" events just in case
+        raw_movements = raw_movements[~raw_movements['event_type'].str.upper().str.contains("CANCELLED", na=False)]
 
-        # 5. Normalize IDs for Matching
-        raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
-        raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
-        
-        # 6. RUN SMART MATCHING (The Engine)
-        matched_unloads, matched_returns = smart_match_returns(raw_unloads, raw_returns, lookback_hours=lookback)
-        
-        # 7. BUILD MASTER DATA (Line-by-Line)
-        # A. Matched Items
-        success_df = matched_returns[matched_returns['match_id'].notnull()].copy()
-        success_df['Status'] = "✅ Reconciled"
-        
-        # B. Orphan Returns
-        orphan_df = matched_returns[matched_returns['match_id'].isnull()].copy()
-        orphan_df['Status'] = "❓ Mystery Return"
-        orphan_df['suspected_source'] = "Unknown"
-        orphan_df['lag_str'] = "-"
-        
-        # C. Missing / Pending
-        pending_df = matched_unloads[matched_unloads['match_id'].isnull()].copy()
-        pending_df['Status'] = "⚠️ Missing / Pending"
-        pending_df['suspected_source'] = pending_df['device']
-        pending_df['source_user'] = pending_df['user_name']
-        pending_df['unload_dt'] = pending_df['dt']
-        pending_df['lag_str'] = (datetime.now() - pending_df['dt']).apply(lambda x: f"{x.days}d {x.seconds//3600}h (Age)")
-        
-        # Combine
-        u_ret = pd.concat([success_df, orphan_df])
-        u_ret = u_ret[['dt', 'user_name', 'med_desc', 'qty', 'suspected_source', 'source_user', 'unload_dt', 'lag_str', 'Status', 'med_id']]
-        u_ret.rename(columns={
-            'dt': 'Pharm Scan Time', 'user_name': 'Pharm User', 
-            'suspected_source': 'Origin Device', 'source_user': 'Tech (Unload)', 
-            'unload_dt': 'Unload Time', 'qty': 'Qty'
-        }, inplace=True)
-        
-        u_pend = pending_df[['dt', 'user_name', 'med_desc', 'qty', 'device', 'user_name', 'dt', 'lag_str', 'Status', 'med_id']]
-        u_pend.columns = ['Unload Time', 'Tech (Unload)', 'med_desc', 'Qty', 'Origin Device', 'Tech (Unload)_dup', 'Unload Time_dup', 'lag_str', 'Status', 'med_id']
-        u_pend['Pharm Scan Time'] = None
-        u_pend['Pharm User'] = None
-        
-        master_df = pd.concat([u_ret, u_pend], ignore_index=True)
-        
-        # 8. METRICS
-        total_items = len(master_df)
-        success_count = len(success_df)
-        match_rate = (success_count / total_items * 100) if total_items > 0 else 0
-        
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Match Rate", f"{match_rate:.1f}%")
-        c2.metric("Total Items", total_items)
-        c3.metric("❓ Mystery Returns", len(orphan_df))
-        c4.metric("⚠️ Pending/Missing", len(pending_df), delta_color="inverse")
-        
+        # --- A. FOOTPRINT VISUALIZATION (Volume by Machine) ---
         st.divider()
+        c_chart, c_metrics = st.columns([2, 1])
         
-        # 9. SUMMARY TABLE (Grouped by Med)
-        summary = master_df.groupby('med_desc').agg(
-            Total_Items=('Qty', 'count'),
-            Missing=('Status', lambda x: (x == "⚠️ Missing / Pending").sum()),
-            Matched=('Status', lambda x: (x == "✅ Reconciled").sum()),
-            Orphan=('Status', lambda x: (x == "❓ Mystery Return").sum())
-        ).reset_index()
-        
-        summary['Variance Status'] = np.where(summary['Missing'] > 0, "⚠️ Variance", "✅ Balanced")
-        summary = summary.sort_values(['Missing', 'Total_Items'], ascending=False)
-        
-        st.subheader("📋 Medication Summary")
-        st.caption("👆 Click a row to see the Smart Trace details for that drug.")
-        
-        # Display Summary with Selection
-        selection = st.dataframe(
-            summary,
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            column_config={
-                "Total_Items": st.column_config.NumberColumn("Total Events"),
-                "Missing": st.column_config.NumberColumn("⚠️ Missing", format="%d"),
-                "Matched": st.column_config.NumberColumn("✅ Matched", format="%d"),
-                "Orphan": st.column_config.NumberColumn("❓ Mystery", format="%d")
-            }
-        )
-        
-        # 10. DRILL DOWN (Smart Trace View)
-        if len(selection.selection.rows) > 0:
-            idx = selection.selection.rows[0]
-            sel_med = summary.iloc[idx]['med_desc']
+        with c_chart:
+            st.subheader("📍 Return Footprint")
+            # Count distinct Unload/Empty events per machine
+            footprint = raw_movements.groupby('device')['qty'].sum().reset_index()
+            footprint = footprint.sort_values('qty', ascending=True).tail(15) # Top 15 machines
             
+            fig = px.bar(
+                footprint, 
+                x='qty', 
+                y='device', 
+                orientation='h', 
+                title="Volume of Returns by Machine (Units)",
+                text_auto='.0f',
+                color='qty',
+                color_continuous_scale='Bluyl'
+            )
+            fig.update_layout(yaxis_title="", xaxis_title="Units Returned", showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+            
+        with c_metrics:
+            st.subheader("⚠️ At a Glance")
+            total_moved = raw_movements['qty'].sum()
+            total_events = len(raw_movements)
+            top_mover = raw_movements['user_name'].mode()[0] if not raw_movements.empty else "N/A"
+            
+            st.metric("Total Units Moved", f"{total_moved:,.0f}")
+            st.metric("Traceable Events", f"{total_events:,}")
+            st.metric("Top Returner", top_mover)
+            
+            with st.expander("📝 View Raw Log"):
+                st.dataframe(
+                    raw_movements[['dt', 'device', 'user_name', 'med_desc', 'qty', 'event_type']].sort_values('dt', ascending=False), 
+                    use_container_width=True
+                )
+
+        # --- B. SMART RECONCILIATION LOGIC ---
+        if not df_pharm.empty:
             st.divider()
-            st.subheader(f"🔎 Smart Trace: {sel_med}")
+            st.subheader("🔎 Chain of Custody (Reconciliation)")
             
-            # Filter Master DF for specific med
-            detail_view = master_df[master_df['med_desc'] == sel_med].sort_values('Unload Time', ascending=False)
+            # 1. Get RECONCILED Unloads (Matches logic: No Cancelled, No Unload->Load)
+            # Note: We pass the raw_movements we just filtered to handle "Empty Return Bin"
+            reconciled_unloads = get_reconciled_returns(df_events) # Use base function for safety on "Reload" logic
             
-            st.dataframe(
-                detail_view[['Status', 'Qty', 'Origin Device', 'Tech (Unload)', 'Unload Time', 'Pharm User', 'Pharm Scan Time', 'lag_str']],
+            # Filter specifically for the trace types we care about
+            reconciled_unloads = reconciled_unloads[
+                reconciled_unloads['event_type'].str.contains('|'.join(trace_types), case=False, na=False)
+            ].copy()
+            
+            # 2. Get Pharmacy Returns
+            raw_returns = df_pharm[df_pharm['priority'].str.contains('Return', case=False, na=False)].copy()
+            
+            # 3. Filters
+            if filter_narc:
+                pat = '|'.join(NARC_TERMS)
+                reconciled_unloads = reconciled_unloads[~reconciled_unloads['med_desc'].str.contains(pat, case=False, na=False)]
+                raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
+                
+            if adjust_inhalers:
+                inhaler_mask = reconciled_unloads['med_desc'].str.contains(r'puff|hfa|inhaler|actuation', case=False, na=False)
+                reconciled_unloads['qty'] = np.where((inhaler_mask) & (reconciled_unloads['qty'] > 10), reconciled_unloads['qty'] / 120, reconciled_unloads['qty'])
+
+            # 4. Normalize
+            reconciled_unloads['norm_med_id'] = reconciled_unloads['med_id'].str.strip().str.upper()
+            raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
+            
+            # 5. EXECUTE SMART MATCH
+            matched_unloads, matched_returns = smart_match_returns(reconciled_unloads, raw_returns, lookback_hours=lookback)
+            
+            # 6. Build View
+            success_df = matched_returns[matched_returns['match_id'].notnull()].copy()
+            success_df['Status'] = "✅ Reconciled"
+            
+            orphan_df = matched_returns[matched_returns['match_id'].isnull()].copy()
+            orphan_df['Status'] = "❓ Mystery Return"
+            orphan_df['suspected_source'] = "Unknown"
+            orphan_df['lag_str'] = "-"
+            
+            pending_df = matched_unloads[matched_unloads['match_id'].isnull()].copy()
+            pending_df['Status'] = "⚠️ Missing / Pending"
+            pending_df['suspected_source'] = pending_df['device']
+            pending_df['source_user'] = pending_df['user_name']
+            pending_df['unload_dt'] = pending_df['dt']
+            pending_df['lag_str'] = (datetime.now() - pending_df['dt']).apply(lambda x: f"{x.days}d {x.seconds//3600}h (Age)")
+            
+            # Combine
+            u_ret = pd.concat([success_df, orphan_df])
+            u_ret = u_ret[['dt', 'user_name', 'med_desc', 'qty', 'suspected_source', 'source_user', 'unload_dt', 'lag_str', 'Status', 'med_id']]
+            u_ret.rename(columns={
+                'dt': 'Pharm Scan Time', 'user_name': 'Pharm User', 
+                'suspected_source': 'Origin Device', 'source_user': 'Tech (Unload)', 
+                'unload_dt': 'Unload Time', 'qty': 'Qty'
+            }, inplace=True)
+            
+            u_pend = pending_df[['dt', 'user_name', 'med_desc', 'qty', 'device', 'user_name', 'dt', 'lag_str', 'Status', 'med_id']]
+            u_pend.columns = ['Unload Time', 'Tech (Unload)', 'med_desc', 'Qty', 'Origin Device', 'Tech (Unload)_dup', 'Unload Time_dup', 'lag_str', 'Status', 'med_id']
+            u_pend['Pharm Scan Time'] = None
+            u_pend['Pharm User'] = None
+            
+            master_df = pd.concat([u_ret, u_pend], ignore_index=True)
+            
+            # 7. Summary Metrics
+            m1, m2, m3 = st.columns(3)
+            m1.metric("✅ Successfully Traced", len(success_df))
+            m2.metric("⚠️ Missing / Pending", len(pending_df))
+            match_rate = (len(success_df) / len(master_df) * 100) if not master_df.empty else 0
+            m3.metric("Trace Success Rate", f"{match_rate:.1f}%")
+
+            # 8. Summary Table (Grouped)
+            summary = master_df.groupby('med_desc').agg(
+                Total_Items=('Qty', 'count'),
+                Missing=('Status', lambda x: (x == "⚠️ Missing / Pending").sum()),
+                Matched=('Status', lambda x: (x == "✅ Reconciled").sum())
+            ).reset_index().sort_values('Missing', ascending=False)
+            
+            st.caption("👇 Select a medication to see the specific machine-to-pharmacy trace.")
+            selection = st.dataframe(
+                summary,
                 use_container_width=True,
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
                 column_config={
-                    "Unload Time": st.column_config.DatetimeColumn("Unload Time", format="MM/DD HH:mm"),
-                    "Pharm Scan Time": st.column_config.DatetimeColumn("Pharm Scan", format="MM/DD HH:mm"),
-                    "lag_str": "Lag Time",
-                    "Qty": st.column_config.NumberColumn("Qty", format="%.1f")
+                    "Total_Items": st.column_config.NumberColumn("Events"),
+                    "Missing": st.column_config.NumberColumn("⚠️ Pending", format="%d"),
+                    "Matched": st.column_config.NumberColumn("✅ Traced", format="%d")
                 }
             )
             
-            # Show "Mystery" context if needed
-            if not detail_view[detail_view['Status'] == "❓ Mystery Return"].empty:
-                st.warning(f"Note: 'Mystery Returns' are items scanned in Pharmacy that could not be matched to a specific Pyxis unload within the last {lookback} hours.")
-
+            # 9. Drill Down
+            if len(selection.selection.rows) > 0:
+                idx = selection.selection.rows[0]
+                sel_med = summary.iloc[idx]['med_desc']
+                st.subheader(f"🔎 Trace Details: {sel_med}")
+                
+                detail_view = master_df[master_df['med_desc'] == sel_med].sort_values('Unload Time', ascending=False)
+                
+                st.dataframe(
+                    detail_view[['Status', 'Qty', 'Origin Device', 'Tech (Unload)', 'Unload Time', 'Pharm User', 'Pharm Scan Time', 'lag_str']],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Unload Time": st.column_config.DatetimeColumn("Unload Time", format="MM/DD HH:mm"),
+                        "Pharm Scan Time": st.column_config.DatetimeColumn("Pharm Scan", format="MM/DD HH:mm"),
+                        "lag_str": "Lag Time",
+                        "Qty": st.column_config.NumberColumn("Qty", format="%.1f")
+                    }
+                )
+        else:
+            st.info("ℹ️ Upload a Pharmacy Workflow Report to enable Reconciliation. Currently showing only Footprint data.")
     else:
-        st.info("Need both Pyxis and Pharmacy data to run reconciliation.")
+        st.info("Upload Pyxis Transaction Report to start tracking footprint.")
 
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
