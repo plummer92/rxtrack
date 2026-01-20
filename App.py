@@ -696,7 +696,7 @@ init_db()
 PAGES = [
     "📊 Overview", "📝 Smart Audits", "🏆 Tech of the Quarter", 
     "🎓 Student Project", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", 
-    "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", 
+    "🛡️ Compliance", "📥 Pends Analyzer","⚡ Efficiency", "🔍 Session Explorer", 
     "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", 
     "📈 Tech Progression", "📅 Attendance"
 ]
