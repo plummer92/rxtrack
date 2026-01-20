@@ -5,6 +5,7 @@
 #   1. 'Smart Targets': auto-recommends audits based on today's schedule.
 #   2. Dynamic Audit Templates (Standard, IV Room, Morning, etc.).
 #   3. Full integration of Audit + Attendance for Quarterly Awards.
+#   4. Updated Return Reconciliation with Unload->Load logic.
 ###############################################################
 
 import streamlit as st
@@ -19,7 +20,6 @@ from datetime import datetime, timedelta, date
 import gc
 import re
 import contextlib
-import io
 import warnings
 
 # --- CONFIGURATION ---
@@ -57,7 +57,7 @@ NAME_MAPPINGS = {
     "nugent": "kathy", "kathleen": "kathy",
     "spain": "dee", "deloris": "dee",
     "jabusch": "dan", "daniel": "dan",
-    "nicholas": "nick"     
+    "nicholas": "nick"      
 }
 
 AMBIGUOUS_NAMES = [
@@ -66,7 +66,6 @@ AMBIGUOUS_NAMES = [
 ]
 
 # --- AUDIT TEMPLATES (WORKFLOWS) ---
-# Define your specific shift parameters here
 AUDIT_TEMPLATES = {
     "Standard Pyxis Compliance": {
         "score_max": 100,
@@ -288,6 +287,45 @@ def parse_shift_start(date_obj, shift_str):
             try: return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
             except: return None
     return None
+
+def get_reconciled_returns(df):
+    """
+    Processes events to find 'True' Unloads that haven't been returned.
+    1. Removes 'CANCELLED' events.
+    2. Matches Unload -> Load on same device (Cabinet Reconciliation).
+    3. Returns the remaining Unloads that need Pharmacy Reconciliation.
+    """
+    if df.empty: return df
+
+    # --- STEP 1: FILTER CANCELLED EVENTS ---
+    df_clean = df[~df['event_type'].astype(str).str.upper().str.contains("CANCELLED")].copy()
+
+    # --- STEP 2: CABINET RECONCILIATION (UNLOAD -> LOAD) ---
+    df_clean = df_clean.sort_values(['device', 'med_id', 'dt'])
+    
+    drop_indices = set()
+    groups = df_clean[df_clean['event_type'].isin(['Unload', 'Load'])].groupby(['device', 'med_id'])
+
+    for (device, med), group in groups:
+        pending_unloads = []
+        for idx, row in group.iterrows():
+            etype = row['event_type']
+            qty = row['qty']
+            
+            if etype == 'Unload':
+                pending_unloads.append({'idx': idx, 'qty': qty, 'dt': row['dt']})
+            elif etype == 'Load':
+                # Match against pending unloads (LIFO with Quantity Priority)
+                for i in range(len(pending_unloads) - 1, -1, -1):
+                    u = pending_unloads[i]
+                    if abs(u['qty'] - qty) < 0.01: # Check quantity match
+                        drop_indices.add(u['idx'])
+                        drop_indices.add(idx)
+                        pending_unloads.pop(i)
+                        break
+
+    df_final = df_clean.drop(index=list(drop_indices))
+    return df_final[df_final['event_type'] == 'Unload']
 
 # --- DATA CLEANING ---
 def clean_dataframe(df):
@@ -1498,31 +1536,31 @@ elif selected_page == "🔄 Return Reconciliation":
         adjust_inhalers = st.checkbox("➗ Smart Fix: Inhalers (Puffs → Units)", value=True, help="Divides Pyxis quantity by 120 for items labeled 'Puff' or 'HFA'.")
 
     if not df_events.empty and not df_pharm.empty:
-        # 1. Filter Data
-        raw_unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
+        # 1. Get RECONCILED Unloads (Matches logic: No Cancelled, No Unload->Load)
+        raw_unloads = get_reconciled_returns(df_events).copy()
+        
+        # 2. Get Pharmacy Returns
         raw_returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
         
-        # 2. Exclude Narcs if requested
+        # 3. Exclude Narcs if requested
         if filter_narc:
             pat = '|'.join(NARC_TERMS)
             raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
             raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
             
-        # 3. Apply Smart Unit Logic (Fix Inhalers)
+        # 4. Apply Smart Unit Logic (Fix Inhalers)
         if adjust_inhalers:
-            # Look for inhaler keywords
             inhaler_mask = raw_unloads['med_desc'].str.contains(r'puff|hfa|inhaler|actuation', case=False, na=False)
-            # Only adjust if Qty > 10 (avoids dividing if they already returned 1 unit)
             raw_unloads['qty'] = np.where((inhaler_mask) & (raw_unloads['qty'] > 10), raw_unloads['qty'] / 120, raw_unloads['qty'])
 
-        # 4. Prepare for Merge
+        # 5. Prepare for Merge
         raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
         raw_unloads['Date'] = raw_unloads['dt'].dt.date
         
         raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
         raw_returns['Date'] = raw_returns['dt'].dt.date
         
-        # 5. Group Data
+        # 6. Group Data
         grp_unload = raw_unloads.groupby(['Date', 'norm_med_id']).agg({
             'qty': 'sum', 
             'med_desc': 'first', 
@@ -1534,7 +1572,7 @@ elif selected_page == "🔄 Return Reconciliation":
             'med_desc': 'first'
         }).reset_index()
         
-        # 6. Merge & Calculate Variance
+        # 7. Merge & Calculate Variance
         merged = pd.merge(grp_unload, grp_return, on=['Date', 'norm_med_id'], how='outer', suffixes=('_floor', '_pharm'))
         merged['med_desc'] = merged['med_desc_floor'].fillna(merged['med_desc_pharm']).fillna("Unknown Med")
         merged['qty_floor'] = merged['qty_floor'].fillna(0)
@@ -1544,7 +1582,7 @@ elif selected_page == "🔄 Return Reconciliation":
         merged['Status'] = np.where(merged['Variance'].abs() < 0.1, "✅ Matched", "❌ Variance") # Tolerance for float math
         merged.rename(columns={'event_type': 'Floor Action', 'qty_floor': 'Qty Unloaded', 'qty_pharm': 'Qty Returned'}, inplace=True)
         
-        # 7. Metrics
+        # 8. Metrics
         total_items = len(merged)
         matched_items = len(merged[merged['Status'] == "✅ Matched"])
         match_rate = (matched_items / total_items * 100) if total_items > 0 else 0
@@ -1555,23 +1593,19 @@ elif selected_page == "🔄 Return Reconciliation":
         c3.metric("Discrepancies", total_items - matched_items, delta_color="inverse")
         c4.metric("Net Variance", f"{merged['Variance'].sum():.0f}")
         
-        # 8. Interactive Table (Fixed Sorting Issue)
+        # 9. Interactive Table
         st.divider()
         show_all = st.checkbox("Show Matched Rows (Variance = 0)", value=False)
         
-        # PRE-SORT the dataframe so the index matches what is displayed
         display_df = merged.copy()
         if not show_all:
             display_df = display_df[display_df['Status'] != "✅ Matched"]
             
-        # IMPORTANT: Sort and Reset Index HERE, before passing to st.dataframe
         display_df = display_df.sort_values(['Date', 'Variance']).reset_index(drop=True)
-        
         cols_display = ['Status', 'Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
         
         st.caption("👆 Click a row to drill down into specific timestamps.")
         
-        # Pass the pre-sorted 'display_df' directly
         event = st.dataframe(
             display_df[cols_display], 
             use_container_width=True, 
@@ -1586,10 +1620,9 @@ elif selected_page == "🔄 Return Reconciliation":
             }
         )
         
-        # 9. Drill Down Logic
+        # 10. Drill Down Logic
         if len(event.selection.rows) > 0:
             selected_index = event.selection.rows[0]
-            # Now this index matches perfectly because display_df was pre-sorted
             row = display_df.iloc[selected_index]
             
             sel_date = row['Date']
