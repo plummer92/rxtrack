@@ -1524,23 +1524,109 @@ elif selected_page == "🏥 Pharmacy Workflow":
         else:
             st.success("No Stockouts found! Par levels look good.")
 
+# ... (Keep previous code unchanged) ...
+
+# --- HELPER: SMART MATCHING ALGORITHM ---
+def smart_match_returns(unloads, returns, lookback_hours=72):
+    """
+    Matches Pharmacy Returns to Pyxis Unloads using a time window.
+    Prioritizes:
+    1. Same Med
+    2. Unload Time < Return Time
+    3. Exact Quantity Match
+    4. Time Proximity
+    """
+    # Prepare Dataframes
+    u_df = unloads.copy()
+    u_df['match_id'] = None
+    u_df = u_df.sort_values('dt')
+    
+    r_df = returns.copy()
+    r_df['match_id'] = None
+    r_df['suspected_source'] = None
+    r_df['source_user'] = None
+    r_df['unload_dt'] = None
+    r_df['lag_str'] = None
+    r_df = r_df.sort_values('dt')
+    
+    # Iterate through Returns to find their source
+    for r_idx, r_row in r_df.iterrows():
+        r_time = r_row['dt']
+        r_med = r_row['med_id'] # Assumes normalized ID
+        r_qty = r_row['qty']
+        
+        # Candidate Filters:
+        # 1. Same Med
+        # 2. Unload is BEFORE Return
+        # 3. Unload is within lookback window
+        # 4. Unload is NOT already matched
+        candidates = u_df[
+            (u_df['norm_med_id'] == r_med) &
+            (u_df['dt'] < r_time) &
+            (u_df['dt'] >= r_time - timedelta(hours=lookback_hours)) &
+            (u_df['match_id'].isnull())
+        ].copy()
+        
+        if not candidates.empty:
+            # SCORING MATCHES
+            # 1. Check for Exact Quantity Match (Priority #1)
+            # 2. If multiple exact qty, pick most recent (Priority #2)
+            
+            exact_qty_matches = candidates[candidates['qty'] == r_qty]
+            
+            if not exact_qty_matches.empty:
+                # Pick the most recent one (closest in time)
+                best_match_idx = exact_qty_matches.index[-1] 
+            else:
+                # OPTIONAL: Allow fuzzy quantity matching? 
+                # For now, let's stick to exact qty to be safe, or just pick the most recent if you trust the flow.
+                # Let's pick the most recent candidate even if qty is diff (Variance)
+                best_match_idx = candidates.index[-1]
+                
+            # Link them
+            match_row = u_df.loc[best_match_idx]
+            match_id = f"{r_idx}-{best_match_idx}"
+            
+            # Update Unload DF (Mark as matched)
+            u_df.at[best_match_idx, 'match_id'] = match_id
+            
+            # Update Return DF (Record Source)
+            r_df.at[r_idx, 'match_id'] = match_id
+            r_df.at[r_idx, 'suspected_source'] = match_row['device']
+            r_df.at[r_idx, 'source_user'] = match_row['user_name']
+            r_df.at[r_idx, 'unload_dt'] = match_row['dt']
+            
+            # Calculate Lag
+            lag = r_time - match_row['dt']
+            days = lag.days
+            hours, remainder = divmod(lag.seconds, 3600)
+            mins = remainder // 60
+            
+            lag_str = ""
+            if days > 0: lag_str += f"{days}d "
+            if hours > 0: lag_str += f"{hours}h "
+            lag_str += f"{mins}m"
+            r_df.at[r_idx, 'lag_str'] = lag_str
+
+    return u_df, r_df
+
 # 10. RETURN RECONCILIATION
 elif selected_page == "🔄 Return Reconciliation":
-    st.markdown("### 🔄 Unload vs. Return Reconciliation")
-    
-    # --- Configuration Options ---
-    c_conf1, c_conf2 = st.columns(2)
-    with c_conf1:
-        filter_narc = st.checkbox("Exclude Controlled Substances", value=True)
-    with c_conf2:
-        adjust_inhalers = st.checkbox("➗ Smart Fix: Inhalers (Puffs → Units)", value=True, help="Divides Pyxis quantity by 120 for items labeled 'Puff' or 'HFA'.")
+    st.markdown("### 🔄 Return Reconciliation (Smart Trace)")
+    st.caption("Matches Pharmacy scans to Pyxis Unloads, even across different days.")
+
+    # --- Configuration ---
+    c_conf1, c_conf2, c_conf3 = st.columns(3)
+    filter_narc = c_conf1.checkbox("Exclude Controlled Substances", value=True)
+    adjust_inhalers = c_conf2.checkbox("Smart Fix: Inhalers (Puffs)", value=True)
+    lookback = c_conf3.slider("Lookback Window (Hours)", 24, 168, 72, help="How far back to look for the Pyxis Unload.")
 
     if not df_events.empty and not df_pharm.empty:
         # 1. Get RECONCILED Unloads (Matches logic: No Cancelled, No Unload->Load)
         raw_unloads = get_reconciled_returns(df_events).copy()
         
         # 2. Get Pharmacy Returns
-        raw_returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
+        raw_returns = df_pharm[df_pharm['priority'].str.contains('Return', case=False, na=False)].copy()
         
         # 3. Exclude Narcs if requested
         if filter_narc:
@@ -1553,131 +1639,80 @@ elif selected_page == "🔄 Return Reconciliation":
             inhaler_mask = raw_unloads['med_desc'].str.contains(r'puff|hfa|inhaler|actuation', case=False, na=False)
             raw_unloads['qty'] = np.where((inhaler_mask) & (raw_unloads['qty'] > 10), raw_unloads['qty'] / 120, raw_unloads['qty'])
 
-        # 5. Prepare for Merge
+        # 5. Normalize IDs for Matching
         raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
-        raw_unloads['Date'] = raw_unloads['dt'].dt.date
-        
         raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
-        raw_returns['Date'] = raw_returns['dt'].dt.date
         
-        # 6. Group Data
-        grp_unload = raw_unloads.groupby(['Date', 'norm_med_id']).agg({
-            'qty': 'sum', 
-            'med_desc': 'first', 
-            'event_type': lambda x: ", ".join(sorted(x.astype(str).unique()))
-        }).reset_index()
+        # 6. RUN SMART MATCHING
+        matched_unloads, matched_returns = smart_match_returns(raw_unloads, raw_returns, lookback_hours=lookback)
         
-        grp_return = raw_returns.groupby(['Date', 'norm_med_id']).agg({
-            'qty': 'sum', 
-            'med_desc': 'first'
-        }).reset_index()
+        # 7. Prepare View Data
         
-        # 7. Merge & Calculate Variance
-        merged = pd.merge(grp_unload, grp_return, on=['Date', 'norm_med_id'], how='outer', suffixes=('_floor', '_pharm'))
-        merged['med_desc'] = merged['med_desc_floor'].fillna(merged['med_desc_pharm']).fillna("Unknown Med")
-        merged['qty_floor'] = merged['qty_floor'].fillna(0)
-        merged['qty_pharm'] = merged['qty_pharm'].fillna(0)
-        merged['event_type'] = merged['event_type'].fillna("Manual Pharm Return")
-        merged['Variance'] = merged['qty_pharm'] - merged['qty_floor']
-        merged['Status'] = np.where(merged['Variance'].abs() < 0.1, "✅ Matched", "❌ Variance") # Tolerance for float math
-        merged.rename(columns={'event_type': 'Floor Action', 'qty_floor': 'Qty Unloaded', 'qty_pharm': 'Qty Returned'}, inplace=True)
+        # A. Matched Items (The "Success" Stories)
+        success_df = matched_returns[matched_returns['match_id'].notnull()].copy()
+        success_df['Status'] = "✅ Reconciled"
         
-        # 8. Metrics
-        total_items = len(merged)
-        matched_items = len(merged[merged['Status'] == "✅ Matched"])
-        match_rate = (matched_items / total_items * 100) if total_items > 0 else 0
+        # B. Orphan Returns (We have the med in Pharm, but don't know where it came from)
+        orphan_df = matched_returns[matched_returns['match_id'].isnull()].copy()
+        orphan_df['Status'] = "❓ Mystery Return"
+        orphan_df['suspected_source'] = "Unknown"
+        orphan_df['lag_str'] = "-"
         
+        # C. Missing / Pending (Unloaded from Pyxis, never arrived at Pharm)
+        pending_df = matched_unloads[matched_unloads['match_id'].isnull()].copy()
+        pending_df['Status'] = "⚠️ Missing / Pending"
+        pending_df['suspected_source'] = pending_df['device']
+        pending_df['source_user'] = pending_df['user_name']
+        pending_df['unload_dt'] = pending_df['dt'] # It's the only date we have
+        pending_df['lag_str'] = (datetime.now() - pending_df['dt']).apply(lambda x: f"{x.days}d {x.seconds//3600}h (Age)")
+        
+        # Combine for unified table
+        # We align columns to make one master list
+        
+        # Align Returns (Success + Orphan)
+        u_ret = pd.concat([success_df, orphan_df])
+        u_ret = u_ret[['dt', 'user_name', 'med_desc', 'qty', 'suspected_source', 'source_user', 'unload_dt', 'lag_str', 'Status']]
+        u_ret.rename(columns={
+            'dt': 'Pharm Scan Time', 'user_name': 'Pharm User', 
+            'suspected_source': 'Origin Device', 'source_user': 'Tech (Unload)', 
+            'unload_dt': 'Unload Time', 'qty': 'Qty'
+        }, inplace=True)
+        
+        # Align Pending
+        u_pend = pending_df[['dt', 'user_name', 'med_desc', 'qty', 'device', 'user_name', 'dt', 'lag_str', 'Status']]
+        u_pend.columns = ['Unload Time', 'Tech (Unload)', 'med_desc', 'Qty', 'Origin Device', 'Tech (Unload)_dup', 'Unload Time_dup', 'lag_str', 'Status']
+        u_pend['Pharm Scan Time'] = None
+        u_pend['Pharm User'] = None
+        
+        # Final Master Table
+        master_df = pd.concat([u_ret, u_pend], ignore_index=True)
+        
+        # Metrics
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Match Rate", f"{match_rate:.1f}%")
-        c2.metric("Total Items", total_items)
-        c3.metric("Discrepancies", total_items - matched_items, delta_color="inverse")
-        c4.metric("Net Variance", f"{merged['Variance'].sum():.0f}")
+        c1.metric("Total Items", len(master_df))
+        c2.metric("✅ Successfully Traced", len(success_df))
+        c3.metric("❓ Mystery Returns", len(orphan_df), help="Pharm scan exists, but no Pyxis unload found in window.")
+        c4.metric("⚠️ Pending/Missing", len(pending_df), delta_color="inverse", help="Unloaded from Pyxis, not yet scanned in Pharm.")
         
-        # 9. Interactive Table
         st.divider()
-        show_all = st.checkbox("Show Matched Rows (Variance = 0)", value=False)
         
-        display_df = merged.copy()
-        if not show_all:
-            display_df = display_df[display_df['Status'] != "✅ Matched"]
-            
-        display_df = display_df.sort_values(['Date', 'Variance']).reset_index(drop=True)
-        cols_display = ['Status', 'Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
+        # Filters
+        f_status = st.multiselect("Filter Status", master_df['Status'].unique(), default=["✅ Reconciled", "⚠️ Missing / Pending"])
+        view_df = master_df[master_df['Status'].isin(f_status)].sort_values('Unload Time', ascending=False)
         
-        st.caption("👆 Click a row to drill down into specific timestamps.")
-        
-        event = st.dataframe(
-            display_df[cols_display], 
-            use_container_width=True, 
-            on_select="rerun", 
-            selection_mode="single-row", 
-            hide_index=True, 
+        st.dataframe(
+            view_df[['Status', 'med_desc', 'Qty', 'Origin Device', 'Tech (Unload)', 'Unload Time', 'Pharm User', 'Pharm Scan Time', 'lag_str']],
+            use_container_width=True,
             column_config={
-                "Date": st.column_config.DateColumn("Date"), 
-                "Variance": st.column_config.NumberColumn("Variance", format="%.1f"),
-                "Qty Unloaded": st.column_config.NumberColumn("Qty Unloaded", format="%.1f"),
-                "Qty Returned": st.column_config.NumberColumn("Qty Returned", format="%.1f")
+                "Unload Time": st.column_config.DatetimeColumn("Unload Time", format="MM/DD HH:mm"),
+                "Pharm Scan Time": st.column_config.DatetimeColumn("Pharm Scan", format="MM/DD HH:mm"),
+                "lag_str": "Lag / Age",
+                "Qty": st.column_config.NumberColumn("Qty", format="%.1f")
             }
         )
-        
-        # 10. Drill Down Logic
-        if len(event.selection.rows) > 0:
-            selected_index = event.selection.rows[0]
-            row = display_df.iloc[selected_index]
-            
-            sel_date = row['Date']
-            sel_med_id = row['norm_med_id'] 
-            sel_med_desc = row['med_desc']
-            
-            st.divider()
-            st.subheader(f"🔎 Audit Trail: {sel_med_desc}")
-            
-            c_d1, c_d2 = st.columns(2)
-            with c_d1:
-                st.markdown(f"#### 🏥 Floor (Pyxis)")
-                # Filter raw unloads for this specific med/date
-                floor_details = raw_unloads[
-                    (raw_unloads['Date'] == sel_date) & 
-                    (raw_unloads['norm_med_id'] == sel_med_id)
-                ].sort_values('dt')
-                
-                if not floor_details.empty:
-                    st.dataframe(
-                        floor_details[['dt', 'device', 'user_name', 'qty', 'event_type']], 
-                        use_container_width=True, 
-                        column_config={
-                            "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"), 
-                            "qty": st.column_config.NumberColumn("Qty", format="%.1f")
-                        }, 
-                        hide_index=True
-                    )
-                else:
-                    st.info("No Pyxis records found.")
-                    
-            with c_d2:
-                st.markdown(f"#### 💊 Pharmacy (Scan)")
-                # Filter raw returns for this specific med/date
-                pharm_details = raw_returns[
-                    (raw_returns['Date'] == sel_date) & 
-                    (raw_returns['norm_med_id'] == sel_med_id)
-                ].sort_values('dt')
-                
-                if not pharm_details.empty:
-                    st.dataframe(
-                        pharm_details[['dt', 'destination', 'user_name', 'qty']], 
-                        use_container_width=True, 
-                        column_config={
-                            "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"), 
-                            "qty": st.column_config.NumberColumn("Qty", format="%.1f"), 
-                            "destination": "Location"
-                        }, 
-                        hide_index=True
-                    )
-                else:
-                    st.info("No Pharmacy scan records found.")
-    else:
-        st.info("Need both Pyxis Transaction Reports and Pharmacy Workflow Reports to perform reconciliation.")
 
+    else:
+        st.info("Need both Pyxis and Pharmacy data to run reconciliation.")
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
     st.markdown("### ⚖️ Head-to-Head Comparison")
