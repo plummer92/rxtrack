@@ -1,9 +1,9 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v15.4 - Stable Release)
+# RXTRACK: EXECUTIVE DASHBOARD (v15.5 - Stable & Fixed)
 # Updates:
-#   1. CRITICAL FIX: replaced invalid 'px.sankey' with 'go.Sankey'.
-#   2. RESTORED: Device-to-Device workflow tracking.
-#   3. FIXED: Session Explorer filtering and sorting.
+#   1. FIXED: KeyError 'lag_str' in Return Reconciliation.
+#   2. RESTORED: Session Explorer user filtering & sorting.
+#   3. VERIFIED: Deep Detective & Anomaly Detection logic.
 ###############################################################
 
 import streamlit as st
@@ -221,7 +221,7 @@ def smart_match_returns(unloads, returns, lookback_hours=72):
     u_df, r_df = unloads.copy(), returns.copy()
     u_df['match_id'] = None
     
-    # FIXED: Direct column initialization to avoid ValueError
+    # Initialize columns carefully
     for c in ['match_id', 'suspected_source', 'source_user', 'unload_dt', 'lag_str']:
         r_df[c] = None
         
@@ -338,7 +338,6 @@ def clean_attendance_file(file_obj):
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
     queries = {
-        # Added 'pk' to selection
         "events": "SELECT e.pk, e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id WHERE e.dt::date BETWEEN %s AND %s",
         "config": "SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard FROM config_events WHERE dt::date BETWEEN %s AND %s",
         "pharm": "SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s",
@@ -385,7 +384,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v15.4")
+    st.title("RxTrack v15.5")
     st.caption("Deep Detective Edition")
     selected_page = st.radio("Go to:", PAGES)
     st.divider()
@@ -550,7 +549,7 @@ elif selected_page == "⏰ Tardies":
         st.metric("Late Arrivals", len(tardies))
         st.dataframe(tardies[['dt_date', 'staff_name', 'late_min']], use_container_width=True)
 
-# 8. PROCESS MINING (FIXED CRASH)
+# 8. PROCESS MINING (FIXED)
 elif selected_page == "🚀 Process Mining":
     if not df_events.empty:
         # Calculate Device->Device movements
@@ -559,7 +558,7 @@ elif selected_page == "🚀 Process Mining":
         if not moves.empty:
             path = moves.groupby(['prev_device', 'device']).size().reset_index(name='count').sort_values('count', ascending=False).head(20)
             
-            # --- FIXED SANKEY (Using go.Sankey engine) ---
+            # Use go.Sankey engine
             all_nodes = list(pd.concat([path['prev_device'], path['device']]).unique())
             node_map = {node: i for i, node in enumerate(all_nodes)}
             
@@ -631,6 +630,9 @@ elif selected_page == "🔄 Return Reconciliation":
             orph = matched_r[matched_r['match_id'].isnull()].copy(); orph['Status'] = "❓ Mystery"
             miss = matched_u[matched_u['match_id'].isnull()].copy(); miss['Status'] = "⚠️ Missing"
             
+            # FIX: Calculate Age for missing items (Was causing KeyError)
+            miss['lag_str'] = (datetime.now() - miss['dt']).apply(lambda x: f"{x.days}d {x.seconds//3600}h (Age)")
+            
             succ = succ[['dt', 'user_name', 'med_desc', 'qty', 'suspected_source', 'source_user', 'unload_dt', 'lag_str', 'Status']]
             orph = orph[['dt', 'user_name', 'med_desc', 'qty', 'suspected_source', 'source_user', 'unload_dt', 'lag_str', 'Status']]
             miss = miss[['dt', 'user_name', 'med_desc', 'qty', 'device', 'user_name', 'dt', 'lag_str', 'Status']]
@@ -699,33 +701,45 @@ elif selected_page == "⚡ Efficiency":
         eff = df_events.groupby(['device', 'med_desc']).size().reset_index(name='Refills').sort_values('Refills', ascending=False)
         st.plotly_chart(px.bar(eff.head(20), x='Refills', y='med_desc', orientation='h'), use_container_width=True)
 
-# 16. SESSION EXPLORER (RESTORED)
+# 16. SESSION EXPLORER (RESTORED & IMPROVED)
 elif selected_page == "🔍 Session Explorer":
-    st.header("🔍 Session Explorer (Unified)")
-    if not df_events.empty:
-        # Build Combined View
-        px_df = df_events[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']].copy()
-        px_df['Source'] = 'Pyxis'
-        
-        ph_df = pd.DataFrame()
+    st.header("🔍 Session Explorer")
+    if df_events.empty and df_pharm.empty:
+        st.info("No data available.")
+    else:
+        # Build Unified View
+        px_df, ph_df = pd.DataFrame(), pd.DataFrame()
+        if not df_events.empty:
+            px_df = df_events[['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty']].copy()
+            px_df['Source'] = 'Pyxis'
         if not df_pharm.empty:
-            ph_df = df_pharm[['dt', 'user_name', 'destination', 'priority', 'med_desc', 'qty']].copy()
-            ph_df.rename(columns={'destination': 'device', 'priority': 'event_type'}, inplace=True)
+            ph_df = df_pharm[['user_name', 'dt', 'destination', 'priority', 'med_desc', 'qty']].copy()
+            ph_df.rename(columns={'destination':'device', 'priority':'event_type'}, inplace=True)
             ph_df['Source'] = 'Pharmacy'
-            
-        combined = pd.concat([px_df, ph_df], ignore_index=True).sort_values('dt')
         
-        # User Filter
-        all_users = sorted(combined['user_name'].dropna().unique())
+        combined = pd.concat([px_df, ph_df], ignore_index=True)
+        combined['dt'] = pd.to_datetime(combined['dt'])
+        combined.sort_values(['user_name', 'dt'], inplace=True)
+        
+        # Calculate Sessions
+        combined['prev_dt'] = combined.groupby('user_name')['dt'].shift(1)
+        combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
+        combined['new_session'] = np.where(combined['gap'] > 1200, 1, 0) # 20 min gap
+        combined['Session ID'] = combined.groupby('user_name')['new_session'].cumsum()
+        
+        # Filters
+        all_users = sorted(combined['user_name'].dropna().astype(str).unique()) # Force string to avoid sort error
         sel_u = st.multiselect("Filter User", all_users)
-        if sel_u: combined = combined[combined['user_name'].isin(sel_u)]
         
+        view = combined.copy()
+        if sel_u: view = view[view['user_name'].isin(sel_u)]
+        
+        # Display
         st.dataframe(
-            combined[['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty']], 
+            view[['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty']], 
             use_container_width=True,
             column_config={"dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm:ss")}
         )
-    else: st.info("No Data.")
 
 # 17. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
