@@ -1,9 +1,9 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v15.2 - Complete Suite)
+# RXTRACK: EXECUTIVE DASHBOARD (v15.3 - Stability & Features)
 # Updates:
-#   1. Fully Integrated "Deep Detective" with all legacy tools.
-#   2. Fixed KeyError in Data Loader.
-#   3. Optimized "Smart Trace" Logic.
+#   1. FIXED: ValueError in Smart Trace (column initialization).
+#   2. RESTORED: Unified Session Explorer (Pyxis + Carousel).
+#   3. OPTIMIZED: Memory usage for combined views.
 ###############################################################
 
 import streamlit as st
@@ -220,7 +220,11 @@ def smart_match_returns(unloads, returns, lookback_hours=72):
     if unloads.empty or returns.empty: return unloads, returns
     u_df, r_df = unloads.copy(), returns.copy()
     u_df['match_id'] = None
-    r_df.update({'match_id': None, 'suspected_source': None, 'source_user': None, 'unload_dt': None, 'lag_str': None})
+    
+    # FIXED: Direct column initialization instead of update()
+    for c in ['match_id', 'suspected_source', 'source_user', 'unload_dt', 'lag_str']:
+        r_df[c] = None
+        
     u_df = u_df.sort_values('dt')
     r_df = r_df.sort_values('dt')
     
@@ -336,7 +340,7 @@ def load_data(start_date, end_date):
     queries = {
         "events": "SELECT e.pk, e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id WHERE e.dt::date BETWEEN %s AND %s",
         "config": "SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard FROM config_events WHERE dt::date BETWEEN %s AND %s",
-        "pharm": "SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s",
+        "pharm": "SELECT pk, priority, dt, med_id, med_desc, destination, user_name, qty FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s",
         "schedule": "SELECT pk, dt, staff_name, shift_type FROM staff_schedule WHERE dt BETWEEN %s AND %s",
         "attendance": "SELECT pk, raw_name, dt_date, start_dt, end_dt FROM attendance_punches WHERE dt_date BETWEEN %s AND %s",
         "audits": "SELECT pk, audit_dt, technician, points_earned, points_possible FROM tech_audits WHERE audit_dt BETWEEN %s AND %s"
@@ -353,6 +357,7 @@ def load_data(start_date, end_date):
     if not df.empty:
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
         df.sort_values(['user_name', 'dt'], inplace=True)
+        # Session & Machine Time Logic
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
         df['duration'] = (df['next_dt'] - df['dt']).dt.total_seconds()
         df['machine_time_sec'] = np.where((df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration'] < 600), df['duration'], 0)
@@ -373,7 +378,7 @@ PAGES = [
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v15.2")
+    st.title("RxTrack v15.3")
     st.caption("Deep Detective Edition")
     selected_page = st.radio("Go to:", PAGES)
     st.divider()
@@ -629,7 +634,8 @@ elif selected_page == "🔄 Return Reconciliation":
                 st.subheader(f"History: {med}")
                 det = master[master['med_desc']==med].sort_values('Unload Time', ascending=False)
                 st.dataframe(det[['Status', 'qty', 'Source', 'Tech', 'Unload Time', 'Pharm User', 'Scan Time', 'lag_str']], use_container_width=True)
-        else: st.info("Upload Pharmacy Report.")
+                
+        else: st.info("Upload Pharmacy Report for Reconciliation.")
 
 # 11. TECH COMPARISON
 elif selected_page == "⚖️ Tech Comparison":
@@ -665,10 +671,45 @@ elif selected_page == "⚡ Efficiency":
         eff = df_events.groupby(['device', 'med_desc']).size().reset_index(name='Refills').sort_values('Refills', ascending=False)
         st.plotly_chart(px.bar(eff.head(20), x='Refills', y='med_desc', orientation='h'), use_container_width=True)
 
-# 16. SESSION EXPLORER
+# 16. SESSION EXPLORER (RESTORED & IMPROVED)
 elif selected_page == "🔍 Session Explorer":
-    if not df_events.empty:
-        st.dataframe(df_events.head(100), use_container_width=True)
+    st.header("🔍 Session Explorer")
+    if df_events.empty and df_pharm.empty:
+        st.info("No data available.")
+    else:
+        # Build Unified View
+        px_df, ph_df = pd.DataFrame(), pd.DataFrame()
+        if not df_events.empty:
+            px_df = df_events[['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty']].copy()
+            px_df['Source'] = 'Pyxis'
+        if not df_pharm.empty:
+            ph_df = df_pharm[['user_name', 'dt', 'destination', 'priority', 'med_desc', 'qty']].copy()
+            ph_df.rename(columns={'destination':'device', 'priority':'event_type'}, inplace=True)
+            ph_df['Source'] = 'Pharmacy'
+        
+        combined = pd.concat([px_df, ph_df], ignore_index=True)
+        combined['dt'] = pd.to_datetime(combined['dt'])
+        combined.sort_values(['user_name', 'dt'], inplace=True)
+        
+        # Calculate Sessions
+        combined['prev_dt'] = combined.groupby('user_name')['dt'].shift(1)
+        combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
+        combined['new_session'] = np.where(combined['gap'] > 1200, 1, 0) # 20 min gap
+        combined['Session ID'] = combined.groupby('user_name')['new_session'].cumsum()
+        
+        # Filters
+        all_users = sorted(combined['user_name'].dropna().unique())
+        sel_u = st.multiselect("Filter User", all_users)
+        
+        view = combined.copy()
+        if sel_u: view = view[view['user_name'].isin(sel_u)]
+        
+        # Display
+        st.dataframe(
+            view[['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty']], 
+            use_container_width=True,
+            column_config={"dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm:ss")}
+        )
 
 # 17. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
