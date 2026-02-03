@@ -764,8 +764,27 @@ elif selected_page == "🔍 Session Explorer":
         if sel_u: view = view[view['user_name'].isin(sel_u)]
         if sel_source: view = view[view['Source'].isin(sel_source)]
 
-        # 4. Display the Timeline
         st.divider()
+
+        # --- NEW: SINGLE USER SHIFT SUMMARY HEADER ---
+        if len(sel_u) == 1 and not view.empty:
+            user_name = sel_u[0]
+            st.subheader(f"📊 Shift Summary: {user_name}")
+            
+            # Calculations for the header
+            total_pyxis_sec = view[view['Source'] == 'Pyxis']['Tx_Duration_Sec'].sum()
+            total_walk_sec = view['Walk_Time_Sec'].sum()
+            # Shift span: Last transaction time minus first transaction time
+            shift_span_sec = (view['dt'].max() - view['dt'].min()).total_seconds()
+
+            # Display Metrics
+            k1, k2, k3 = st.columns(3)
+            k1.metric("🏥 Total Time at Pyxis", seconds_to_mmss(total_pyxis_sec))
+            k2.metric("🚶 Total Time Walking", seconds_to_mmss(total_walk_sec))
+            k3.metric("⏱️ Total Shift Span", seconds_to_mmss(shift_span_sec), help="Time between first login and last login.")
+            st.divider()
+
+        # 4. Display the Timeline
         if not view.empty:
             disp_cols = ['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty', 'Time Spent', 'Walk to Next']
             
@@ -784,11 +803,6 @@ elif selected_page == "🔍 Session Explorer":
             )
         else:
             st.warning("No transactions match the current filters.")
-
-# 17. PHARMACY WORKFLOW
-elif selected_page == "🏥 Pharmacy Workflow":
-    if not df_pharm.empty:
-        st.dataframe(df_pharm, use_container_width=True)
 # 17. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
