@@ -701,46 +701,111 @@ elif selected_page == "⚡ Efficiency":
         eff = df_events.groupby(['device', 'med_desc']).size().reset_index(name='Refills').sort_values('Refills', ascending=False)
         st.plotly_chart(px.bar(eff.head(20), x='Refills', y='med_desc', orientation='h'), use_container_width=True)
 
-# 16. SESSION EXPLORER (RESTORED & IMPROVED)
+# 16. SESSION EXPLORER (FULLY RESTORED)
 elif selected_page == "🔍 Session Explorer":
     st.header("🔍 Session Explorer")
+    st.caption("Unified view of Pyxis and Pharmacy Workflow sessions, including durations and walk times.")
+
     if df_events.empty and df_pharm.empty:
         st.info("No data available.")
     else:
-        # Build Unified View
+        # 1. Build Combined View
         px_df, ph_df = pd.DataFrame(), pd.DataFrame()
         if not df_events.empty:
             px_df = df_events[['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty']].copy()
             px_df['Source'] = 'Pyxis'
         if not df_pharm.empty:
             ph_df = df_pharm[['user_name', 'dt', 'destination', 'priority', 'med_desc', 'qty']].copy()
-            ph_df.rename(columns={'destination':'device', 'priority':'event_type'}, inplace=True)
+            ph_df.rename(columns={'destination': 'device', 'priority': 'event_type'}, inplace=True)
             ph_df['Source'] = 'Pharmacy'
-        
+
         combined = pd.concat([px_df, ph_df], ignore_index=True)
         combined['dt'] = pd.to_datetime(combined['dt'])
         combined.sort_values(['user_name', 'dt'], inplace=True)
-        
-        # Calculate Sessions
-        combined['prev_dt'] = combined.groupby('user_name')['dt'].shift(1)
+
+        # 2. Advanced Session Logic (Gap > 20m OR Device Change)
+        combined['prev_user'] = combined['user_name'].shift(1)
+        combined['prev_device'] = combined['device'].shift(1)
+        combined['prev_dt'] = combined['dt'].shift(1)
         combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
-        combined['new_session'] = np.where(combined['gap'] > 1200, 1, 0) # 20 min gap
-        combined['Session ID'] = combined.groupby('user_name')['new_session'].cumsum()
-        
-        # Filters
-        all_users = sorted(combined['user_name'].dropna().astype(str).unique()) # Force string to avoid sort error
-        sel_u = st.multiselect("Filter User", all_users)
-        
-        view = combined.copy()
-        if sel_u: view = view[view['user_name'].isin(sel_u)]
-        
-        # Display
-        st.dataframe(
-            view[['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty']], 
+
+        # A new session starts if: user changes, device changes, or idle > 20 mins
+        combined['is_new_session'] = np.where(
+            (combined['user_name'] != combined['prev_user']) |
+            (combined['device'] != combined['prev_device']) |
+            (combined['gap'] > 1200),
+            1, 0
+        )
+        combined['session_id'] = combined['is_new_session'].cumsum()
+
+        # 3. Aggregate into Sessions
+        sessions = combined.groupby('session_id').agg(
+            User=('user_name', 'first'),
+            Device=('device', 'first'),
+            Source=('Source', 'first'),
+            Start=('dt', 'min'),
+            End=('dt', 'max'),
+            Tx_Count=('qty', 'count')
+        ).reset_index()
+
+        # 4. Calculate Durations and Walk Time
+        sessions['Duration_Sec'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
+        # Give single-transaction sessions a default 30s base time
+        sessions['Duration_Sec'] = np.where(sessions['Duration_Sec'] < 10, 30, sessions['Duration_Sec'])
+
+        sessions = sessions.sort_values(['User', 'Start'])
+        # Walk time is the gap between the End of this session and the Start of the next
+        sessions['Next_Start'] = sessions.groupby('User')['Start'].shift(-1)
+        sessions['Walk_Time_Sec'] = (sessions['Next_Start'] - sessions['End']).dt.total_seconds()
+
+        # Format times for display
+        sessions['Duration'] = sessions['Duration_Sec'].apply(seconds_to_mmss)
+        sessions['Walk Time'] = sessions['Walk_Time_Sec'].apply(seconds_to_mmss)
+
+        # 5. UI Filters
+        c1, c2 = st.columns(2)
+        all_users = sorted(sessions['User'].dropna().astype(str).unique())
+        sel_u = c1.multiselect("Filter User", all_users)
+        min_dur = c2.number_input("Min Duration (sec)", 0, 3600, 0)
+
+        view = sessions.copy()
+        if sel_u: view = view[view['User'].isin(sel_u)]
+        if min_dur: view = view[view['Duration_Sec'] >= min_dur]
+
+        # 6. Display Summary Table with Selection
+        st.divider()
+        st.subheader("📋 Session Summary")
+        st.caption("👆 Click a row to see the exact transactions inside that session.")
+
+        disp_cols = ['session_id', 'User', 'Source', 'Device', 'Start', 'End', 'Tx_Count', 'Duration', 'Walk Time']
+
+        event = st.dataframe(
+            view[disp_cols].reset_index(drop=True),
             use_container_width=True,
-            column_config={"dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm:ss")}
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={
+                "Start": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
+                "End": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
+                "Tx_Count": st.column_config.NumberColumn("Transactions")
+            }
         )
 
+        # 7. Drill Down logic (Shows specific transactions when a row is clicked)
+        if len(event.selection.rows) > 0:
+            idx = event.selection.rows[0]
+            sel_id = view.reset_index(drop=True).iloc[idx]['session_id']
+            details = combined[combined['session_id'] == sel_id].sort_values('dt')
+
+            st.divider()
+            st.subheader(f"🔬 Timeline: {details['device'].iloc[0]}")
+            st.dataframe(
+                details[['dt', 'Source', 'event_type', 'med_desc', 'qty']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")}
+            )
 # 17. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
