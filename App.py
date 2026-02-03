@@ -702,6 +702,10 @@ elif selected_page == "⚡ Efficiency":
         st.plotly_chart(px.bar(eff.head(20), x='Refills', y='med_desc', orientation='h'), use_container_width=True)
 
 # 16. Retrieve Data from Home Page
+# Import the time formatter from your utils file
+from utils import seconds_to_mmss 
+
+st.set_page_config(page_title="Session Explorer", layout="wide")
 if 'df_events' not in st.session_state or 'df_pharm' not in st.session_state:
     st.warning("⚠️ Data not loaded. Please go to the 'Home' page first.")
     st.stop()
