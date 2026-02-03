@@ -701,127 +701,90 @@ elif selected_page == "⚡ Efficiency":
         eff = df_events.groupby(['device', 'med_desc']).size().reset_index(name='Refills').sort_values('Refills', ascending=False)
         st.plotly_chart(px.bar(eff.head(20), x='Refills', y='med_desc', orientation='h'), use_container_width=True)
 
-# 16. Retrieve Data from Home Page
-# Import the time formatter from your utils file
-from utils import seconds_to_mmss 
+# 16. SESSION EXPLORER (TIMELINE VIEW)
+elif selected_page == "🔍 Session Explorer":
+    st.header("🔍 Session Explorer (Timeline View)")
+    st.caption("Step-by-step breakdown of user activity: Pyxis vs. Carousel, time spent, and walk times.")
 
-st.set_page_config(page_title="Session Explorer", layout="wide")
-if 'df_events' not in st.session_state or 'df_pharm' not in st.session_state:
-    st.warning("⚠️ Data not loaded. Please go to the 'Home' page first.")
-    st.stop()
-
-df_events = st.session_state['df_events']
-df_pharm = st.session_state['df_pharm']
-
-st.header("🔍 Session Explorer (Timeline View)")
-st.caption("Step-by-step breakdown of user activity, including transaction durations and walk times.")
-
-if df_events.empty and df_pharm.empty:
-    st.info("No data available for the selected date range.")
-else:
-    # 2. Combine Dataframes
-    px_df = pd.DataFrame()
-    ph_df = pd.DataFrame()
-
-    if not df_events.empty:
-        px_df = df_events[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']].copy()
-        px_df['Source'] = 'Pyxis'
-
-    if not df_pharm.empty:
-        ph_df = df_pharm[['dt', 'user_name', 'destination', 'priority', 'med_desc', 'qty']].copy()
-        ph_df.rename(columns={'destination': 'device', 'priority': 'event_type'}, inplace=True)
-        ph_df['Source'] = 'Carousel'
-
-    # Concatenate and Sort Chronologically
-    combined = pd.concat([px_df, ph_df], ignore_index=True)
-    combined['dt'] = pd.to_datetime(combined['dt'])
-    combined.sort_values(['user_name', 'dt'], inplace=True)
-
-    # 3. Calculate Advanced Metrics (Duration & Walk Time)
-    # Look at the NEXT transaction to see how long this one took
-    combined['next_dt'] = combined.groupby('user_name')['dt'].shift(-1)
-    combined['next_device'] = combined.groupby('user_name')['device'].shift(-1)
-    combined['time_to_next'] = (combined['next_dt'] - combined['dt']).dt.total_seconds().fillna(0)
-
-    # Logic: 
-    # If the next transaction is on the SAME device within 5 mins, that's "Transaction Time".
-    # If the next transaction is on a DIFFERENT device within 20 mins, that gap is "Walk Time".
-    combined['Tx_Duration_Sec'] = np.where(
-        (combined['device'] == combined['next_device']) & (combined['time_to_next'] < 300),
-        combined['time_to_next'],
-        0  # Defaults to 0 for the last item in a session
-    )
-
-    combined['Walk_Time_Sec'] = np.where(
-        (combined['device'] != combined['next_device']) & (combined['time_to_next'] < 1200),
-        combined['time_to_next'],
-        0
-    )
-
-    # Format the seconds into readable strings (e.g., "1m 30s")
-    combined['Duration'] = combined['Tx_Duration_Sec'].apply(seconds_to_mmss)
-    combined['Walk Time'] = combined['Walk_Time_Sec'].apply(seconds_to_mmss)
-    
-    # Clean up empty walk times for better display
-    combined['Walk Time'] = combined['Walk Time'].replace("0s", "-")
-    combined['Duration'] = combined['Duration'].replace("0s", "Last Item")
-
-    # 4. Interactive Filters
-    c1, c2 = st.columns(2)
-    
-    # Filter 1: User
-    all_users = sorted(combined['user_name'].dropna().astype(str).unique())
-    sel_u = c1.multiselect("👤 Select Technician:", all_users)
-    
-    # Filter 2: Source (Pyxis vs Carousel)
-    sel_source = c2.multiselect("🖥️ Filter by System:", ["Pyxis", "Carousel"], default=["Pyxis", "Carousel"])
-    
-    # Apply Filters
-    view = combined.copy()
-    if sel_u:
-        view = view[view['user_name'].isin(sel_u)]
-    if sel_source:
-        view = view[view['Source'].isin(sel_source)]
-
-    # 5. Display the Master Timeline
-    st.divider()
-    if not view.empty:
-        st.subheader("⏱️ Chronological Timeline")
-        
-        # Select columns to show
-        disp_cols = ['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty', 'Duration', 'Walk Time']
-        
-        st.dataframe(
-            view[disp_cols].sort_values('dt', ascending=False), 
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "dt": st.column_config.DatetimeColumn("Timestamp", format="MM/DD HH:mm:ss"),
-                "user_name": "Technician",
-                "device": "Location",
-                "event_type": "Action",
-                "med_desc": "Medication",
-                "qty": st.column_config.NumberColumn("Qty", format="%.1f"),
-                "Duration": "Time Spent",
-                "Walk Time": "Walk to Next"
-            }
-        )
+    if df_events.empty and df_pharm.empty:
+        st.info("No data available for the selected date range.")
     else:
-        st.warning("No transactions match the current filters.")
+        # 1. Combine Pyxis and Carousel Data
+        px_df, ph_df = pd.DataFrame(), pd.DataFrame()
+        if not df_events.empty:
+            px_df = df_events[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']].copy()
+            px_df['Source'] = 'Pyxis'
+        if not df_pharm.empty:
+            ph_df = df_pharm[['dt', 'user_name', 'destination', 'priority', 'med_desc', 'qty']].copy()
+            ph_df.rename(columns={'destination': 'device', 'priority': 'event_type'}, inplace=True)
+            ph_df['Source'] = 'Carousel'
 
-        # 7. Drill Down logic (Shows specific transactions when a row is clicked)
-        if len(event.selection.rows) > 0:
-            idx = event.selection.rows[0]
-            sel_id = view.reset_index(drop=True).iloc[idx]['session_id']
-            details = combined[combined['session_id'] == sel_id].sort_values('dt')
+        # Merge and Sort Chronologically
+        combined = pd.concat([px_df, ph_df], ignore_index=True)
+        combined['dt'] = pd.to_datetime(combined['dt'])
+        combined.sort_values(['user_name', 'dt'], inplace=True)
 
-            st.divider()
-            st.subheader(f"🔬 Timeline: {details['device'].iloc[0]}")
+        # 2. Calculate Transaction Duration & Walk Time
+        combined['next_dt'] = combined.groupby('user_name')['dt'].shift(-1)
+        combined['next_device'] = combined.groupby('user_name')['device'].shift(-1)
+        combined['time_to_next'] = (combined['next_dt'] - combined['dt']).dt.total_seconds().fillna(0)
+
+        # Logic: 
+        # Same device & < 5 mins = Time Spent at Machine
+        # Different device & < 20 mins = Walking Time
+        combined['Tx_Duration_Sec'] = np.where(
+            (combined['device'] == combined['next_device']) & (combined['time_to_next'] < 300),
+            combined['time_to_next'],
+            0
+        )
+
+        combined['Walk_Time_Sec'] = np.where(
+            (combined['device'] != combined['next_device']) & (combined['time_to_next'] < 1200),
+            combined['time_to_next'],
+            0
+        )
+
+        # Apply the time formatter (the one already at the top of your file)
+        combined['Time Spent'] = combined['Tx_Duration_Sec'].apply(seconds_to_mmss)
+        combined['Walk to Next'] = combined['Walk_Time_Sec'].apply(seconds_to_mmss)
+        
+        # Clean up empty times for a cleaner table
+        combined['Walk to Next'] = combined['Walk to Next'].replace("0s", "-")
+        combined['Time Spent'] = combined['Time Spent'].replace("0s", "Last Item")
+
+        # 3. Interactive Filters
+        c1, c2 = st.columns(2)
+        all_users = sorted(combined['user_name'].dropna().astype(str).unique())
+        sel_u = c1.multiselect("👤 Filter User:", all_users)
+        
+        # NEW: Filter by Source
+        sel_source = c2.multiselect("🖥️ Filter System:", ["Pyxis", "Carousel"], default=["Pyxis", "Carousel"])
+
+        # Apply Filters
+        view = combined.copy()
+        if sel_u: view = view[view['user_name'].isin(sel_u)]
+        if sel_source: view = view[view['Source'].isin(sel_source)]
+
+        # 4. Display the Timeline
+        st.divider()
+        if not view.empty:
+            disp_cols = ['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty', 'Time Spent', 'Walk to Next']
+            
             st.dataframe(
-                details[['dt', 'Source', 'event_type', 'med_desc', 'qty']],
+                view[disp_cols].sort_values('dt', ascending=False), 
                 use_container_width=True,
                 hide_index=True,
-                column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")}
+                column_config={
+                    "dt": st.column_config.DatetimeColumn("Timestamp", format="MM/DD HH:mm:ss"),
+                    "user_name": "Technician",
+                    "device": "Location",
+                    "event_type": "Action",
+                    "med_desc": "Medication",
+                    "qty": st.column_config.NumberColumn("Qty", format="%.1f")
+                }
+            )
+        else:
+            st.warning("No transactions match the current filters.")"HH:mm:ss")}
             )
 # 17. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
