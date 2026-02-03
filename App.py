@@ -744,7 +744,7 @@ elif selected_page == "🔍 Session Explorer":
             0
         )
 
-        # Apply the time formatter
+        # Apply the time formatter (function is already at the top of your App.py)
         combined['Time Spent'] = combined['Tx_Duration_Sec'].apply(seconds_to_mmss)
         combined['Walk to Next'] = combined['Walk_Time_Sec'].apply(seconds_to_mmss)
         
