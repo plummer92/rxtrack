@@ -744,7 +744,7 @@ elif selected_page == "🔍 Session Explorer":
             0
         )
 
-        # Apply the time formatter (the one already at the top of your file)
+        # Apply the time formatter
         combined['Time Spent'] = combined['Tx_Duration_Sec'].apply(seconds_to_mmss)
         combined['Walk to Next'] = combined['Walk_Time_Sec'].apply(seconds_to_mmss)
         
@@ -757,7 +757,6 @@ elif selected_page == "🔍 Session Explorer":
         all_users = sorted(combined['user_name'].dropna().astype(str).unique())
         sel_u = c1.multiselect("👤 Filter User:", all_users)
         
-        # NEW: Filter by Source
         sel_source = c2.multiselect("🖥️ Filter System:", ["Pyxis", "Carousel"], default=["Pyxis", "Carousel"])
 
         # Apply Filters
@@ -784,8 +783,12 @@ elif selected_page == "🔍 Session Explorer":
                 }
             )
         else:
-            st.warning("No transactions match the current filters.")"HH:mm:ss")}
-            )
+            st.warning("No transactions match the current filters.")
+
+# 17. PHARMACY WORKFLOW
+elif selected_page == "🏥 Pharmacy Workflow":
+    if not df_pharm.empty:
+        st.dataframe(df_pharm, use_container_width=True)
 # 17. PHARMACY WORKFLOW
 elif selected_page == "🏥 Pharmacy Workflow":
     if not df_pharm.empty:
