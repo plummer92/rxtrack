@@ -1,14 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-# This line pulls the "Shared Brain" from your main App.py
 from App import load_data, normalize_name, parse_shift_start, ADMIN_USERS 
 
 st.header("⏰ Tardiness Tracker")
 
-# 1. Access the shared dates from the Hub (App.py)
-if 'start_date' in st.session_state:
-    # 2. Load the data using the shared loader
+# Check if the hub (App.py) has shared the dates yet
+if 'start_date' not in st.session_state:
+    st.info("👈 Please select an Analysis Window in the sidebar of the **Home** page first.")
+else:
+    # Use the dates from the shared clipboard
     df_events, df_config, df_pharm, df_sched, df_att = load_data(
         st.session_state.start_date, 
         st.session_state.end_date
