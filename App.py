@@ -544,52 +544,42 @@ elif selected_page == "⏰ Tardies":
         df_sched['k'] = df_sched['staff_name'].apply(normalize_name)
         df_att['k'] = df_att['raw_name'].apply(normalize_name)
         
-        # 2. Ensure Date columns are the same type (date objects)
+        # 2. Align dates
         df_sched['match_date'] = pd.to_datetime(df_sched['dt']).dt.date
         df_att['match_date'] = pd.to_datetime(df_att['dt_date']).dt.date
         
         # 3. Merge
-        m = pd.merge(
-            df_sched, 
-            df_att, 
-            left_on=['match_date', 'k'], 
-            right_on=['match_date', 'k'], 
-            how='inner'
-        )
+        m = pd.merge(df_sched, df_att, on=['match_date', 'k'], how='inner')
         
         if not m.empty:
-            # 4. Parse Actual vs Scheduled starts
-            m['start_actual'] = pd.to_datetime(m['start_dt'])
-            # Note: parse_shift_start needs the date and the shift string (e.g., "7:00a")
-            m['start_scheduled'] = m.apply(lambda x: parse_shift_start(x['match_date'], x['shift_type']), axis=1)
+            # 4. Convert to datetime and FORCE 'coerce' to handle errors
+            m['start_actual'] = pd.to_datetime(m['start_dt'], errors='coerce')
             
-            # 5. Calculate variance
-            m.dropna(subset=['start_scheduled', 'start_actual'], inplace=True)
+            # Generate scheduled starts
+            m['start_scheduled'] = m.apply(
+                lambda x: parse_shift_start(x['match_date'], x['shift_type']), axis=1
+            )
+            # FORCE conversion of scheduled column to datetime
+            m['start_scheduled'] = pd.to_datetime(m['start_scheduled'], errors='coerce')
+            
+            # 5. Drop rows where conversion failed before doing math
+            m = m.dropna(subset=['start_actual', 'start_scheduled'])
+            
+            # 6. Calculate variance (The math is now safe)
             m['late_min'] = (m['start_actual'] - m['start_scheduled']).dt.total_seconds() / 60
             
-            # 6. Filter and Display
+            # 7. Display
             tardies = m[m['late_min'] > 5].sort_values('late_min', ascending=False)
             
             c1, c2 = st.columns(2)
             c1.metric("Late Arrivals (>5m)", len(tardies))
-            c2.metric("Avg. Latency", f"{tardies['late_min'].mean():.1f} mins" if not tardies.empty else "0m")
+            c2.metric("Avg. Latency", f"{tardies['late_min'].mean():.1f}m" if not tardies.empty else "0m")
             
-            st.dataframe(
-                tardies[['match_date', 'staff_name', 'shift_type', 'start_actual', 'late_min']], 
-                column_config={
-                    "match_date": "Date",
-                    "staff_name": "Technician",
-                    "shift_type": "Scheduled Shift",
-                    "start_actual": st.column_config.DatetimeColumn("Clock In", format="hh:mm a"),
-                    "late_min": st.column_config.NumberColumn("Minutes Late", format="%.0f min")
-                },
-                use_container_width=True,
-                hide_index=True
-            )
+            st.dataframe(tardies[['match_date', 'staff_name', 'shift_type', 'start_actual', 'late_min']], use_container_width=True)
         else:
-            st.warning("No matching records found between Schedule and Attendance. Check if names match exactly.")
+            st.warning("No matches found. Ensure names in Schedule match Attendance files.")
     else:
-        st.info("Please upload both a **Staff Schedule** and **Attendance Tracking** file to use this feature.")
+        st.info("Upload Schedule and Attendance data.")
 
 # 8. PROCESS MINING (FIXED)
 elif selected_page == "🚀 Process Mining":
