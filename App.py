@@ -942,41 +942,58 @@ elif selected_page == "🏆 Shift Leaderboard":
         st.warning("Please upload a Schedule file to use this feature.")
 
 # 2. TARDIES
+# 2. TARDIES (Integrated Fix for Stability)
 elif selected_page == "⏰ Tardies":
     st.header("⏰ Tardiness Tracker")
     st.caption("Matches 'Scheduled Start' with 'Actual Clock-in'. Automatically ignores consecutive shifts and admins.")
     
     if not df_sched.empty and not df_att.empty:
+        # 1. Normalize Keys for matching
         df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
         df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
+        
+        # 2. Align match dates to ensure they are the same type (date objects)
         df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
         df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
+        
+        # 3. Join the datasets
         merged = pd.merge(df_sched, df_att, on=['match_key', 'date_obj'], how='inner')
         
         if not merged.empty:
-            merged['scheduled_start_dt'] = merged.apply(lambda x: parse_shift_start(x['date_obj'], x['shift_type']), axis=1)
-            merged.dropna(subset=['scheduled_start_dt'], inplace=True)
-            merged['actual_start_dt'] = pd.to_datetime(merged['start_dt'])
-            merged['actual_end_dt'] = pd.to_datetime(merged['end_dt'])
-            merged['diff_abs'] = (merged['actual_start_dt'] - merged['scheduled_start_dt']).abs()
-            best_matches = merged.sort_values('diff_abs').drop_duplicates(subset=['pk_x'])
-            final_df = best_matches.copy()
-            final_df['delay_min'] = (final_df['actual_start_dt'] - final_df['scheduled_start_dt']).dt.total_seconds() / 60
-            final_df.sort_values(['match_key', 'actual_start_dt'], inplace=True)
-            final_df['prev_end'] = final_df.groupby('match_key')['actual_end_dt'].shift(1)
-            final_df['gap_min'] = (final_df['actual_start_dt'] - final_df['prev_end']).dt.total_seconds() / 60
-            final_df['is_double'] = np.where((final_df['gap_min'].notnull()) & (final_df['gap_min'] < 30), True, False)
+            # 4. ROBUST CASTING: The 'errors=coerce' prevents the .dt accessor AttributeError
+            # Convert actual clock-in strings to datetime objects
+            merged['actual_start_dt'] = pd.to_datetime(merged['start_dt'], errors='coerce')
+            merged['actual_end_dt'] = pd.to_datetime(merged['end_dt'], errors='coerce')
 
+            # Calculate the expected scheduled start time
+            merged['scheduled_start_dt'] = merged.apply(
+                lambda x: parse_shift_start(x['date_obj'], x['shift_type']), axis=1
+            )
+            merged['scheduled_start_dt'] = pd.to_datetime(merged['scheduled_start_dt'], errors='coerce')
+            
+            # 5. Drop rows where datetime conversion failed to prevent math errors
+            merged.dropna(subset=['scheduled_start_dt', 'actual_start_dt'], inplace=True)
+            
+            # 6. Logic to identify doubles/consecutive shifts
+            merged.sort_values(['match_key', 'actual_start_dt'], inplace=True)
+            merged['prev_end'] = merged.groupby('match_key')['actual_end_dt'].shift(1)
+            merged['gap_min'] = (merged['actual_start_dt'] - merged['prev_end']).dt.total_seconds() / 60
+            merged['is_double'] = np.where((merged['gap_min'].notnull()) & (merged['gap_min'] < 30), True, False)
+
+            # 7. Apply filters (Grace period, Admin exclusion, and Shift Doubles)
             grace_period = st.slider("Grace Period (minutes)", 0, 15, 5)
-            tardies = final_df[
-                (final_df['delay_min'] > grace_period) & 
-                (final_df['is_double'] == False) &
-                (~final_df['match_key'].isin(ADMIN_USERS))
+            merged['delay_min'] = (merged['actual_start_dt'] - merged['scheduled_start_dt']).dt.total_seconds() / 60
+            
+            tardies = merged[
+                (merged['delay_min'] > grace_period) & 
+                (merged['is_double'] == False) &
+                (~merged['match_key'].isin(ADMIN_USERS))
             ].copy()
             
+            # 8. Display Metrics and Data
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Shifts Matched", len(final_df))
-            c2.metric("Doubles/Splits Excluded", final_df['is_double'].sum())
+            c1.metric("Total Shifts Matched", len(merged))
+            c2.metric("Doubles/Splits Excluded", merged['is_double'].sum())
             c3.metric("True Late Arrivals", len(tardies), delta_color="inverse")
             
             if not tardies.empty:
@@ -984,12 +1001,18 @@ elif selected_page == "⏰ Tardies":
                 tardies['Late By'] = tardies['delay_min'].apply(lambda x: f"{int(x)} min")
                 tardies['Scheduled'] = tardies['scheduled_start_dt'].dt.strftime('%H:%M')
                 tardies['Actual'] = tardies['actual_start_dt'].dt.strftime('%H:%M')
+                
                 st.subheader("🚩 Late List")
-                st.dataframe(tardies[['date_obj', 'staff_name', 'shift_type', 'Scheduled', 'Actual', 'Late By']], use_container_width=True, column_config={"date_obj": "Date"})
+                st.dataframe(
+                    tardies[['date_obj', 'staff_name', 'shift_type', 'Scheduled', 'Actual', 'Late By']], 
+                    use_container_width=True, 
+                    column_config={"date_obj": "Date"},
+                    hide_index=True
+                )
             else:
-                st.success("🎉 No tardies found (after excluding doubles and admins)!")
+                st.success("🎉 No tardies found for the selected period!")
         else:
-            st.warning("No valid matches found between Schedule and Attendance.")
+            st.warning("No valid matches found between Schedule and Attendance. Check if names match exactly.")
     else:
         st.info("Please upload both 'Staff Schedule' and 'Attendance Tracking' files.")
 
