@@ -1,841 +1,1031 @@
 ###############################################################
-# RXTRACK: EXECUTIVE DASHBOARD (v15.5 - Stable & Fixed)
+
+# RXTRACK: EXECUTIVE DASHBOARD (v14.3 - Memory Optimized)
+
 # Updates:
-#   1. FIXED: KeyError 'lag_str' in Return Reconciliation.
-#   2. RESTORED: Session Explorer user filtering & sorting.
-#   3. VERIFIED: Deep Detective & Anomaly Detection logic.
+
+#   1. Added 'reduce_mem_usage' to prevent App crashes.
+
+#   2. Fixed Schedule Loading (Smarter date detection).
+
+#   3. Added Drug Dropdowns & Audit Picker.
+
+#   4. Optimization: Garbage Collection & Cache Limits.
+
 ###############################################################
 
+
+
 import streamlit as st
+
 import pandas as pd
+
 import numpy as np
+
 import hashlib
+
 import psycopg2
+
 from psycopg2.extras import execute_batch
+
 import plotly.express as px
+
 import plotly.graph_objects as go
+
 from datetime import datetime, timedelta, date
+
 import gc
+
 import re
+
 import contextlib
+
 import warnings
 
-# --- OPTIONAL ML LIBRARY ---
-try:
-    from sklearn.ensemble import IsolationForest
-    from sklearn.preprocessing import StandardScaler
-    HAS_SKLEARN = True
-except ImportError:
-    HAS_SKLEARN = False
+import random
+
+
 
 # --- CONFIGURATION ---
+
 st.set_page_config(
-    page_title="RxTrack: Executive Suite", 
+
+    page_title="RxTrack: Workforce & Efficiency", 
+
     page_icon="🏥",
+
     layout="wide",
+
     initial_sidebar_state="expanded"
+
 )
 
+
+
 # Suppress warnings
+
 warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
-# --- INITIALIZE VARIABLES ---
-df_events = pd.DataFrame()
-df_config = pd.DataFrame()
-df_pharm = pd.DataFrame()
-df_sched = pd.DataFrame()
-df_att = pd.DataFrame()
-df_audits = pd.DataFrame()
+
+
+# --- MEMORY MANAGEMENT ---
+
+def reduce_mem_usage(df):
+
+    """Iterate through all columns and modify data types to reduce memory."""
+
+    if df.empty: return df
+
+    start_mem = df.memory_usage().sum() / 1024**2
+
+    for col in df.columns:
+
+        col_type = df[col].dtype
+
+        if col_type != object:
+
+            c_min, c_max = df[col].min(), df[col].max()
+
+            if str(col_type)[:3] == 'int':
+
+                if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+
+                    df[col] = df[col].astype(np.int8)
+
+                elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+
+                    df[col] = df[col].astype(np.int16)
+
+                elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+
+                    df[col] = df[col].astype(np.int32)
+
+            else:
+
+                if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
+
+                    df[col] = df[col].astype(np.float32)
+
+                else:
+
+                    df[col] = df[col].astype(np.float32)
+
+        else:
+
+            # Convert text to category if low cardinality (high repeats)
+
+            num_unique = len(df[col].unique())
+
+            num_total = len(df[col])
+
+            if num_total > 0 and num_unique / num_total < 0.5:
+
+                df[col] = df[col].astype('category')
+
+    return df
+
+
 
 # --- CONSTANTS ---
+
 NARC_TERMS = [
+
     "OXYCODONE", "MORPHINE", "FENTANYL", "HYDROMORPHONE", "HYDROCODONE", 
+
     "LORAZEPAM", "MIDAZOLAM", "DIAZEPAM", "ALPRAZOLAM", "CODEINE", 
+
     "METHADONE", "KETAMINE", "TRAMADOL", "ZOLPIDEM", "PHENOBARBITAL", 
-    "BUPRENORPHINE", "LACOSAMIDE", "VIMPAT", "PREGABALIN", "LYRICA", 
-    "CHLORDIAZEPOXIDE", "LIBRIUM", "CLONAZEPAM", "KLONOPIN"
+
+    "BUPRENORPHINE", "LACOSAMIDE", "VIMPAT", "PREGABALIN", "LYRICA"
+
 ]
 
 ADMIN_USERS = ['emily', 'joe', 'krista']
 
 NAME_MAPPINGS = {
-    "phi": "ali", "ho": "ali", "rebekah": "bekah",
-    "nugent": "kathy", "kathleen": "kathy",
-    "spain": "dee", "deloris": "dee",
-    "jabusch": "dan", "daniel": "dan",
-    "nicholas": "nick"      
+
+    "phi": "ali", "ho": "ali", "rebekah": "bekah", "nugent": "kathy", 
+
+    "kathleen": "kathy", "spain": "dee", "deloris": "dee", 
+
+    "jabusch": "dan", "daniel": "dan", "nicholas": "nick"     
+
 }
 
-AMBIGUOUS_NAMES = [
-    "melissa", "emily", "sarah", "megan", "erin", "kyle", 
-    "jessica", "andy", "heather", "michelle", "taylor"
-]
+AMBIGUOUS_NAMES = ["melissa", "emily", "sarah", "megan", "erin", "kyle", "jessica", "andy", "heather", "michelle", "taylor"]
 
-# --- AUDIT TEMPLATES ---
-AUDIT_TEMPLATES = {
-    "Standard Pyxis Compliance": {
-        "score_max": 100,
-        "criteria": ["Correct Count?", "No Expired?", "Stock Rotated?", "Bins Not Overfilled?", "Return Bin Emptied?"],
-        "has_drug_check": True
-    },
-    "IV Room / Aseptic": {
-        "score_max": 100,
-        "criteria": ["Proper Garbing?", "Aseptic Technique?", "Hood Cleaning Logged?", "No Personal Items?", "Vials Swabbed?"],
-        "has_drug_check": False
-    },
-    "Morning Workflow": {
-        "score_max": 50,
-        "criteria": ["Queue Cleared < 9am?", "Phone Answered?", "Crash Cart Restock?", "Handover Notes?"],
-        "has_drug_check": False
-    },
-    "Night Shift Security": {
-        "score_max": 50,
-        "criteria": ["Perpetual Inventory?", "Narc Vault Locked?", "Rounds Done?", "Fridge Temps?"],
-        "has_drug_check": False
-    }
-}
 
-# --- CUSTOM CSS ---
-st.markdown("""
-    <style>
-    .metric-card { background-color: #ffffff; padding: 20px; border-radius: 10px; border-left: 5px solid #4CAF50; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 10px; }
-    .metric-card h3 { color: #1f2937; margin: 0; font-size: 26px; font-weight: 700; }
-    .metric-card p { color: #6b7280; margin: 0; font-size: 14px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
-    .cal-grid { display: flex; flex-wrap: wrap; gap: 3px; max-width: 100%; margin-top: 10px; }
-    .cal-day { width: 12px; height: 12px; border-radius: 2px; background-color: #e5e7eb; }
-    .cal-present { background-color: #4CAF50; }
-    .cal-missing { background-color: #F87171; }
-    </style>
-    """, unsafe_allow_html=True)
 
 # --- DATABASE HELPERS ---
+
 @contextlib.contextmanager
+
 def db_cursor():
+
     conn = None
+
     try:
+
         conn = psycopg2.connect(st.secrets["neon"]["db_url"])
+
         cur = conn.cursor()
+
         yield conn, cur
+
     except Exception as e:
-        st.error(f"❌ Database Connection Error: {e}")
+
+        st.error(f"❌ Database Error: {e}")
+
         raise e
+
     finally:
+
         if conn: conn.close()
 
+
+
 def execute_statement(sql, params, batch=False, table_name="Data"):
+
     try:
+
         with db_cursor() as (conn, cur):
+
             if batch: execute_batch(cur, sql, params, page_size=2000)
+
             else: cur.execute(sql, params)
+
             conn.commit()
+
             st.toast(f"✅ Saved {len(params)} records to {table_name}!", icon="💾")
+
     except Exception as e:
+
         st.error(f"⚠️ Error executing {table_name}: {e}")
 
-def init_db():
-    schemas = [
-        "CREATE TABLE IF NOT EXISTS events (pk TEXT PRIMARY KEY, user_name TEXT, device TEXT, med_id TEXT, med_desc TEXT, event_type TEXT, dt TIMESTAMP, qty FLOAT, beginning_qty FLOAT, ending_qty FLOAT, discrepancy_qty FLOAT, discrepancy_reason TEXT, resolution_dt TIMESTAMP);",
-        "CREATE TABLE IF NOT EXISTS config_events (pk TEXT PRIMARY KEY, dt TIMESTAMP, user_name TEXT, device TEXT, med_id TEXT, location TEXT, action_type TEXT, activity_category TEXT, min_qty FLOAT, max_qty FLOAT, is_standard BOOLEAN);",
-        "CREATE TABLE IF NOT EXISTS med_costs (med_id TEXT PRIMARY KEY, cost_per_unit FLOAT);",
-        "CREATE TABLE IF NOT EXISTS pharmacy_orders (pk TEXT PRIMARY KEY, queue_id TEXT, priority TEXT, dt TIMESTAMP, med_id TEXT, med_desc TEXT, destination TEXT, user_name TEXT, qty FLOAT);",
-        "CREATE TABLE IF NOT EXISTS staff_schedule (pk TEXT PRIMARY KEY, dt DATE, day_name TEXT, staff_name TEXT, shift_type TEXT, assignment_type TEXT, raw_entry TEXT, note TEXT);",
-        "CREATE TABLE IF NOT EXISTS attendance_punches (pk TEXT PRIMARY KEY, raw_name TEXT, dt_date DATE, start_dt TIMESTAMP, end_dt TIMESTAMP);",
-        "CREATE TABLE IF NOT EXISTS inventory_audit (pk TEXT PRIMARY KEY, med_id TEXT, med_desc TEXT, med_class TEXT, unit_cost FLOAT, qty_on_hand FLOAT, min_lvl FLOAT, max_lvl FLOAT);",
-        "CREATE TABLE IF NOT EXISTS inventory_detailed (pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT, unit_cost FLOAT, current_count FLOAT, pocket_location TEXT);",
-        "CREATE TABLE IF NOT EXISTS tech_audits (pk TEXT PRIMARY KEY, audit_dt DATE, technician TEXT, category TEXT, question TEXT, result TEXT, points_earned FLOAT, points_possible FLOAT, note TEXT);"
-    ]
-    with db_cursor() as (conn, cur):
-        for sql in schemas: cur.execute(sql)
-        conn.commit()
+
 
 def run_query(query, params=None):
+
     try:
-        with db_cursor() as (conn, cur): return pd.read_sql(query, conn, params=params)
-    except Exception: return pd.DataFrame()
+
+        with db_cursor() as (conn, cur):
+
+            return pd.read_sql(query, conn, params=params)
+
+    except Exception:
+
+        return pd.DataFrame()
+
+
+
+def init_db():
+
+    schemas = [
+
+        "CREATE TABLE IF NOT EXISTS events (pk TEXT PRIMARY KEY, user_name TEXT, device TEXT, med_id TEXT, med_desc TEXT, event_type TEXT, dt TIMESTAMP, qty FLOAT, beginning_qty FLOAT, ending_qty FLOAT, discrepancy_qty FLOAT, discrepancy_reason TEXT, resolution_dt TIMESTAMP);",
+
+        "CREATE TABLE IF NOT EXISTS config_events (pk TEXT PRIMARY KEY, dt TIMESTAMP, user_name TEXT, device TEXT, med_id TEXT, location TEXT, action_type TEXT, activity_category TEXT, min_qty FLOAT, max_qty FLOAT, is_standard BOOLEAN);",
+
+        "CREATE TABLE IF NOT EXISTS med_costs (med_id TEXT PRIMARY KEY, cost_per_unit FLOAT);",
+
+        "CREATE TABLE IF NOT EXISTS pharmacy_orders (pk TEXT PRIMARY KEY, queue_id TEXT, priority TEXT, dt TIMESTAMP, med_id TEXT, med_desc TEXT, destination TEXT, user_name TEXT, qty FLOAT);",
+
+        "CREATE TABLE IF NOT EXISTS staff_schedule (pk TEXT PRIMARY KEY, dt DATE, day_name TEXT, staff_name TEXT, shift_type TEXT, assignment_type TEXT, raw_entry TEXT, note TEXT);",
+
+        "CREATE TABLE IF NOT EXISTS attendance_punches (pk TEXT PRIMARY KEY, raw_name TEXT, dt_date DATE, start_dt TIMESTAMP, end_dt TIMESTAMP);",
+
+        "CREATE TABLE IF NOT EXISTS inventory_audit (pk TEXT PRIMARY KEY, med_id TEXT, med_desc TEXT, med_class TEXT, unit_cost FLOAT, qty_on_hand FLOAT, min_lvl FLOAT, max_lvl FLOAT);",
+
+        "CREATE TABLE IF NOT EXISTS inventory_detailed (pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT, unit_cost FLOAT, current_count FLOAT, pocket_location TEXT);",
+
+        "CREATE TABLE IF NOT EXISTS tech_audits (pk TEXT PRIMARY KEY, audit_dt DATE, technician TEXT, category TEXT, question TEXT, result TEXT, points_earned FLOAT, points_possible FLOAT, note TEXT);"
+
+    ]
+
+    with db_cursor() as (conn, cur):
+
+        for sql in schemas: cur.execute(sql)
+
+        conn.commit()
+
+
 
 # --- UTILITY FUNCTIONS ---
+
 def seconds_to_mmss(seconds):
+
     if pd.isna(seconds) or seconds < 0: return "-"
+
     m, s = divmod(int(seconds), 60)
+
     h, m = divmod(m, 60)
+
     return f"{h}h {m}m {s}s" if h > 0 else f"{m}m {s}s"
 
+
+
 def generate_pk(row):
+
     subset = [str(x) for x in row.values if pd.notnull(x)]
+
     return hashlib.sha256("|".join(subset).encode()).hexdigest()
 
+
+
 def normalize_name(full_name):
+
     s = str(full_name).strip().lower()
+
     first_name, last_initial = "", ""
+
     if "," in s:
+
         parts = s.split(",")
+
         if len(parts) >= 2:
+
             first_name = parts[1].strip().split(" ")[0]
+
             if parts[0].strip(): last_initial = parts[0].strip()[0]
+
     else:
+
         parts = s.split(" ")
+
         first_name = parts[0]
+
         if len(parts) > 1: last_initial = parts[1][0]
+
     for key, val in NAME_MAPPINGS.items():
+
         if key in first_name: 
+
             first_name = val
+
             break
+
     if first_name in AMBIGUOUS_NAMES and last_initial:
+
         return f"{first_name} {last_initial}"
+
     return first_name
 
+
+
 def parse_shift_start(date_obj, shift_str):
+
     if not shift_str or pd.isna(shift_str): return None
+
     s = str(shift_str).lower().strip()
+
     m_time = re.search(r'(\d{1,2}):(\d{2})', s)
+
     if m_time:
+
         h, m = int(m_time.group(1)), int(m_time.group(2))
+
         if 'p' in s and h < 12: h += 12
+
         if 'a' in s and h == 12: h = 0
+
         try: return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
+
         except: return None
+
     return None
 
-def get_reconciled_returns(df):
-    if df.empty: return df
-    df_clean = df[~df['event_type'].astype(str).str.upper().str.contains("CANCELLED")].copy()
-    df_clean = df_clean.sort_values(['device', 'med_id', 'dt'])
-    drop_indices = set()
-    groups = df_clean[df_clean['event_type'].isin(['Unload', 'Load'])].groupby(['device', 'med_id'])
-    for (device, med), group in groups:
-        pending_unloads = []
-        for idx, row in group.iterrows():
-            if row['event_type'] == 'Unload':
-                pending_unloads.append({'idx': idx, 'qty': row['qty']})
-            elif row['event_type'] == 'Load':
-                for i in range(len(pending_unloads) - 1, -1, -1):
-                    if abs(pending_unloads[i]['qty'] - row['qty']) < 0.01:
-                        drop_indices.add(pending_unloads[i]['idx'])
-                        drop_indices.add(idx)
-                        pending_unloads.pop(i)
-                        break
-    return df_clean.drop(index=list(drop_indices))
 
-def smart_match_returns(unloads, returns, lookback_hours=72):
-    if unloads.empty or returns.empty: return unloads, returns
-    u_df, r_df = unloads.copy(), returns.copy()
-    u_df['match_id'] = None
-    
-    # Initialize columns carefully
-    for c in ['match_id', 'suspected_source', 'source_user', 'unload_dt', 'lag_str']:
-        r_df[c] = None
-        
-    u_df = u_df.sort_values('dt')
-    r_df = r_df.sort_values('dt')
-    
-    for r_idx, r_row in r_df.iterrows():
-        candidates = u_df[
-            (u_df['norm_med_id'] == r_row['norm_med_id']) &
-            (u_df['dt'] < r_row['dt']) &
-            (u_df['dt'] >= r_row['dt'] - timedelta(hours=lookback_hours)) &
-            (u_df['match_id'].isnull())
-        ]
-        if not candidates.empty:
-            best = candidates[candidates['qty'] == r_row['qty']]
-            match_idx = best.index[-1] if not best.empty else candidates.index[-1]
-            match_row = u_df.loc[match_idx]
-            match_id = f"{r_idx}-{match_idx}"
-            u_df.at[match_idx, 'match_id'] = match_id
-            r_df.at[r_idx, 'match_id'] = match_id
-            r_df.at[r_idx, 'suspected_source'] = match_row['device']
-            r_df.at[r_idx, 'source_user'] = match_row['user_name']
-            r_df.at[r_idx, 'unload_dt'] = match_row['dt']
-            lag = r_row['dt'] - match_row['dt']
-            r_df.at[r_idx, 'lag_str'] = f"{lag.days}d {lag.seconds//3600}h {(lag.seconds//60)%60}m"
-    return u_df, r_df
 
-# --- DATA CLEANING & LOADING ---
+# --- DATA CLEANING ---
+
 def clean_dataframe(df):
+
     df = df.copy()
-    colmap = {"UserName": "user_name", "Device": "device", "MedID": "med_id", "MedDescription": "med_desc", "TransactionType": "event_type", "TransactionDateTime": "dt", "Quantity": "qty", "DiscrepancyQuantity": "discrepancy_qty", "DiscrepancyReason": "discrepancy_reason"}
+
+    colmap = {
+
+        "UserName": "user_name", "Device": "device", "MedID": "med_id", "MedDescription": "med_desc", 
+
+        "TransactionType": "event_type", "TransactionDateTime": "dt", "Quantity": "qty", 
+
+        "Beg": "beginning_qty", "End": "ending_qty", "DiscrepancyQuantity": "discrepancy_qty", 
+
+        "DiscrepancyReason": "discrepancy_reason", "ResolutionDatetime": "resolution_dt"
+
+    }
+
     df.rename(columns=colmap, inplace=True)
+
     required = ["user_name", "device", "med_id", "med_desc", "event_type", "dt", "qty"]
-    for c in required:
-        if c not in df.columns: df[c] = None
+
+    for col in required:
+
+        if col not in df.columns: df[col] = None
+
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+
     df.dropna(subset=["dt"], inplace=True)
-    for c in ["qty", "discrepancy_qty"]: df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype('float32')
+
+    for c in ["qty", "discrepancy_qty"]:
+
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype('float32')
+
     df["dt"] = df["dt"].astype(str)
+
     df["pk"] = df.apply(generate_pk, axis=1)
+
     return df
 
-def clean_pharmacy_report(df):
-    df = df.copy()
-    colmap = {"TranQueueID": "queue_id", "Priority": "priority", "Date / Time": "dt", "Item ID": "med_id", "Description": "med_desc", "Destination": "destination", "User": "user_name", "Quantity": "qty"}
-    df.rename(columns=colmap, inplace=True)
-    for c in colmap.values():
-        if c not in df.columns: df[c] = None
-    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-    df.dropna(subset=["dt"], inplace=True)
-    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
-    df["dt"] = df["dt"].astype(str)
-    df["pk"] = df.apply(generate_pk, axis=1)
-    return df
 
-def clean_activity_log(df):
-    df = df.copy()
-    df.columns = df.columns.str.strip().str.replace(' ', '')
-    df.rename(columns={"UserName": "user_name", "Device": "device", "TransactionDateTime": "dt", "Action": "action_type", "ActivityType": "activity_category", "AffectedElement": "raw_element", "Amount": "qty_col", "Quantity": "qty_col"}, inplace=True)
-    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-    df.dropna(subset=["dt"], inplace=True)
-    pattern = r'^(.*?) \((.*?)\)'
-    extracted = df['raw_element'].astype(str).str.extract(pattern)
-    df['location'] = extracted[0].str.strip()
-    df['med_id'] = extracted[1].str.strip()
-    df.dropna(subset=['med_id'], inplace=True)
-    if 'qty_col' not in df.columns: df['qty_col'] = df['raw_element'].astype(str).str.extract(r':\s*(\d+)$')[0]
-    df['qty_extracted'] = pd.to_numeric(df['qty_col'], errors='coerce')
-    df['is_min'] = df['activity_category'].str.contains('Min', case=False, na=False)
-    df['is_max'] = df['activity_category'].str.contains('Max', case=False, na=False)
-    df['is_std'] = df['activity_category'].str.contains('Standard Stock', case=False, na=False)
-    df['min_qty'] = np.where(df['is_min'], df['qty_extracted'], np.nan)
-    df['max_qty'] = np.where(df['is_max'], df['qty_extracted'], np.where((~df['is_min']) & (~df['is_max']), df['qty_extracted'], np.nan))
-    grouped = df.groupby(['user_name', 'device', 'med_id'], as_index=False).agg({'min_qty': 'max', 'max_qty': 'max', 'is_std': 'max', 'location': 'first', 'dt': 'first', 'action_type': 'first', 'activity_category': 'first'})
-    grouped["dt"] = grouped["dt"].astype(str)
-    grouped["pk"] = grouped.apply(generate_pk, axis=1)
-    return grouped.rename(columns={'is_std': 'is_standard'})
 
 def clean_schedule_data(df):
+
     df = df.copy()
-    if len(df.columns) > 2: df.rename(columns={df.columns[1]: 'Date', df.columns[2]: 'Day'}, inplace=True)
-    df = df.iloc[1:].dropna(subset=['Date'])
-    df.drop(columns=[df.columns[0]], errors='ignore', inplace=True)
-    long_df = df.melt(id_vars=['Date', 'Day'], var_name='col_header', value_name='raw_entry')
+
+    date_col = next((c for c in df.columns if "date" in str(c).lower()), None)
+
+    if date_col: df.rename(columns={date_col: 'Date'}, inplace=True)
+
+    elif len(df.columns) > 1: df.rename(columns={df.columns[1]: 'Date'}, inplace=True)
+
+    
+
+    df = df.dropna(subset=['Date'])
+
+    df = df[pd.to_datetime(df['Date'], errors='coerce').notna()] # valid dates only
+
+    
+
+    id_vars = [c for c in df.columns if "date" in str(c).lower() or "day" in str(c).lower()]
+
+    if not id_vars: id_vars = ['Date']
+
+    
+
+    long_df = df.melt(id_vars=id_vars, var_name='col_header', value_name='raw_entry')
+
     long_df.dropna(subset=['raw_entry'], inplace=True)
+
     long_df = long_df[~long_df['raw_entry'].astype(str).str.lower().isin(['x', 'nan', '', ' '])]
+
+    
+
     processed_rows = []
+
     for _, row in long_df.iterrows():
+
         raw = str(row['raw_entry']).strip()
-        dt = pd.to_datetime(row['Date'], errors='coerce').date()
-        parts = [p.strip() for p in raw.split('\n') if p.strip()]
+
+        try: dt = pd.to_datetime(row[id_vars[0]]).date()
+
+        except: continue
+
+        day_name = row.get('Day', dt.strftime('%A'))
+
+        
+
+        parts = [p.strip() + ')' for p in raw.split(')') if '(' in p] if re.search(r'\(\d', raw) else [p.strip() for p in raw.split('\n') if p.strip()]
+
+        
+
         for part in parts:
-            clean_part = part.replace('()', '').strip()
-            final_shift_str = "Scheduled"
-            processed_rows.append({'pk': hashlib.sha256(f"{dt}|{clean_part}".encode()).hexdigest(), 'dt': dt, 'staff_name': clean_part.title(), 'shift_type': final_shift_str, 'assignment_type': "Shift", 'raw_entry': part, 'note': ""})
+
+            if not part or part == ')': continue
+
+            override_time = None
+
+            m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part)
+
+            if m_range: override_time = m_range.group(1); clean_part = part.replace(m_range.group(0), '')
+
+            else: clean_part = part
+
+            
+
+            clean_part = clean_part.replace('()', '').strip()
+
+            if clean_part.endswith(','): clean_part = clean_part[:-1]
+
+            
+
+            assignment_type = "Shift"
+
+            if 'trn' in clean_part.lower(): assignment_type = "Training"
+
+            elif any(x in clean_part.lower() for x in ['pto', 'off', 'sick']): assignment_type = "PTO"
+
+            
+
+            final_shift_str = override_time if override_time else "Scheduled"
+
+            pk = hashlib.sha256(f"{dt}|{clean_part}|{final_shift_str}".encode()).hexdigest()
+
+            processed_rows.append({'pk': pk, 'dt': dt, 'day_name': day_name, 'staff_name': clean_part.title(), 'shift_type': final_shift_str, 'assignment_type': assignment_type, 'raw_entry': part, 'note': ""})
+
     return pd.DataFrame(processed_rows)
 
+
+
 def clean_attendance_file(file_obj):
+
     file_obj.seek(0)
+
     content = file_obj.read().decode('utf-8', errors='ignore')
+
+    lines = content.splitlines()
+
     data = []
+
     name_pat = re.compile(r'Employee:\s*([A-Za-z\-,\s\.]+?)(?="|",|",Date)')
+
     date_pat = re.compile(r'Date:\s*(\d{1,2}/\d{1,2}/\d{4})')
+
     time_pat = re.compile(r'(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2})')
-    for line in content.splitlines():
-        m_name, m_date = name_pat.search(line), date_pat.search(line)
+
+    for line in lines:
+
+        if "Employee:" not in line: continue
+
+        m_name = name_pat.search(line)
+
+        m_date = date_pat.search(line)
+
         times = time_pat.findall(line)
-        if m_name and m_date and len(times)>0:
+
+        if m_name and m_date and len(times) > 0:
+
             data.append({"raw_name": m_name.group(1).strip(), "dt_date": pd.to_datetime(m_date.group(1)).date(), "start_dt": times[0], "end_dt": times[1] if len(times)>1 else None})
+
     df = pd.DataFrame(data)
+
     if not df.empty: df["pk"] = df.apply(generate_pk, axis=1)
+
     return df
 
-@st.cache_data(ttl=300)
-def load_data(start_date, end_date):
-    queries = {
-        "events": "SELECT e.pk, e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id WHERE e.dt::date BETWEEN %s AND %s",
-        "config": "SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard FROM config_events WHERE dt::date BETWEEN %s AND %s",
-        "pharm": "SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s",
-        "schedule": "SELECT pk, dt, staff_name, shift_type FROM staff_schedule WHERE dt BETWEEN %s AND %s",
-        "attendance": "SELECT pk, raw_name, dt_date, start_dt, end_dt FROM attendance_punches WHERE dt_date BETWEEN %s AND %s",
-        "audits": "SELECT pk, audit_dt, technician, points_earned, points_possible FROM tech_audits WHERE audit_dt BETWEEN %s AND %s"
-    }
-    results = {}
-    with db_cursor() as (conn, cur):
-        for key, sql in queries.items():
-            try:
-                results[key] = pd.read_sql(sql, conn, params=(start_date, end_date))
-                if 'dt' in results[key].columns: results[key]["dt"] = pd.to_datetime(results[key]["dt"])
-            except: results[key] = pd.DataFrame()
-    
-    df = results["events"]
-    if not df.empty:
-        df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
-        df.sort_values(['user_name', 'dt'], inplace=True)
-        
-        # Safe Session Logic (Shift without index issues)
-        df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
-        df['prev_device'] = df.groupby('user_name')['device'].shift(1)
-        df['duration'] = (df['next_dt'] - df['dt']).dt.total_seconds()
-        
-        # Calculate machine time only if same device
-        df['machine_time_sec'] = np.where(
-            (df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['duration'] < 600), 
-            df['duration'], 0
-        )
-        df.drop(columns=['next_dt'], inplace=True)
 
-    return df, results["config"], results["pharm"], results["schedule"], results["attendance"], results["audits"]
+
+def clean_audit_file(df, filename):
+
+    df = df.copy()
+
+    audit_date = date.today()
+
+    tech_name = "Unknown"
+
+    m = re.search(r'(\d{1,2})[\.\-](\d{1,2})[\.\-](\d{2,4})', filename)
+
+    if m:
+
+        try:
+
+            mo, d, y = m.groups()
+
+            audit_date = date(int(f"20{y}") if len(y)==2 else int(y), int(mo), int(d))
+
+            tech_name = normalize_name(filename[:m.start()].strip())
+
+        except: pass
+
+    
+
+    col_map = {}
+
+    for c in df.columns:
+
+        cl = c.lower()
+
+        if 'category' in cl: col_map[c] = 'category'
+
+        elif 'question' in cl: col_map[c] = 'question'
+
+        elif 'result' in cl: col_map[c] = 'result'
+
+        elif 'comment' in cl: col_map[c] = 'note'
+
+    df.rename(columns=col_map, inplace=True)
+
+    
+
+    for req in ['category', 'question', 'result']: 
+
+        if req not in df.columns: df[req] = "Unknown"
+
+    
+
+    df['points_earned'] = df['result'].astype(str).str.lower().isin(['yes','pass','compliant','1','ok']).astype(int)
+
+    df['points_possible'] = 1.0
+
+    df['audit_dt'] = audit_date
+
+    df['technician'] = tech_name
+
+    df['pk'] = df.apply(lambda x: hashlib.sha256(f"{x['audit_dt']}|{x['technician']}|{x['question']}".encode()).hexdigest(), axis=1)
+
+    return df[['pk', 'audit_dt', 'technician', 'category', 'question', 'result', 'points_earned', 'points_possible', 'note']]
+
+
+
+# --- DATA LOADERS (MEMORY OPTIMIZED) ---
+
+@st.cache_data(ttl=300, max_entries=1)
+
+def load_data(start_date, end_date):
+
+    queries = {
+
+        "events": "SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, e.discrepancy_qty, c.cost_per_unit FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id WHERE e.dt::date BETWEEN %s AND %s",
+
+        "pharm": "SELECT pk, priority, dt, med_id, med_desc, destination, user_name, qty FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s",
+
+        "schedule": "SELECT pk, dt, staff_name, shift_type, assignment_type FROM staff_schedule WHERE dt BETWEEN %s AND %s",
+
+        "attendance": "SELECT pk, raw_name, dt_date, start_dt, end_dt FROM attendance_punches WHERE dt_date BETWEEN %s AND %s",
+
+        "audits": "SELECT pk, audit_dt, technician, category, question, result, points_earned, points_possible, note FROM tech_audits WHERE audit_dt BETWEEN %s AND %s"
+
+    }
+
+    results = {}
+
+    with db_cursor() as (conn, cur):
+
+        for key, sql in queries.items():
+
+            try:
+
+                df = pd.read_sql(sql, conn, params=(start_date, end_date))
+
+                if 'dt' in df.columns: df["dt"] = pd.to_datetime(df["dt"])
+
+                results[key] = reduce_mem_usage(df)
+
+            except Exception: results[key] = pd.DataFrame()
+
+            
+
+    # Process Events
+
+    df = results["events"]
+
+    if not df.empty:
+
+        df["cost_per_unit"] = df["cost_per_unit"].fillna(0)
+
+        df = df[~df['med_desc'].astype(str).str.contains(r'Drw|Pkt|Cubic', regex=True, case=False, na=False)]
+
+        df.sort_values(['user_name', 'dt'], inplace=True)
+
+        # Vectorized Session ID (Faster)
+
+        df['time_gap'] = df.groupby('user_name')['dt'].diff().dt.total_seconds().fillna(0)
+
+        df['device_change'] = df['device'] != df.groupby('user_name')['device'].shift(1)
+
+        df['is_new_session'] = (df['time_gap'] > 1200) | (df['device_change'])
+
+        df['session_id'] = df['is_new_session'].cumsum()
+
+        
+
+        # Calculate Machine Time
+
+        df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
+
+        df['dur'] = (df['next_dt'] - df['dt']).dt.total_seconds().fillna(0)
+
+        # Only count time if next transaction is same device and < 10 mins
+
+        df['machine_time_sec'] = np.where((df['device'] == df.groupby('user_name')['device'].shift(-1)) & (df['dur'] < 600), df['dur'], 0)
+
+        df.drop(columns=['time_gap', 'device_change', 'is_new_session', 'next_dt', 'dur'], inplace=True)
+
+
+
+    # Force garbage collection
+
+    gc.collect()
+
+    return df, results.get("config", pd.DataFrame()), results["pharm"], results["schedule"], results["attendance"], results["audits"]
+
+
+
+def get_stats_range():
+
+    sql = "SELECT (SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM pharmacy_orders), (SELECT COUNT(*) FROM staff_schedule), (SELECT COUNT(*) FROM attendance_punches), MIN(dt::date), MAX(dt::date) FROM events"
+
+    with db_cursor() as (conn, cur):
+
+        cur.execute(sql)
+
+        row = cur.fetchone()
+
+        return (row[0] or 0), (row[1] or 0), (row[2] or 0), (row[3] or 0), (row[4] or date.today()), (row[5] or date.today())
+
+
+
+def get_present_dates(min_dt, max_dt):
+
+    df = run_query("SELECT DISTINCT dt::date FROM events WHERE dt IS NOT NULL UNION SELECT DISTINCT dt::date FROM pharmacy_orders WHERE dt IS NOT NULL")
+
+    if not df.empty:
+
+        df[df.columns[0]] = pd.to_datetime(df[df.columns[0]], errors='coerce')
+
+        return set(df[df.columns[0]].dt.date.dropna())
+
+    return set()
+
+
 
 # --- MAIN APP LOGIC ---
+
 init_db()
 
-PAGES = [
-    "📊 Overview", "🕵️‍♂️ Deep Detective", "📝 Smart Audits", "🏆 Tech of the Quarter", 
-    "🎓 Student Project", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", 
-    "🛡️ Compliance", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", 
-    "🔄 Return Reconciliation", "⚖️ Tech Comparison", "📈 Tech Progression", "📅 Attendance", "📥 Pends Analyzer"
-]
+
+
+PAGES = ["📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "📝 Manager Tools", "⏰ Tardies", "🚀 Process Mining", "🛡️ Compliance", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", "📈 Tech Progression", "📅 Attendance"]
+
+
 
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-    st.title("RxTrack v15.5")
-    st.caption("Deep Detective Edition")
-    selected_page = st.radio("Go to:", PAGES)
-    st.divider()
-    
-    d_range = st.date_input("Analysis Range", [date.today()-timedelta(days=7), date.today()])
-    if len(d_range) == 2: start_date, end_date = d_range
-    else: start_date, end_date = d_range[0], d_range[0]
 
-    u_type = st.selectbox("Import", ["Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking"])
-    uploaded = st.file_uploader("Upload File", type=["csv", "xlsx"])
-    if uploaded and st.button("Process"):
+    st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
+
+    st.title("RxTrack v14.3")
+
+    st.caption("Manager's Edition (Optimized)")
+
+    selected_page = st.radio("Go to:", PAGES, label_visibility="collapsed")
+
+    st.divider()
+
+    
+
+    n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
+
+    
+
+    # Date Picker
+
+    filter_mode = st.radio("Filter Mode", ["Range", "Week", "Day"], horizontal=True, label_visibility="collapsed")
+
+    if filter_mode == "Range":
+
+        d_range = st.slider("Range:", min_value=min_db, max_value=max_db, value=(max(min_db, max_db-timedelta(days=14)), max_db), format="MM/DD/YY")
+
+        start_date, end_date = d_range
+
+    elif filter_mode == "Week":
+
+        ws = st.date_input("Week of:", value=max_db-timedelta(days=7), min_value=min_db, max_value=max_db)
+
+        start_date, end_date = ws, ws + timedelta(days=6)
+
+    else:
+
+        sd = st.date_input("Day:", value=max_db, min_value=min_db, max_value=max_db)
+
+        start_date, end_date = sd, sd
+
+
+
+    st.divider()
+
+    u_type = st.selectbox("📥 Import Data", ["Daily Transaction Report", "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking", "Technician Audit"])
+
+    uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
+
+    if uploaded and st.button("Process File"):
+
         try:
-            if u_type == "Daily Transaction Report":
-                df_raw = pd.read_csv(uploaded, header=0, encoding='latin1') 
-                clean = clean_dataframe(df_raw)
-                sql = "INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, discrepancy_qty, discrepancy_reason) VALUES (%(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, %(event_type)s, %(dt)s, %(qty)s, %(discrepancy_qty)s, %(discrepancy_reason)s) ON CONFLICT (pk) DO NOTHING;"
-                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Events")
-            elif u_type == "Device Activity Log (Pends)":
-                df_raw = pd.read_csv(uploaded, header=0, encoding='latin1')
-                clean = clean_activity_log(df_raw)
-                sql = "INSERT INTO config_events (pk, dt, user_name, device, med_id, location, action_type, activity_category, min_qty, max_qty, is_standard) VALUES (%(pk)s, %(dt)s, %(user_name)s, %(device)s, %(med_id)s, %(location)s, %(action_type)s, %(activity_category)s, %(min_qty)s, %(max_qty)s, %(is_standard)s) ON CONFLICT (pk) DO NOTHING;"
-                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Config")
-            elif u_type == "Pharmacy Workflow Report":
-                df_raw = pd.read_csv(uploaded, header=0, encoding='latin1')
-                clean = clean_pharmacy_report(df_raw)
-                sql = "INSERT INTO pharmacy_orders (pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty) VALUES (%(pk)s, %(queue_id)s, %(priority)s, %(dt)s, %(med_id)s, %(med_desc)s, %(destination)s, %(user_name)s, %(qty)s) ON CONFLICT (pk) DO NOTHING;"
-                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Pharmacy")
-            elif u_type == "Staff Schedule":
-                df_raw = pd.read_csv(uploaded, header=0, encoding='latin1')
-                clean = clean_schedule_data(df_raw)
-                sql = "INSERT INTO staff_schedule (pk, dt, staff_name, shift_type, assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, %(note)s) ON CONFLICT (pk) DO NOTHING;"
-                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
-            elif u_type == "Attendance Tracking":
+
+            if u_type == "Attendance Tracking":
+
                 clean = clean_attendance_file(uploaded)
+
                 sql = "INSERT INTO attendance_punches (pk, raw_name, dt_date, start_dt, end_dt) VALUES (%(pk)s, %(raw_name)s, %(dt_date)s, %(start_dt)s, %(end_dt)s) ON CONFLICT (pk) DO NOTHING;"
+
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
+
+            elif u_type == "Technician Audit":
+
+                clean = clean_audit_file(pd.read_csv(uploaded), uploaded.name)
+
+                sql = "INSERT INTO tech_audits (pk, audit_dt, technician, category, question, result, points_earned, points_possible, note) VALUES (%(pk)s, %(audit_dt)s, %(technician)s, %(category)s, %(question)s, %(result)s, %(points_earned)s, %(points_possible)s, %(note)s) ON CONFLICT (pk) DO UPDATE SET result=EXCLUDED.result, points_earned=EXCLUDED.points_earned, note=EXCLUDED.note;"
+
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Audits")
+
+            elif u_type == "Staff Schedule":
+
+                raw = pd.read_excel(uploaded) if uploaded.name.endswith('.xlsx') else pd.read_csv(uploaded, header=0, encoding='latin1')
+
+                clean = clean_schedule_data(raw)
+
+                sql = "INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(day_name)s, %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, %(note)s) ON CONFLICT (pk) DO NOTHING;"
+
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
+
+            elif u_type == "Daily Transaction Report":
+
+                raw = pd.read_csv(uploaded, header=None, nrows=20, encoding='latin1')
+
+                h_idx = next((i for i, r in raw.iterrows() if "username" in str(r.values).lower() and "device" in str(r.values).lower()), None)
+
+                if h_idx is not None:
+
+                    uploaded.seek(0)
+
+                    clean = clean_dataframe(pd.read_csv(uploaded, header=h_idx, encoding='latin1'))
+
+                    sql = "INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason, resolution_dt) VALUES (%(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, %(event_type)s, %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s, %(discrepancy_qty)s, %(discrepancy_reason)s, %(resolution_dt)s) ON CONFLICT (pk) DO NOTHING;"
+
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Events")
+
+            elif u_type == "Pharmacy Workflow Report":
+
+                raw = pd.read_csv(uploaded, header=None, nrows=20, encoding='latin1')
+
+                h_idx = next((i for i, r in raw.iterrows() if "tranqueueid" in str(r.values).lower()), None)
+
+                if h_idx is not None:
+
+                    uploaded.seek(0)
+
+                    clean = clean_pharmacy_report(pd.read_csv(uploaded, header=h_idx, encoding='latin1'))
+
+                    sql = "INSERT INTO pharmacy_orders (pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty) VALUES (%(pk)s, %(queue_id)s, %(priority)s, %(dt)s, %(med_id)s, %(med_desc)s, %(destination)s, %(user_name)s, %(qty)s) ON CONFLICT (pk) DO NOTHING;"
+
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Pharmacy Orders")
+
+            
+
             st.cache_data.clear()
+
             st.rerun()
+
         except Exception as e: st.error(f"Error: {e}")
 
-if 'start_date' in locals():
-    try: df_events, df_config, df_pharm, df_sched, df_att, df_audits = load_data(start_date, end_date)
-    except: pass
 
-# --- PAGE LOGIC ---
+
+# --- LOAD DATA ---
+
+if 'start_date' in locals():
+
+    try: df_events, df_config, df_pharm, df_sched, df_att, df_audits = load_data(start_date, end_date)
+
+    except Exception as e: st.error(f"Load Error: {e}")
+
+
 
 # 1. OVERVIEW
+
 if selected_page == "📊 Overview":
+
     st.markdown("## 🏥 Executive Summary")
+
     if not df_events.empty:
+
         c1, c2, c3, c4 = st.columns(4)
+
         c1.metric("Transactions", f"{len(df_events):,}")
+
         c2.metric("Active Techs", df_events["user_name"].nunique())
+
         c3.metric("Discrepancies", df_events["discrepancy_qty"].ne(0).sum())
-        c4.metric("Avg Speed", f"{df_events[df_events['machine_time_sec']>0]['machine_time_sec'].mean():.1f}s")
-        st.subheader("🐢 Slowest Meds")
-        slow = df_events[df_events['machine_time_sec']>0].groupby('med_desc')['machine_time_sec'].mean().sort_values(ascending=False).head(10).reset_index()
-        st.plotly_chart(px.bar(slow, x='machine_time_sec', y='med_desc', orientation='h'), use_container_width=True)
 
-# 2. DEEP DETECTIVE
-elif selected_page == "🕵️‍♂️ Deep Detective":
-    st.header("🕵️‍♂️ Deep Detective: Anomaly Detection")
-    if not df_events.empty:
-        user_stats = df_events.groupby('user_name').agg(
-            Total_Tx=('pk', 'count'),
-            Cancels=('event_type', lambda x: x.astype(str).str.contains('CANCEL', case=False).sum()),
-            Unloads=('event_type', lambda x: x.astype(str).str.contains('Unload', case=False).sum()),
-            Avg_Speed=('machine_time_sec', lambda x: x[x>0].mean())
-        ).reset_index()
-        min_tx = st.slider("Min Transactions", 10, 500, 20)
-        active = user_stats[user_stats['Total_Tx'] >= min_tx].copy()
-        if not active.empty:
-            active['Cancel_Rate'] = active['Cancels'] / active['Total_Tx'] * 100
-            active['Unload_Rate'] = active['Unloads'] / active['Total_Tx'] * 100
-            mu, sigma = active['Cancel_Rate'].mean(), active['Cancel_Rate'].std()
-            active['Z_Cancel'] = (active['Cancel_Rate'] - mu) / (sigma + 1e-6)
-            if HAS_SKLEARN:
-                feat = ['Cancel_Rate', 'Unload_Rate', 'Avg_Speed']
-                active[feat] = active[feat].fillna(0)
-                clf = IsolationForest(contamination=0.05, random_state=42)
-                active['ML_Flag'] = np.where(clf.fit_predict(StandardScaler().fit_transform(active[feat])) == -1, "🔴 High Risk", "🟢 Normal")
-            else: active['ML_Flag'] = "⚪ No ML"
+        
+
+        col_main, col_side = st.columns([2, 1])
+
+        with col_main:
+
+            st.subheader("🐢 Slowest Medications")
+
+            slow = df_events[df_events['machine_time_sec'] > 0].groupby('med_desc')['machine_time_sec'].mean().sort_values(ascending=False).head(10).reset_index()
+
+            st.plotly_chart(px.bar(slow, x='machine_time_sec', y='med_desc', orientation='h', title="Avg Seconds per Med"), use_container_width=True)
+
+        with col_side:
+
+            st.subheader("Activity")
+
+            st.plotly_chart(px.pie(df_events, names='event_type', hole=0.4), use_container_width=True)
+
+
+
+# 16. MANAGER TOOLS
+
+elif selected_page == "📝 Manager Tools":
+
+    st.header("📝 Manager Tools & Awards")
+
+    tabs = st.tabs(["🎲 Pick Audit Target", "📝 Digital Audit Form", "🏆 Tech of the Quarter"])
+
+    
+
+    with tabs[0]: # PICKER
+
+        st.subheader("🎲 Random Tech Selector")
+
+        if st.button("🎲 Pick Someone", use_container_width=True):
+
+            candidates = []
+
+            if not df_sched.empty:
+
+                working = df_sched[df_sched['dt'].astype(str) == date.today().strftime('%Y-%m-%d')]['staff_name'].unique()
+
+                candidates = [c for c in working if normalize_name(c) not in ADMIN_USERS]
+
+            if not candidates and not df_events.empty:
+
+                candidates = [c for c in df_events['user_name'].unique() if c not in ADMIN_USERS]
+
             
-            c1, c2 = st.columns(2)
-            with c1:
-                fig = px.scatter(active, x='Total_Tx', y='Cancel_Rate', color='ML_Flag' if HAS_SKLEARN else 'Z_Cancel', size='Unload_Rate', hover_name='user_name', title="Risk Analysis")
-                fig.add_hline(y=mu, line_dash="dash")
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                st.subheader("Top Anomalies")
-                st.dataframe(active.sort_values('Z_Cancel', ascending=False).head(10)[['user_name', 'Cancel_Rate', 'Z_Cancel', 'ML_Flag']], use_container_width=True)
-        else: st.warning("Not enough data.")
-    else: st.info("Upload Data.")
 
-# 3. SMART AUDITS
-elif selected_page == "📝 Smart Audits":
-    st.header("📝 Smart Audit Targeting")
-    today = date.today()
-    todays_shift = df_sched[df_sched['dt'] == today].copy() if not df_sched.empty else pd.DataFrame()
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.subheader("🎯 Today's Roster")
-        if not todays_shift.empty:
-            opts = [f"{r['staff_name']} ({r['shift_type']})" for _, r in todays_shift.iterrows()]
-            target = st.radio("Select Target:", opts)
-            st.info(f"Selected: {target}")
-        else: st.warning("No schedule data.")
-    with c2:
-        st.subheader("📋 Audit Form")
+            if candidates:
+
+                winner = random.choice(candidates)
+
+                st.balloons()
+
+                st.success(f"🎯 TODAY'S TARGET: **{str(winner).upper()}**")
+
+            else: st.warning("No candidates found.")
+
+
+
+    with tabs[1]: # AUDIT FORM
+
+        st.subheader("📝 New 5-Drug Audit")
+
+        # DRUG DROPDOWN
+
+        all_techs = sorted(df_events['user_name'].unique()) if not df_events.empty else ["Unknown"]
+
+        drug_opts = [""] + sorted(df_events['med_desc'].dropna().unique()) if not df_events.empty else [""]
+
+        
+
         with st.form("audit"):
-            wf = st.selectbox("Workflow", list(AUDIT_TEMPLATES.keys()))
-            score = 0
-            for c in AUDIT_TEMPLATES[wf]["criteria"]:
-                if st.checkbox(c): score += 10
-            if st.form_submit_button("Save"):
-                st.success(f"Audit Saved! Score: {score}")
 
-# 4. TECH OF QUARTER
-elif selected_page == "🏆 Tech of the Quarter":
-    st.header("🏆 Tech of the Quarter")
-    if not df_audits.empty:
-        start_q, end_q = st.columns(2)[0].date_input("Start", date(date.today().year,1,1)), st.columns(2)[1].date_input("End", date.today())
-        q_audits = df_audits[(df_audits['audit_dt']>=start_q) & (df_audits['audit_dt']<=end_q)]
-        if not q_audits.empty:
-            rank = q_audits.groupby('technician')['points_earned'].mean().reset_index().sort_values('points_earned', ascending=False)
-            st.balloons()
-            st.dataframe(rank, use_container_width=True)
-    else: st.info("No audit data.")
-
-# 5. STUDENT PROJECT
-elif selected_page == "🎓 Student Project":
-    st.header("🎓 Student Project")
-    if not df_events.empty:
-        users = st.multiselect("Students", sorted(df_events['user_name'].unique()))
-        if users:
-            sub = df_events[df_events['user_name'].isin(users)]
-            val = (sub['qty'] * sub['cost_per_unit']).sum()
-            st.metric("Total Value Saved", f"${val:,.2f}")
-            st.dataframe(sub, use_container_width=True)
-
-# 6. SHIFT LEADERBOARD
-elif selected_page == "🏆 Shift Leaderboard":
-    if not df_sched.empty and not df_events.empty:
-        df_events['k'] = df_events['user_name'].apply(normalize_name)
-        df_sched['k'] = df_sched['staff_name'].apply(normalize_name)
-        cts = df_events.groupby([df_events['dt'].dt.date, 'k']).size().reset_index(name='tx')
-        m = pd.merge(df_sched, cts, left_on=[df_sched['dt'].dt.date, 'k'], right_on=['dt', 'k'], how='left').fillna(0)
-        st.subheader("Top Performers by Shift")
-        st.dataframe(m.groupby('staff_name')['tx'].mean().sort_values(ascending=False), use_container_width=True)
-
-# 7. TARDIES
-elif selected_page == "⏰ Tardies":
-    st.header("⏰ Tardy & Punctuality Tracker")
-    
-    if not df_sched.empty and not df_att.empty:
-        # 1. Normalize Names for matching
-        df_sched['k'] = df_sched['staff_name'].apply(normalize_name)
-        df_att['k'] = df_att['raw_name'].apply(normalize_name)
-        
-        # 2. Align dates
-        df_sched['match_date'] = pd.to_datetime(df_sched['dt']).dt.date
-        df_att['match_date'] = pd.to_datetime(df_att['dt_date']).dt.date
-        
-        # 3. Merge
-        m = pd.merge(df_sched, df_att, on=['match_date', 'k'], how='inner')
-        
-        if not m.empty:
-            # 4. Convert to datetime and FORCE 'coerce' to handle errors
-            m['start_actual'] = pd.to_datetime(m['start_dt'], errors='coerce')
-            
-            # Generate scheduled starts
-            m['start_scheduled'] = m.apply(
-                lambda x: parse_shift_start(x['match_date'], x['shift_type']), axis=1
-            )
-            # FORCE conversion of scheduled column to datetime
-            m['start_scheduled'] = pd.to_datetime(m['start_scheduled'], errors='coerce')
-            
-            # 5. Drop rows where conversion failed before doing math
-            m = m.dropna(subset=['start_actual', 'start_scheduled'])
-            
-            # 6. Calculate variance (The math is now safe)
-            m['late_min'] = (m['start_actual'] - m['start_scheduled']).dt.total_seconds() / 60
-            
-            # 7. Display
-            tardies = m[m['late_min'] > 5].sort_values('late_min', ascending=False)
-            
             c1, c2 = st.columns(2)
-            c1.metric("Late Arrivals (>5m)", len(tardies))
-            c2.metric("Avg. Latency", f"{tardies['late_min'].mean():.1f}m" if not tardies.empty else "0m")
-            
-            st.dataframe(tardies[['match_date', 'staff_name', 'shift_type', 'start_actual', 'late_min']], use_container_width=True)
-        else:
-            st.warning("No matches found. Ensure names in Schedule match Attendance files.")
-    else:
-        st.info("Upload Schedule and Attendance data.")
 
-# 8. PROCESS MINING (FIXED)
-elif selected_page == "🚀 Process Mining":
-    if not df_events.empty:
-        # Calculate Device->Device movements
-        moves = df_events[df_events['device'] != df_events['prev_device']].dropna(subset=['prev_device', 'device']).copy()
+            sel_tech = c1.selectbox("Technician", all_techs)
+
+            adt = c2.date_input("Date", date.today())
+
+            
+
+            entries = []
+
+            for i in range(1, 6):
+
+                cc1, cc2 = st.columns([2,1])
+
+                dn = cc1.selectbox(f"Drug {i}", drug_opts, key=f"dn{i}")
+
+                dl = cc2.text_input(f"Loc {i}", key=f"dl{i}")
+
+                checks = st.columns(5)
+
+                res = [checks[j].checkbox(l, key=f"c{i}_{j}") for j, l in enumerate(["Drug", "Count", "Date", "Rotate", "Fill"])]
+
+                if dn: entries.append((dn, res))
+
+            
+
+            notes = st.text_area("Notes")
+
+            if st.form_submit_button("💾 Save"):
+
+                recs = []
+
+                check_lbls = ["Correct Drug", "Correct Count", "Correct Date", "Rotated", "Not Overfilled"]
+
+                for drug, res in entries:
+
+                    for idx, passed in enumerate(res):
+
+                        recs.append({
+
+                            "pk": hashlib.sha256(f"{adt}|{sel_tech}|{drug}|{check_lbls[idx]}".encode()).hexdigest(),
+
+                            "audit_dt": adt, "technician": sel_tech, "category": drug, "question": check_lbls[idx],
+
+                            "result": "Pass" if passed else "Fail", "points_earned": 1 if passed else 0, "points_possible": 1, "note": notes
+
+                        })
+
+                if recs:
+
+                    execute_statement("INSERT INTO tech_audits (pk, audit_dt, technician, category, question, result, points_earned, points_possible, note) VALUES (%(pk)s, %(audit_dt)s, %(technician)s, %(category)s, %(question)s, %(result)s, %(points_earned)s, %(points_possible)s, %(note)s) ON CONFLICT (pk) DO NOTHING;", recs, batch=True, table_name="Audit")
+
+                    st.cache_data.clear()
+
+
+
+    with tabs[2]: # SCOREBOARD
+
+        if not df_audits.empty and not df_att.empty:
+
+            aud = df_audits.groupby('technician')['points_earned'].sum() / df_audits.groupby('technician')['points_possible'].sum() * 100
+
+            aud = aud.reset_index(name='Audit')
+
+            
+
+            df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
+
+            df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
+
+            m = pd.merge(df_sched, df_att, on='match_key')
+
+            # Simple tardy count
+
+            tardies = m[pd.to_datetime(m['start_dt']).dt.time > pd.to_datetime("07:05").time()].groupby('match_key').size().reset_index(name='Tardies')
+
+            
+
+            final = pd.merge(aud, tardies, left_on='technician', right_on='match_key', how='outer').fillna(0)
+
+            final['Score'] = (final['Audit'] * 0.7) - (final['Tardies'] * 5)
+
+            st.dataframe(final.sort_values('Score', ascending=False), use_container_width=True)
+
+        else: st.info("Need Audit & Attendance data.")
+
+
+
+# 14. SHIFT LEADERBOARD (Optimized)
+
+elif selected_page == "🏆 Shift Leaderboard":
+
+    if not df_sched.empty:
+
+        df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
+
+        df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
+
         
-        if not moves.empty:
-            path = moves.groupby(['prev_device', 'device']).size().reset_index(name='count').sort_values('count', ascending=False).head(20)
-            
-            # Use go.Sankey engine
-            all_nodes = list(pd.concat([path['prev_device'], path['device']]).unique())
-            node_map = {node: i for i, node in enumerate(all_nodes)}
-            
-            fig = go.Figure(data=[go.Sankey(
-                node=dict(
-                    pad=15, thickness=20, line=dict(color="black", width=0.5),
-                    label=all_nodes, color="#3498db"
-                ),
-                link=dict(
-                    source=path['prev_device'].map(node_map),
-                    target=path['device'].map(node_map),
-                    value=path['count']
-                )
-            )])
-            fig.update_layout(title="Top Workflow Paths (Device → Device)", height=600)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No movement between devices detected.")
 
-# 9. COMPLIANCE
-elif selected_page == "🛡️ Compliance":
-    if not df_events.empty:
-        disc = df_events[df_events['discrepancy_qty'] != 0]
-        st.dataframe(disc, use_container_width=True)
+        # Aggregate Events
 
-# 10. RETURN RECONCILIATION
-elif selected_page == "🔄 Return Reconciliation":
-    st.markdown("### 🔄 Return Footprint & Smart Trace")
-    c1, c2, c3 = st.columns(3)
-    filter_narc = c1.checkbox("Exclude Narcs", True)
-    adj_inh = c2.checkbox("Fix Inhalers", True)
-    lookback = c3.slider("Lookback (Hrs)", 24, 168, 72)
-    
-    if not df_events.empty:
-        mask = df_events['event_type'].str.contains('Unload|Empty|Destock', case=False, na=False)
-        raw_move = df_events[mask & ~df_events['event_type'].str.contains('CANCEL', case=False, na=False)].copy()
-        
-        st.divider()
-        c_ch, c_me = st.columns([2,1])
-        with c_ch:
-            fp = raw_move.groupby('device')['qty'].sum().reset_index().sort_values('qty').tail(10)
-            st.plotly_chart(px.bar(fp, x='qty', y='device', orientation='h', title="Top Return Sources"), use_container_width=True)
-        with c_me:
-            st.metric("Units Moved", f"{raw_move['qty'].sum():,.0f}")
-            st.metric("Events", len(raw_move))
-
-        if not df_pharm.empty:
-            st.divider()
-            st.subheader("🔎 Chain of Custody")
-            unloads = get_reconciled_returns(df_events)
-            unloads = unloads[unloads['event_type'].str.contains('Unload|Empty|Destock', case=False, na=False)].copy()
-            returns = df_pharm[df_pharm['priority'].str.contains('Return', case=False, na=False)].copy()
-            
-            if filter_narc:
-                pat = '|'.join(NARC_TERMS)
-                unloads = unloads[~unloads['med_desc'].str.contains(pat, case=False, na=False)]
-                returns = returns[~returns['med_desc'].str.contains(pat, case=False, na=False)]
-            
-            if adj_inh:
-                mask_i = unloads['med_desc'].str.contains('puff|hfa', case=False, na=False)
-                unloads['qty'] = np.where(mask_i & (unloads['qty']>10), unloads['qty']/120, unloads['qty'])
-            
-            unloads['norm_med_id'] = unloads['med_id'].str.strip().str.upper()
-            returns['norm_med_id'] = returns['med_id'].str.strip().str.upper()
-            
-            matched_u, matched_r = smart_match_returns(unloads, returns, lookback)
-            
-            succ = matched_r[matched_r['match_id'].notnull()].copy(); succ['Status'] = "✅ Reconciled"
-            orph = matched_r[matched_r['match_id'].isnull()].copy(); orph['Status'] = "❓ Mystery"
-            miss = matched_u[matched_u['match_id'].isnull()].copy(); miss['Status'] = "⚠️ Missing"
-            
-            # FIX: Calculate Age for missing items (Was causing KeyError)
-            miss['lag_str'] = (datetime.now() - miss['dt']).apply(lambda x: f"{x.days}d {x.seconds//3600}h (Age)")
-            
-            succ = succ[['dt', 'user_name', 'med_desc', 'qty', 'suspected_source', 'source_user', 'unload_dt', 'lag_str', 'Status']]
-            orph = orph[['dt', 'user_name', 'med_desc', 'qty', 'suspected_source', 'source_user', 'unload_dt', 'lag_str', 'Status']]
-            miss = miss[['dt', 'user_name', 'med_desc', 'qty', 'device', 'user_name', 'dt', 'lag_str', 'Status']]
-            
-            col_map_r = {'dt':'Scan Time', 'user_name':'Pharm User', 'suspected_source':'Source', 'source_user':'Tech', 'unload_dt':'Unload Time'}
-            succ.rename(columns=col_map_r, inplace=True)
-            orph.rename(columns=col_map_r, inplace=True)
-            
-            miss.columns = ['Unload Time', 'Tech', 'med_desc', 'qty', 'Source', 'Tech_dup', 'Unload_dup', 'lag_str', 'Status']
-            miss['Scan Time'] = None; miss['Pharm User'] = None
-            
-            master = pd.concat([succ, orph, miss], ignore_index=True)
-            
-            m1, m2, m3 = st.columns(3)
-            m1.metric("✅ Traced", len(succ))
-            m2.metric("⚠️ Missing", len(miss))
-            rate = len(succ)/len(master)*100 if len(master) else 0
-            m3.metric("Success Rate", f"{rate:.1f}%")
-            
-            grp = master.groupby('med_desc').agg(
-                Total=('qty','count'),
-                Missing=('Status', lambda x: (x=="⚠️ Missing").sum()),
-                Matched=('Status', lambda x: (x=="✅ Reconciled").sum())
-            ).reset_index().sort_values('Missing', ascending=False)
-            
-            sel = st.dataframe(grp, on_select="rerun", selection_mode="single-row", use_container_width=True, hide_index=True)
-            
-            if len(sel.selection.rows) > 0:
-                med = grp.iloc[sel.selection.rows[0]]['med_desc']
-                st.subheader(f"History: {med}")
-                det = master[master['med_desc']==med].sort_values('Unload Time', ascending=False)
-                st.dataframe(det[['Status', 'qty', 'Source', 'Tech', 'Unload Time', 'Pharm User', 'Scan Time', 'lag_str']], use_container_width=True)
-        else: st.info("Upload Pharmacy Report.")
-
-# 11. TECH COMPARISON
-elif selected_page == "⚖️ Tech Comparison":
-    if not df_events.empty:
-        u1, u2 = st.columns(2)[0].selectbox("A", df_events['user_name'].unique()), st.columns(2)[1].selectbox("B", df_events['user_name'].unique())
-        st.metric("Diff", len(df_events[df_events['user_name']==u1]) - len(df_events[df_events['user_name']==u2]))
-
-# 12. PROGRESSION
-elif selected_page == "📈 Tech Progression":
-    if not df_events.empty:
-        u = st.selectbox("Tech", df_events['user_name'].unique())
-        st.plotly_chart(px.line(df_events[df_events['user_name']==u].set_index('dt').resample('D').size(), title="Daily Volume"), use_container_width=True)
-
-# 13. ATTENDANCE
-elif selected_page == "📅 Attendance":
-    if not df_sched.empty and not df_events.empty:
-        df_events['k'] = df_events['user_name'].apply(normalize_name)
-        df_sched['k'] = df_sched['staff_name'].apply(normalize_name)
-        wk = df_events.groupby([df_events['dt'].dt.date, 'k']).size().reset_index(name='tx')
-        m = pd.merge(df_sched, wk, left_on=[df_sched['dt'].dt.date, 'k'], right_on=['dt', 'k'], how='left')
-        m['Status'] = np.where(m['tx']>0, "✅ Present", "❌ Absent")
-        st.dataframe(m[['dt', 'staff_name', 'Status']], use_container_width=True)
-
-# 14. PENDS ANALYZER
-elif selected_page == "📥 Pends Analyzer":
-    if not df_config.empty:
-        st.dataframe(df_config, use_container_width=True)
-    else: st.info("No Pends Data")
-
-# 15. EFFICIENCY
-elif selected_page == "⚡ Efficiency":
-    if not df_events.empty:
-        eff = df_events.groupby(['device', 'med_desc']).size().reset_index(name='Refills').sort_values('Refills', ascending=False)
-        st.plotly_chart(px.bar(eff.head(20), x='Refills', y='med_desc', orientation='h'), use_container_width=True)
-
-# 16. SESSION EXPLORER (TIMELINE VIEW)
-elif selected_page == "🔍 Session Explorer":
-    st.header("🔍 Session Explorer (Timeline View)")
-    st.caption("Step-by-step breakdown of user activity: Pyxis vs. Carousel, time spent, and walk times.")
-
-    if df_events.empty and df_pharm.empty:
-        st.info("No data available for the selected date range.")
-    else:
-        # 1. Combine Pyxis and Carousel Data
-        px_df, ph_df = pd.DataFrame(), pd.DataFrame()
         if not df_events.empty:
-            px_df = df_events[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']].copy()
-            px_df['Source'] = 'Pyxis'
-        if not df_pharm.empty:
-            ph_df = df_pharm[['dt', 'user_name', 'destination', 'priority', 'med_desc', 'qty']].copy()
-            ph_df.rename(columns={'destination': 'device', 'priority': 'event_type'}, inplace=True)
-            ph_df['Source'] = 'Carousel'
 
-        # Merge and Sort Chronologically
-        combined = pd.concat([px_df, ph_df], ignore_index=True)
-        combined['dt'] = pd.to_datetime(combined['dt'])
-        combined.sort_values(['user_name', 'dt'], inplace=True)
+            df_events['match_key'] = df_events['user_name'].apply(normalize_name)
 
-        # 2. Calculate Transaction Duration & Walk Time
-        combined['next_dt'] = combined.groupby('user_name')['dt'].shift(-1)
-        combined['next_device'] = combined.groupby('user_name')['device'].shift(-1)
-        combined['time_to_next'] = (combined['next_dt'] - combined['dt']).dt.total_seconds().fillna(0)
+            cts = df_events.groupby([df_events['dt'].dt.date, 'match_key']).size().reset_index(name='tx')
 
-        # Logic: 
-        # Same device & < 5 mins = Time Spent at Machine
-        # Different device & < 20 mins = Walking Time
-        combined['Tx_Duration_Sec'] = np.where(
-            (combined['device'] == combined['next_device']) & (combined['time_to_next'] < 300),
-            combined['time_to_next'],
-            0
-        )
+            df = pd.merge(df_sched, cts, left_on=['date_obj', 'match_key'], right_on=['dt', 'match_key'], how='left').fillna(0)
 
-        combined['Walk_Time_Sec'] = np.where(
-            (combined['device'] != combined['next_device']) & (combined['time_to_next'] < 1200),
-            combined['time_to_next'],
-            0
-        )
-
-        # Apply the time formatter (function is already at the top of your App.py)
-        combined['Time Spent'] = combined['Tx_Duration_Sec'].apply(seconds_to_mmss)
-        combined['Walk to Next'] = combined['Walk_Time_Sec'].apply(seconds_to_mmss)
-        
-        # Clean up empty times for a cleaner table
-        combined['Walk to Next'] = combined['Walk to Next'].replace("0s", "-")
-        combined['Time Spent'] = combined['Time Spent'].replace("0s", "Last Item")
-
-        # 3. Interactive Filters
-        c1, c2 = st.columns(2)
-        all_users = sorted(combined['user_name'].dropna().astype(str).unique())
-        sel_u = c1.multiselect("👤 Filter User:", all_users)
-        
-        sel_source = c2.multiselect("🖥️ Filter System:", ["Pyxis", "Carousel"], default=["Pyxis", "Carousel"])
-
-        # Apply Filters
-        view = combined.copy()
-        if sel_u: view = view[view['user_name'].isin(sel_u)]
-        if sel_source: view = view[view['Source'].isin(sel_source)]
-
-        st.divider()
-
-        # --- NEW: SINGLE USER SHIFT SUMMARY HEADER ---
-        if len(sel_u) == 1 and not view.empty:
-            user_name = sel_u[0]
-            st.subheader(f"📊 Shift Summary: {user_name}")
             
-            # Calculations for the header
-            total_pyxis_sec = view[view['Source'] == 'Pyxis']['Tx_Duration_Sec'].sum()
-            total_walk_sec = view['Walk_Time_Sec'].sum()
-            # Shift span: Last transaction time minus first transaction time
-            shift_span_sec = (view['dt'].max() - view['dt'].min()).total_seconds()
 
-            # Display Metrics
-            k1, k2, k3 = st.columns(3)
-            k1.metric("🏥 Total Time at Pyxis", seconds_to_mmss(total_pyxis_sec))
-            k2.metric("🚶 Total Time Walking", seconds_to_mmss(total_walk_sec))
-            k3.metric("⏱️ Total Shift Span", seconds_to_mmss(shift_span_sec), help="Time between first login and last login.")
-            st.divider()
+            shifts = [s for s in df['shift_type'].unique() if s and 'pto' not in str(s).lower()]
 
-        # 4. Display the Timeline
-        if not view.empty:
-            disp_cols = ['dt', 'user_name', 'Source', 'device', 'event_type', 'med_desc', 'qty', 'Time Spent', 'Walk to Next']
-            
-            st.dataframe(
-                view[disp_cols].sort_values('dt', ascending=False), 
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "dt": st.column_config.DatetimeColumn("Timestamp", format="MM/DD HH:mm:ss"),
-                    "user_name": "Technician",
-                    "device": "Location",
-                    "event_type": "Action",
-                    "med_desc": "Medication",
-                    "qty": st.column_config.NumberColumn("Qty", format="%.1f")
-                }
-            )
-        else:
-            st.warning("No transactions match the current filters.")
-# 17. PHARMACY WORKFLOW
-elif selected_page == "🏥 Pharmacy Workflow":
-    if not df_pharm.empty:
-        st.dataframe(df_pharm, use_container_width=True)
+            sel = st.selectbox("Shift", sorted(shifts))
+
+            sub = df[df['shift_type'] == sel].groupby('staff_name')['tx'].mean().sort_values(ascending=False).head(10).reset_index()
+
+            st.plotly_chart(px.bar(sub, x='tx', y='staff_name', orientation='h', title=f"Top Performers: {sel}"), use_container_width=True)
