@@ -116,3 +116,24 @@ else:
             st.subheader(f"🔬 Session Details: {details['device'].iloc[0]}")
             st.dataframe(details[['dt', 'source', 'event_type', 'med_desc', 'qty']], use_container_width=True, 
                          column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")})
+
+st.divider()
+with st.expander("🛠️ Developer Debug: Raw Event Stream", expanded=False):
+    st.write(f"Debugging data for: **{sel_u}**")
+    
+    # This shows the actual rows before session grouping
+    debug_view = combined[combined['user_name'].isin(sel_u)].sort_values('dt')
+    
+    if debug_view.empty:
+        st.error("The 'combined' dataframe is empty for this user. Check if load_data is pulling both tables.")
+    else:
+        st.write(f"Total Raw Events Found: {len(debug_view)}")
+        
+        # Show Source distribution
+        st.write(debug_view['source'].value_counts())
+        
+        st.dataframe(
+            debug_view[['dt', 'source', 'device', 'event_type', 'med_desc', 'qty']], 
+            use_container_width=True
+        )
+
