@@ -537,6 +537,7 @@ def get_present_dates(min_dt, max_dt):
 # --- MAIN APP LOGIC ---
 init_db()
 
+# 1. Define your internal pages (those not yet moved to the /pages folder)
 PAGES = [
     "📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", 
     "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", 
@@ -550,14 +551,13 @@ with st.sidebar:
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
-    # Streamlit automatically adds the /pages folder to the sidebar. 
-    # This radio button handles the logic for the pages still inside App.py.
     selected_page = st.radio("Go to:", PAGES, label_visibility="collapsed")
     st.divider()
     
+    # Get database stats for the sidebar metrics
     n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
 
-    # --- NEW PERSISTENT DATE LOGIC ---
+    # --- PERSISTENT DATE LOGIC (Anchored in Session State) ---
     if 'start_date' not in st.session_state:
         st.session_state.start_date = max_db - timedelta(days=14)
     if 'end_date' not in st.session_state:
@@ -567,58 +567,29 @@ with st.sidebar:
     filter_mode = st.radio("Filter Mode", ["Range", "Week", "Day"], horizontal=True, label_visibility="collapsed", key="sidebar_filter")
 
     if filter_mode == "Range":
-        date_range = st.slider("Select Range:", min_value=min_db, max_value=max_db, 
-                               value=(st.session_state.start_date, st.session_state.end_date), format="MM/DD/YY")
+        date_range = st.slider(
+            "Select Range:", 
+            min_value=min_db, 
+            max_value=max_db, 
+            value=(st.session_state.start_date, st.session_state.end_date), 
+            format="MM/DD/YY"
+        )
         st.session_state.start_date, st.session_state.end_date = date_range
-    elif filter_mode == "Week":
-        week_start = st.date_input("Select Week:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
-        st.session_state.start_date, st.session_state.end_date = week_start, week_start + timedelta(days=6)
-    else:
-        single_day = st.date_input("Select Day:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
-        st.session_state.start_date, st.session_state.end_date = single_day, single_day
-
-    # Ensure variables are ready for load_data()
-    start_date, end_date = st.session_state.start_date, st.session_state.end_date
-
-    with st.expander("💾 Database Status", expanded=False):
-        # ... (keep your existing metric and calendar grid code here)
-        pass
-
-    st.divider()
-    
-    # --- RESTORED INGEST LOGIC ---
-    st.subheader("📤 Ingest Data")
-    u_type = st.selectbox("File Type:", [
-        "Daily Transaction Report", "Device Activity Log (Pends)", 
-        "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", 
-        "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking"
-    ])
-    uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
-    
-    if uploaded and st.button(f"Process {u_type}"):
-        # This calls your existing cleaning functions
-        try:
-            # (Insert your existing processing/SQL logic for each u_type here)
-            st.cache_data.clear()
-            st.rerun()
-        except Exception as e:
-            st.error(f"Processing Error: {e}")
     
     elif filter_mode == "Week":
-        week_start = st.date_input("Select Week:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
+        week_start = st.date_input("Select Week Start:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
         st.session_state.start_date = week_start
         st.session_state.end_date = week_start + timedelta(days=6)
-        start_date, end_date = st.session_state.start_date, st.session_state.end_date
     
     else: # Day Mode
         single_day = st.date_input("Select Day:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
         st.session_state.start_date = single_day
         st.session_state.end_date = single_day
-        start_date, end_date = single_day, single_day
 
-    # This makes sure the variables are ready for load_data()
+    # Finalize variables for data loading
     start_date, end_date = st.session_state.start_date, st.session_state.end_date
 
+    # --- DATABASE STATUS (Expander) ---
     with st.expander("💾 Database Status", expanded=False):
         c1, c2 = st.columns(2)
         c1.metric("Pyxis Events", f"{n_events:,}")
@@ -626,6 +597,8 @@ with st.sidebar:
         c3, c4 = st.columns(2)
         c3.metric("Sched. Shifts", f"{n_sched:,}")
         c4.metric("Time Punches", f"{n_att:,}")
+        
+        # Heatmap Calendar Grid
         present_dates = get_present_dates(min_db, max_db)
         if min_db and max_db and min_db <= max_db:
             delta = (max_db - min_db).days
@@ -640,7 +613,30 @@ with st.sidebar:
             st.markdown(cal_html, unsafe_allow_html=True)
 
     st.divider()
-    st.markdown("### 📅 Analysis Window")
+    
+    # --- UNIVERSAL DATA INGEST ---
+    st.subheader("📤 Ingest Data")
+    u_type = st.selectbox("File Type:", [
+        "Daily Transaction Report", "Device Activity Log (Pends)", 
+        "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", 
+        "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking"
+    ])
+    uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
+    
+    if uploaded and st.button(f"Process {u_type}"):
+        try:
+            # (Your specific cleaning/processing functions here)
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Processing Error: {e}")
+
+# --- EXECUTE DATA LOADER ---
+# Load data once for use across all App.py logic
+try:
+    df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
+except Exception as e:
+    st.error(f"Failed to load data: {e}")
     
    # --- EXECUTE DATA LOADER ---
 # This ensures variables are always populated with something (even if empty)
