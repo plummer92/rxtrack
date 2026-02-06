@@ -21,11 +21,8 @@ else:
         st.warning("No activity found for the selected dates.")
     else:
         # 2. Data Unification (Pyxis + Pharmacy)
-        if not df_events.empty:
-            px = df_events[['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk']].copy()
-            px['source'] = 'Pyxis'
-        else:
-            px = pd.DataFrame(columns=['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk', 'source'])
+        px = df_events[['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk']].copy() if not df_events.empty else pd.DataFrame(columns=['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk'])
+        px['source'] = 'Pyxis'
 
         if not df_pharm.empty:
             ph = df_pharm[['user_name', 'dt', 'destination', 'priority', 'med_desc', 'qty', 'pk']].copy()
@@ -38,13 +35,12 @@ else:
         combined['dt'] = pd.to_datetime(combined['dt'])
         combined.sort_values(['user_name', 'dt'], inplace=True)
 
-        # 3. Session Logic (Detects device changes and 20-minute gaps)
+        # 3. Session Logic
         combined['prev_user'] = combined['user_name'].shift(1)
         combined['prev_device'] = combined['device'].shift(1)
         combined['prev_dt'] = combined['dt'].shift(1)
         combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
         
-        # New session starts if user changes, device changes, or time gap > 1200s
         combined['is_new_session'] = np.where(
             (combined['user_name'] != combined['prev_user']) | 
             (combined['device'] != combined['prev_device']) | 
@@ -52,18 +48,15 @@ else:
         )
         combined['session_id'] = combined['is_new_session'].cumsum()
 
-        # 4. Aggregation for Table View
+        # 4. Aggregation
         sessions = combined.groupby('session_id').agg({
-            'user_name': 'first', 
-            'device': 'first', 
-            'source': 'first', 
-            'dt': ['min', 'max'], 
-            'pk': 'count'
+            'user_name': 'first', 'device': 'first', 'source': 'first', 
+            'dt': ['min', 'max'], 'pk': 'count'
         }).reset_index()
         
         sessions.columns = ['session_id', 'User', 'Device', 'Source', 'Start', 'End', 'Tx Count']
         sessions['Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
-        sessions['Duration'] = np.where(sessions['Duration'] < 10, 30, sessions['Duration']) # Minimum visibility fix
+        sessions['Duration'] = np.where(sessions['Duration'] < 10, 30, sessions['Duration'])
         
         sessions = sessions.sort_values(['User', 'Start'])
         sessions['Next Start'] = sessions.groupby('User')['Start'].shift(-1)
@@ -88,7 +81,6 @@ else:
             pyxis_time = view[view['Source'] == 'Pyxis']['Duration'].sum()
             pharm_time = view[view['Source'] == 'Pharmacy']['Duration'].sum()
             top_device = view['Device'].mode()[0] if not view.empty else "N/A"
-            
             st.subheader(f"🧠 Shift Analysis: {sel_u[0].title()}")
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Total Active Time", seconds_to_mmss(total_active))
@@ -97,24 +89,21 @@ else:
             k4.metric("Most Visited", top_device)
             st.divider()
 
-        # 7. Main Data Display
+        # 7. Main Data Display (With Dates)
         disp = view.copy().reset_index(drop=True)
+        disp['Date'] = disp['Start'].dt.strftime('%m/%d/%y')
+        disp['Start_Time'] = disp['Start'].dt.strftime('%H:%M:%S')
+        disp['End_Time'] = disp['End'].dt.strftime('%H:%M:%S')
         disp['Duration_Str'] = disp['Duration'].apply(seconds_to_mmss)
-        disp['Walk Time'] = disp['Walk Time'].apply(lambda x: seconds_to_mmss(x) if pd.notnull(x) and x >= 0 else "-")
-        disp['Start_Disp'] = disp['Start'].dt.strftime('%H:%M:%S')
-        disp['End_Disp'] = disp['End'].dt.strftime('%H:%M:%S')
+        disp['Walk_Disp'] = disp['Walk Time'].apply(lambda x: seconds_to_mmss(x) if pd.notnull(x) and x >= 0 else "-")
 
         st.caption("👆 Click a row to see the exact transactions within that work block.")
         event = st.dataframe(
-            disp[['session_id', 'User', 'Source', 'Device', 'Start_Disp', 'End_Disp', 'Tx Count', 'Duration_Str', 'Walk Time']], 
-            use_container_width=True, 
-            on_select="rerun", 
-            selection_mode="single-row", 
-            hide_index=True, 
+            disp[['session_id', 'User', 'Date', 'Source', 'Device', 'Start_Time', 'End_Time', 'Tx Count', 'Duration_Str', 'Walk_Disp']], 
+            use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True,
             column_config={
-                "Duration_Str": "Duration", 
-                "Start_Disp": "Start", 
-                "End_Disp": "End"
+                "Start_Time": "Start", "End_Time": "End", "Duration_Str": "Duration", "Walk_Disp": "Walk Time",
+                "Tx Count": st.column_config.NumberColumn("Transactions", format="%d")
             }
         )
 
@@ -123,51 +112,7 @@ else:
             idx = event.selection.rows[0]
             sel_id = disp.iloc[idx]['session_id']
             details = combined[combined['session_id'] == sel_id].sort_values('dt').copy()
-            
             st.divider()
-            st.subheader(f"🔬 Timeline: {details['device'].iloc[0]}")
-            st.dataframe(
-                details[['dt', 'source', 'event_type', 'med_desc', 'qty']], 
-                use_container_width=True, 
-                column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")}
-            )
-
-# ... (keep all previous logic for combined, sessions, and filters) ...
-
-        # 7. Main Data Display (Updated to include Date)
-        disp = view.copy().reset_index(drop=True)
-        
-        # We create a combined Date/Time string for the Start column
-        disp['Date'] = disp['Start'].dt.strftime('%m/%d/%y')
-        disp['Start_Time'] = disp['Start'].dt.strftime('%H:%M:%S')
-        disp['End_Time'] = disp['End'].dt.strftime('%H:%M:%S')
-        
-        disp['Duration_Str'] = disp['Duration'].apply(seconds_to_mmss)
-        disp['Walk Time'] = disp['Walk Time'].apply(
-            lambda x: seconds_to_mmss(x) if pd.notnull(x) and x >= 0 else "-"
-        )
-
-        st.caption("👆 Click a row to see the exact transactions within that work block.")
-        
-        # Updated column list to show the Date first
-        cols_to_show = [
-            'session_id', 'User', 'Date', 'Source', 'Device', 
-            'Start_Time', 'End_Time', 'Tx Count', 'Duration_Str', 'Walk Time'
-        ]
-        
-        event = st.dataframe(
-            disp[cols_to_show], 
-            use_container_width=True, 
-            on_select="rerun", 
-            selection_mode="single-row", 
-            hide_index=True, 
-            column_config={
-                "Start_Time": "Start", 
-                "End_Time": "End", 
-                "Duration_Str": "Duration",
-                "Tx Count": st.column_config.NumberColumn("Transactions", format="%d")
-            }
-        )
-
-        # 8. Drill-Down Detail (unchanged)
-        # ...
+            st.subheader(f"🔬 Session Details: {details['device'].iloc[0]}")
+            st.dataframe(details[['dt', 'source', 'event_type', 'med_desc', 'qty']], use_container_width=True, 
+                         column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")})
