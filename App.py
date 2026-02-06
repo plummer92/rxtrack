@@ -539,9 +539,7 @@ init_db()
 
 # 1. Define your internal pages (those not yet moved to the /pages folder)
 PAGES = [
-    "📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "⏰ Tardies", "🚀 Process Mining", 
-    "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🔍 Session Explorer", 
-    "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", 
+    "📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", 
     "📈 Tech Progression", "📅 Attendance"
 ]
 
