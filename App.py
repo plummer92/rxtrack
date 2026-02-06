@@ -603,29 +603,6 @@ with st.sidebar:
             st.rerun()
         except Exception as e:
             st.error(f"Processing Error: {e}")
-
-    # --- NEW PERSISTENT DATE LOGIC ---
-    # This keeps your dates from jumping to the future schedule dates
-    if 'start_date' not in st.session_state:
-        st.session_state.start_date = max_db - timedelta(days=14)
-    if 'end_date' not in st.session_state:
-        st.session_state.end_date = max_db
-
-    st.markdown("### 📅 Analysis Window")
-    filter_mode = st.radio("Filter Mode", ["Range", "Week", "Day"], horizontal=True, label_visibility="collapsed")
-
-    if filter_mode == "Range":
-        # Use session_state for the 'value' so it remembers your choice
-        date_range = st.slider(
-            "Select Range:", 
-            min_value=min_db, 
-            max_value=max_db, 
-            value=(st.session_state.start_date, st.session_state.end_date), 
-            format="MM/DD/YY"
-        )
-        # Update the session state immediately
-        st.session_state.start_date, st.session_state.end_date = date_range
-        start_date, end_date = date_range
     
     elif filter_mode == "Week":
         week_start = st.date_input("Select Week:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
