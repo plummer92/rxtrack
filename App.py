@@ -623,8 +623,8 @@ with st.sidebar:
     ])
     uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
     if uploaded and st.button(f"Process {u_type}"):
-        try:
-            # 1. Load the raw file into memory
+       try:
+            # 1. Load raw file
             if uploaded.name.endswith('.xlsx'):
                 raw = pd.read_excel(uploaded)
             else:
@@ -634,7 +634,9 @@ with st.sidebar:
                     uploaded.seek(0)
                     raw = pd.read_csv(uploaded, encoding='latin1')
 
-            # 2. Route the data to the correct SQL Table
+            # 2. Route to correct SQL Table
+            clean = None # Initialize to prevent NameError
+
             if u_type == "Daily Transaction Report":
                 clean = clean_dataframe(raw)
                 sql = """INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, 
@@ -643,6 +645,30 @@ with st.sidebar:
                          %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s, %(discrepancy_qty)s, 
                          %(discrepancy_reason)s, %(resolution_dt)s) ON CONFLICT (pk) DO NOTHING;"""
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Events")
+
+            elif u_type == "Device Activity Log (Pends)":
+                clean = clean_activity_log(raw)
+                sql = """INSERT INTO config_events (pk, dt, user_name, device, med_id, location, 
+                         action_type, activity_category, min_qty, max_qty, is_standard) 
+                         VALUES (%(pk)s, %(dt)s, %(user_name)s, %(device)s, %(med_id)s, %(location)s, 
+                         %(action_type)s, %(activity_category)s, %(min_qty)s, %(max_qty)s, %(is_standard)s) 
+                         ON CONFLICT (pk) DO NOTHING;"""
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Config")
+
+            elif u_type == "Pharmacy Workflow Report":
+                clean = clean_pharmacy_report(raw)
+                sql = """INSERT INTO pharmacy_orders (pk, queue_id, priority, dt, med_id, med_desc, 
+                         destination, user_name, qty) VALUES (%(pk)s, %(queue_id)s, %(priority)s, 
+                         %(dt)s, %(med_id)s, %(med_desc)s, %(destination)s, %(user_name)s, %(qty)s) 
+                         ON CONFLICT (pk) DO NOTHING;"""
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Pharmacy Orders")
+
+            elif u_type == "Inventory Audit (Prices)":
+                clean = clean_inventory_file(raw)
+                # This updates the master cost list for the student project
+                sql_costs = """INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(unit_cost)s) 
+                               ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"""
+                execute_statement(sql_costs, clean.to_dict("records"), batch=True, table_name="Cost Updates")
 
             elif u_type == "Staff Schedule":
                 clean = clean_schedule_data(raw)
@@ -660,13 +686,15 @@ with st.sidebar:
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
             
             # 3. Success & Refresh
-            st.cache_data.clear()
-            st.success(f"Successfully uploaded {len(clean)} records!")
-            st.rerun()
+            if clean is not None:
+                st.cache_data.clear()
+                st.success(f"Successfully uploaded {len(clean)} records!")
+                st.rerun()
+            else:
+                st.warning("File type logic not yet implemented for this selection.")
 
         except Exception as e:
             st.error(f"Processing Error: {e}")
-
 # --- EXECUTE DATA LOADER ---
 # Load data once for use across all App.py logic
 try:
