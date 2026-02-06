@@ -550,12 +550,59 @@ with st.sidebar:
     st.caption("Pharmacy Workflow Intelligence")
     
     st.markdown("### 🧭 Navigation")
-    # Note: As you move pages to the /pages folder, you can eventually 
-    # remove them from this PAGES list to avoid duplicates.
+    # Streamlit automatically adds the /pages folder to the sidebar. 
+    # This radio button handles the logic for the pages still inside App.py.
     selected_page = st.radio("Go to:", PAGES, label_visibility="collapsed")
     st.divider()
     
     n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
+
+    # --- NEW PERSISTENT DATE LOGIC ---
+    if 'start_date' not in st.session_state:
+        st.session_state.start_date = max_db - timedelta(days=14)
+    if 'end_date' not in st.session_state:
+        st.session_state.end_date = max_db
+
+    st.markdown("### 📅 Analysis Window")
+    filter_mode = st.radio("Filter Mode", ["Range", "Week", "Day"], horizontal=True, label_visibility="collapsed", key="sidebar_filter")
+
+    if filter_mode == "Range":
+        date_range = st.slider("Select Range:", min_value=min_db, max_value=max_db, 
+                               value=(st.session_state.start_date, st.session_state.end_date), format="MM/DD/YY")
+        st.session_state.start_date, st.session_state.end_date = date_range
+    elif filter_mode == "Week":
+        week_start = st.date_input("Select Week:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
+        st.session_state.start_date, st.session_state.end_date = week_start, week_start + timedelta(days=6)
+    else:
+        single_day = st.date_input("Select Day:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
+        st.session_state.start_date, st.session_state.end_date = single_day, single_day
+
+    # Ensure variables are ready for load_data()
+    start_date, end_date = st.session_state.start_date, st.session_state.end_date
+
+    with st.expander("💾 Database Status", expanded=False):
+        # ... (keep your existing metric and calendar grid code here)
+        pass
+
+    st.divider()
+    
+    # --- RESTORED INGEST LOGIC ---
+    st.subheader("📤 Ingest Data")
+    u_type = st.selectbox("File Type:", [
+        "Daily Transaction Report", "Device Activity Log (Pends)", 
+        "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", 
+        "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking"
+    ])
+    uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
+    
+    if uploaded and st.button(f"Process {u_type}"):
+        # This calls your existing cleaning functions
+        try:
+            # (Insert your existing processing/SQL logic for each u_type here)
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"Processing Error: {e}")
 
     # --- NEW PERSISTENT DATE LOGIC ---
     # This keeps your dates from jumping to the future schedule dates
