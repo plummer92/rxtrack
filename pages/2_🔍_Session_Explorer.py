@@ -131,3 +131,43 @@ else:
                 use_container_width=True, 
                 column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")}
             )
+
+# ... (keep all previous logic for combined, sessions, and filters) ...
+
+        # 7. Main Data Display (Updated to include Date)
+        disp = view.copy().reset_index(drop=True)
+        
+        # We create a combined Date/Time string for the Start column
+        disp['Date'] = disp['Start'].dt.strftime('%m/%d/%y')
+        disp['Start_Time'] = disp['Start'].dt.strftime('%H:%M:%S')
+        disp['End_Time'] = disp['End'].dt.strftime('%H:%M:%S')
+        
+        disp['Duration_Str'] = disp['Duration'].apply(seconds_to_mmss)
+        disp['Walk Time'] = disp['Walk Time'].apply(
+            lambda x: seconds_to_mmss(x) if pd.notnull(x) and x >= 0 else "-"
+        )
+
+        st.caption("👆 Click a row to see the exact transactions within that work block.")
+        
+        # Updated column list to show the Date first
+        cols_to_show = [
+            'session_id', 'User', 'Date', 'Source', 'Device', 
+            'Start_Time', 'End_Time', 'Tx Count', 'Duration_Str', 'Walk Time'
+        ]
+        
+        event = st.dataframe(
+            disp[cols_to_show], 
+            use_container_width=True, 
+            on_select="rerun", 
+            selection_mode="single-row", 
+            hide_index=True, 
+            column_config={
+                "Start_Time": "Start", 
+                "End_Time": "End", 
+                "Duration_Str": "Duration",
+                "Tx Count": st.column_config.NumberColumn("Transactions", format="%d")
+            }
+        )
+
+        # 8. Drill-Down Detail (unchanged)
+        # ...
