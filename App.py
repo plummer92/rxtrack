@@ -623,7 +623,7 @@ with st.sidebar:
     ])
     uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
     if uploaded and st.button(f"Process {u_type}"):
-       try:
+        try:
             # 1. Load raw file
             if uploaded.name.endswith('.xlsx'):
                 raw = pd.read_excel(uploaded)
@@ -635,7 +635,7 @@ with st.sidebar:
                     raw = pd.read_csv(uploaded, encoding='latin1')
 
             # 2. Route to correct SQL Table
-            clean = None # Initialize to prevent NameError
+            clean = None 
 
             if u_type == "Daily Transaction Report":
                 clean = clean_dataframe(raw)
@@ -665,7 +665,6 @@ with st.sidebar:
 
             elif u_type == "Inventory Audit (Prices)":
                 clean = clean_inventory_file(raw)
-                # This updates the master cost list for the student project
                 sql_costs = """INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(unit_cost)s) 
                                ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"""
                 execute_statement(sql_costs, clean.to_dict("records"), batch=True, table_name="Cost Updates")
@@ -695,6 +694,8 @@ with st.sidebar:
 
         except Exception as e:
             st.error(f"Processing Error: {e}")
+
+ 
 # --- EXECUTE DATA LOADER ---
 # Load data once for use across all App.py logic
 try:
