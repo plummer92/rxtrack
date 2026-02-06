@@ -622,12 +622,48 @@ with st.sidebar:
         "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking"
     ])
     uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
-    
     if uploaded and st.button(f"Process {u_type}"):
         try:
-            # (Your specific cleaning/processing functions here)
+            # 1. Load the raw file into memory
+            if uploaded.name.endswith('.xlsx'):
+                raw = pd.read_excel(uploaded)
+            else:
+                try:
+                    raw = pd.read_csv(uploaded)
+                except UnicodeDecodeError:
+                    uploaded.seek(0)
+                    raw = pd.read_csv(uploaded, encoding='latin1')
+
+            # 2. Route the data to the correct SQL Table
+            if u_type == "Daily Transaction Report":
+                clean = clean_dataframe(raw)
+                sql = """INSERT INTO events (pk, user_name, device, med_id, med_desc, event_type, dt, qty, 
+                         beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason, resolution_dt) 
+                         VALUES (%(pk)s, %(user_name)s, %(device)s, %(med_id)s, %(med_desc)s, %(event_type)s, 
+                         %(dt)s, %(qty)s, %(beginning_qty)s, %(ending_qty)s, %(discrepancy_qty)s, 
+                         %(discrepancy_reason)s, %(resolution_dt)s) ON CONFLICT (pk) DO NOTHING;"""
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Events")
+
+            elif u_type == "Staff Schedule":
+                clean = clean_schedule_data(raw)
+                sql = """INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, 
+                         assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(day_name)s, 
+                         %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, 
+                         %(note)s) ON CONFLICT (pk) DO NOTHING;"""
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
+
+            elif u_type == "Attendance Tracking":
+                clean = clean_attendance_file(uploaded)
+                sql = """INSERT INTO attendance_punches (pk, raw_name, dt_date, start_dt, end_dt) 
+                         VALUES (%(pk)s, %(raw_name)s, %(dt_date)s, %(start_dt)s, %(end_dt)s) 
+                         ON CONFLICT (pk) DO NOTHING;"""
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
+            
+            # 3. Success & Refresh
             st.cache_data.clear()
+            st.success(f"Successfully uploaded {len(clean)} records!")
             st.rerun()
+
         except Exception as e:
             st.error(f"Processing Error: {e}")
 
