@@ -115,63 +115,65 @@ else:
             st.dataframe(view_pharm, use_container_width=True)
 
 
-        st.divider()
+       st.divider()
         st.subheader("🔄 Full Lifecycle: Stockout to Replenishment")
-        st.caption("Tracking the delay between a 'Zero' event and the 'Refill' event.")
+        st.caption("Tracking the sequence: Outage Discovery ➔ Carousel Order ➔ Actual Refill.")
 
         if not df_events.empty and not df_pharm.empty:
-            # 1. Identify "Zero Out" Events
-            # Since 'ending_qty' is missing, we look for events where the 
-            # transaction results in an empty bin or is flagged as an outage.
-            # We will filter for transactions where qty is recorded but 
-            # we'll look at event types like 'Null' or 'Out of Stock' if available.
-            
-            # Temporary Fix: Using event_type to find outages since ending_qty is missing
-            zeros = df_events[
-                df_events['event_type'].str.contains('Out of Stock|Empty|Zero', case=False, na=False)
-            ].copy()
-            
-            # If the above is empty, let's assume 'Dispense' events where qty is high 
-            # often lead to zeros, or check your specific report's outage flags.
-            if zeros.empty:
-                st.warning("⚠️ No explicit 'Zero' balance column found. Using 'Stockout' requests as the trigger.")
-                zeros = stockout_only[['dt', 'destination', 'med_id', 'med_desc']].copy()
-                zeros.rename(columns={'dt': 'Stockout_Time', 'destination': 'device'}, inplace=True)
-            else:
-                zeros = zeros[['dt', 'device', 'med_id', 'med_desc']].rename(columns={'dt': 'Stockout_Time'})
+            # 1. Start with the Orders (The Carousel Source of Truth)
+            orders = stockout_only[['dt', 'destination', 'med_id', 'med_desc', 'qty']].copy()
+            orders.rename(columns={'dt': 'Order_Time', 'destination': 'device', 'qty': 'Order_Qty'}, inplace=True)
 
-            # 2. Identify "Refill" Events (Existing Logic is correct)
+            # 2. Identify Pyxis Refills/Loads
             refills = df_events[df_events['event_type'].str.contains('REFILL|LOAD|ADD', case=False, na=False)].copy()
             refills = refills[['dt', 'device', 'med_id', 'qty']].rename(columns={'dt': 'Refill_Time', 'qty': 'Refill_Qty'})
 
-            # 3. Join with Workflow (Stockouts)
-            lifecycle = pd.merge(zeros, stockout_only, left_on=['device', 'med_id'], right_on=['destination', 'med_id'], how='inner')
-            
-            # 4. Find the first refill that happened AFTER the stockout
-            full_path = pd.merge(lifecycle, refills, on=['device', 'med_id'], how='left')
-            full_path = full_path[full_path['Refill_Time'] > full_path['Stockout_Time']]
-            
-            if not full_path.empty:
-                full_path = full_path.sort_values('Refill_Time').groupby(['device', 'med_id', 'Stockout_Time']).first().reset_index()
+            # 3. Match Order to its First Subsequent Refill
+            path = pd.merge(orders, refills, on=['device', 'med_id'], how='left')
+            path = path[path['Refill_Time'] > path['Order_Time']]
+            # Only keep the absolute first refill after the order was placed
+            path = path.sort_values('Refill_Time').groupby(['device', 'med_id', 'Order_Time']).first().reset_index()
 
-                # 5. Calculate Delay
-                full_path['Replenish_Time_Min'] = (full_path['Refill_Time'] - full_path['Stockout_Time']).dt.total_seconds() / 60
-
-                st.dataframe(
-                    full_path[['device', 'med_desc_x', 'Stockout_Time', 'dt', 'Refill_Time', 'Replenish_Time_Min']],
-                    width='stretch', # Fixed deprecated parameter
-                    hide_index=True,
-                    column_config={
-                        "device": "Unit",
-                        "med_desc_x": "Medication",
-                        "Stockout_Time": "Time Triggered",
-                        "dt": "Carousel Order",
-                        "Refill_Time": "Actual Refill",
-                        "Replenish_Time_Min": st.column_config.NumberColumn("Total Outage (Min)", format="%d")
-                    }
-                )
+            # 4. (Optional) Look for the "Discovery" event PRIOR to the order
+            # This handles your "Time Triggered" requirement
+            outages = df_events[df_events['event_type'].str.contains('Out of Stock|Empty|Zero', case=False, na=False)].copy()
+            if not outages.empty:
+                outages = outages[['dt', 'device', 'med_id']].rename(columns={'dt': 'Discovery_Time'})
+                trigger_match = pd.merge(path, outages, on=['device', 'med_id'], how='left')
+                # Only keep discoveries that happened BEFORE the Carousel Order
+                trigger_match = trigger_match[trigger_match['Discovery_Time'] < trigger_match['Order_Time']]
+                # Take the most recent discovery before that order
+                trigger_match = trigger_match.sort_values('Discovery_Time', ascending=False).groupby(['device', 'med_id', 'Order_Time']).first().reset_index()
                 
-                avg_outage = full_path['Replenish_Time_Min'].mean()
-                st.metric("Average Time Unit Stays Empty", f"{int(avg_outage)} Minutes")
+                # Merge the Discovery Time back into our main path
+                path = pd.merge(path, trigger_match[['device', 'med_id', 'Order_Time', 'Discovery_Time']], on=['device', 'med_id', 'Order_Time'], how='left')
+
+            # 5. Calculate Turnaround (Pharmacy Efficiency)
+            # This is the time from Carousel Pull to Floor Restock
+            path['Pharmacy_Turnaround_Min'] = (path['Refill_Time'] - path['Order_Time']).dt.total_seconds() / 60
+
+            # 6. Formatting for the Dashboard
+            display_df = path.copy()
+            display_df['Discovery'] = display_df['Discovery_Time'].dt.strftime('%m/%d %H:%M') if 'Discovery_Time' in display_df else "Not Found"
+            display_df['Order (Carousel)'] = display_df['Order_Time'].dt.strftime('%m/%d %H:%M')
+            display_df['Actual Refill'] = display_df['Refill_Time'].dt.strftime('%m/%d %H:%M')
+            display_df['Turnaround'] = display_df['Pharmacy_Turnaround_Min'].apply(lambda x: f"{int(x)} min" if pd.notnull(x) else "-")
+
+            st.dataframe(
+                display_df[['device', 'med_desc', 'Discovery', 'Order (Carousel)', 'Actual Refill', 'Turnaround']],
+                width='stretch', 
+                hide_index=True,
+                column_config={
+                    "device": "Unit",
+                    "med_desc": "Medication",
+                    "Discovery": "1. Time Triggered (Hit 0)",
+                    "Order (Carousel)": "2. Carousel Order Created",
+                    "Actual Refill": "3. Actual Refill Completed"
+                }
+            )
+            
+            if not path.empty:
+                avg_turnaround = path['Pharmacy_Turnaround_Min'].mean()
+                st.metric("Avg Pharmacy Turnaround (Order to Refill)", f"{int(avg_turnaround)} Minutes")
             else:
-                st.info("No matching refill cycles found for these stockouts yet.")
+                st.info("No completed replenishment cycles found in this date range.")
