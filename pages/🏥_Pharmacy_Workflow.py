@@ -1,16 +1,19 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
-from App import load_data, seconds_to_mmss # Shared logic
+from App import load_data, seconds_to_mmss
 
 st.set_page_config(page_title="Pharmacy Workflow", page_icon="🏥", layout="wide")
-st.header("🏥 Pharmacy Workflow & Stockout Intelligence")
+
+# Title and Description
+st.header("🏥 Central Pharmacy Workflow & Stockout Intelligence")
+st.caption("Analyzing stockout frequency to suggest optimized Par Levels and reduce STAT deliveries.")
 
 if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")
 else:
     # 1. Load data
-    # We focus on df_pharm (Workflow) and df_events (to see the impact on Pyxis)
     df_events, _, df_pharm, _, _ = load_data(
         st.session_state.start_date, 
         st.session_state.end_date
@@ -19,54 +22,94 @@ else:
     if df_pharm.empty:
         st.warning("No Pharmacy Workflow data found for this period.")
     else:
-        # 2. Identify Stockouts/Critical Needs
-        # Filtering for 'Stockout' or 'Critical' priorities in your report
-        stockouts = df_pharm[df_pharm['priority'].str.contains('Stockout|Critical|Stat', case=False, na=False)].copy()
+        # --- FILTERS ---
+        priorities = sorted(df_pharm['priority'].dropna().unique())
+        sel_prio = st.multiselect("Filter Transaction Type (Priority)", priorities)
         
-        # --- EXECUTIVE SUMMARY ---
-        t1, t2, t3 = st.columns(3)
-        t1.metric("Total Workflow Orders", len(df_pharm))
-        t2.metric("Stockout Events", len(stockouts), delta=f"{len(stockouts)/len(df_pharm)*100:.1f}% of total", delta_color="inverse")
+        view_pharm = df_pharm.copy()
+        if sel_prio:
+            view_pharm = view_pharm[view_pharm['priority'].isin(sel_prio)]
+
+        # --- KEY METRICS ---
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Orders", len(view_pharm))
         
-        # Calculate Avg Turnaround (if completion data exists)
-        t3.metric("Stockout Frequency", f"{len(stockouts) / max(1, (st.session_state.end_date - st.session_state.start_date).days):.1f} / day")
+        # Calculate STAT/Critical counts
+        stat_mask = view_pharm['priority'].str.contains('STAT|Critical', case=False, na=False)
+        c2.metric("Critical/STAT", len(view_pharm[stat_mask]))
+        
+        # Calculate Stockout counts
+        stockout_mask = view_pharm['priority'].str.contains(r'Stock\s*Out|Stockout', case=False, na=False)
+        stockout_only = view_pharm[stockout_mask].copy()
+        c3.metric("Stockout Events", len(stockout_only))
+        
+        top_dest = view_pharm['destination'].mode()[0] if not view_pharm['destination'].empty else "N/A"
+        c4.metric("Top Destination", top_dest)
 
-        # --- STOCKOUT ANALYSIS ---
+        # --- VISUAL ANALYSIS ---
         st.divider()
-        col_left, col_right = st.columns(2)
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            st.subheader("📍 Stockouts by Device")
+            if not stockout_only.empty:
+                fig_dev = px.bar(stockout_only['destination'].value_counts().reset_index().head(10), 
+                                 x='count', y='destination', orientation='h', title="Top 10 Problem Units",
+                                 labels={'count': 'Stockout Count', 'destination': 'Unit'}, color='count')
+                st.plotly_chart(fig_dev, use_container_width=True)
+            else:
+                st.info("No stockout data for charts.")
 
-        with col_left:
-            st.subheader("💊 Most Frequent Stockout Meds")
-            # Identifies which drugs are consistently hitting zero in the Pyxis
-            med_counts = stockouts['med_desc'].value_counts().reset_index().head(10)
-            med_counts.columns = ['Medication', 'Stockout Count']
-            fig_med = px.bar(med_counts, x='Stockout Count', y='Medication', orientation='h', 
-                             color='Stockout Count', color_continuous_scale='OrRd')
-            st.plotly_chart(fig_med, use_container_width=True)
+        with col_chart2:
+            st.subheader("💊 Top Stockout Medications")
+            if not stockout_only.empty:
+                fig_med = px.bar(stockout_only['med_desc'].value_counts().reset_index().head(10), 
+                                 x='count', y='med_desc', orientation='h', title="Top 10 Problem Meds",
+                                 labels={'count': 'Stockout Count', 'med_desc': 'Medication'}, color='count')
+                st.plotly_chart(fig_med, use_container_width=True)
 
-        with col_right:
-            st.subheader("📍 Problematic Devices")
-            # Identifies which Pyxis machines are failing par levels most often
-            device_counts = stockouts['destination'].value_counts().reset_index().head(10)
-            device_counts.columns = ['Device', 'Stockout Count']
-            fig_dev = px.bar(device_counts, x='Stockout Count', y='Device', orientation='h', 
-                             color='Stockout Count', color_continuous_scale='Blues')
-            st.plotly_chart(fig_dev, use_container_width=True)
-
-        # --- DATA DRILL-DOWN ---
+        # --- PAR LEVEL RECOMMENDATIONS ---
         st.divider()
-        st.subheader("📋 Stockout Detail Log")
-        st.dataframe(
-            stockouts[['dt', 'user_name', 'destination', 'med_desc', 'priority', 'qty']], 
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "dt": st.column_config.DatetimeColumn("Requested At", format="MM/DD HH:mm"),
-                "user_name": "Technician",
-                "destination": "Pyxis Unit",
-                "med_desc": "Medication"
-            }
-        )
+        st.subheader("💡 AI Par Level Recommendations")
+        st.caption("Calculated based on stockout frequency vs. average refill volume.")
+        
+        if not stockout_only.empty:
+            # Aggregate stockout data
+            stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(
+                med_desc=('med_desc', 'first'),
+                Stockout_Count=('pk', 'count'),
+                Avg_Stockout_Req=('qty', 'mean')
+            ).reset_index().rename(columns={'destination': 'device'})
 
-        # 3. Pattern Recognition Logic
-        st.info("💡 **Leadership Insight:** If a medication appears on the Stockout chart frequently, consider increasing its 'Par Level' in the Pyxis to reduce 'Stat' delivery tasks.")
+            # Pull refill stats from Pyxis events if available
+            if not df_events.empty:
+                is_refill = df_events['event_type'].astype(str).str.contains(r'REFILL|LOAD|STOCK|ADD', case=False, na=False)
+                refill_stats = df_events[is_refill].groupby(['device', 'med_id'])['qty'].mean().reset_index(name='Avg_Refill_Qty')
+                recs = pd.merge(stockout_agg, refill_stats, on=['device', 'med_id'], how='left')
+            else:
+                recs = stockout_agg.copy()
+                recs['Avg_Refill_Qty'] = 0
+
+            recs['Avg_Refill_Qty'] = recs['Avg_Refill_Qty'].fillna(0)
+            
+            # Smart logic for suggestions
+            base_capacity = np.where(recs['Avg_Refill_Qty'] > 0, recs['Avg_Refill_Qty'], recs['Avg_Stockout_Req'])
+            recs['Suggested Min'] = np.clip(np.ceil(base_capacity * 1.5), 1, None).astype(int)
+            recs['Suggested Max'] = np.ceil(recs['Suggested Min'] * 2.5).astype(int)
+
+            st.dataframe(
+                recs[['device', 'med_desc', 'Stockout_Count', 'Suggested Min', 'Suggested Max']].sort_values('Stockout_Count', ascending=False),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "device": "Pyxis Unit",
+                    "med_desc": "Medication",
+                    "Stockout_Count": "Frequency"
+                }
+            )
+        else:
+            st.success("✅ No Stockouts found! Par levels appear optimized for this period.")
+
+        # --- RAW DATA VIEW ---
+        with st.expander("📄 View Detailed Workflow Log"):
+            st.dataframe(view_pharm, use_container_width=True)
