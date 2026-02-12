@@ -159,21 +159,62 @@ else:
             display_df['Actual Refill'] = display_df['Refill_Time'].dt.strftime('%m/%d %H:%M')
             display_df['Turnaround'] = display_df['Pharmacy_Turnaround_Min'].apply(lambda x: f"{int(x)} min" if pd.notnull(x) else "-")
 
-            st.dataframe(
-                display_df[['device', 'med_desc', 'Discovery', 'Order (Carousel)', 'Actual Refill', 'Turnaround']],
-                width='stretch', 
-                hide_index=True,
-                column_config={
-                    "device": "Unit",
-                    "med_desc": "Medication",
-                    "Discovery": "1. Time Triggered (Hit 0)",
-                    "Order (Carousel)": "2. Carousel Order Created",
-                    "Actual Refill": "3. Actual Refill Completed"
-                }
-            )
-            
             if not path.empty:
                 avg_turnaround = path['Pharmacy_Turnaround_Min'].mean()
                 st.metric("Avg Pharmacy Turnaround (Order to Refill)", f"{int(avg_turnaround)} Minutes")
+                
+                st.caption("👆 Click a row to see the exact raw logs for that replenishment cycle.")
+                
+                # 1. Interactive Table
+                event = st.dataframe(
+                    display_df[['device', 'med_desc', 'Discovery', 'Order (Carousel)', 'Actual Refill', 'Turnaround']],
+                    width='stretch', 
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    column_config={
+                        "device": "Unit",
+                        "med_desc": "Medication",
+                        "Discovery": "1. Time Triggered (Hit 0)",
+                        "Order (Carousel)": "2. Carousel Order Created",
+                        "Actual Refill": "3. Actual Refill Completed"
+                    }
+                )
+
+                # 2. Drill-Down Logic
+                if len(event.selection.rows) > 0:
+                    idx = event.selection.rows[0]
+                    sel_row = display_df.iloc[idx]
+                    
+                    st.divider()
+                    st.subheader(f"🔬 Audit Trail: {sel_row['med_desc']}")
+                    
+                    # Pulling the raw data for the specific order and refill
+                    raw_order = df_pharm[
+                        (df_pharm['dt'] == sel_row['Order_Time']) & 
+                        (df_pharm['med_id'] == sel_row['med_id'])
+                    ].copy()
+                    raw_order['Step'] = "2. Carousel Order"
+
+                    raw_refill = df_events[
+                        (df_events['dt'] == sel_row['Refill_Time']) & 
+                        (df_events['med_id'] == sel_row['med_id'])
+                    ].copy()
+                    raw_refill['Step'] = "3. Actual Refill"
+
+                    # Combine and display the mini-log
+                    audit_trail = pd.concat([raw_order, raw_refill], ignore_index=True)
+                    audit_trail = audit_trail.sort_values('dt')
+
+                    st.dataframe(
+                        audit_trail[['dt', 'Step', 'user_name', 'event_type', 'qty']],
+                        width='stretch',
+                        hide_index=True,
+                        column_config={
+                            "dt": st.column_config.DatetimeColumn("Exact Timestamp", format="MM/DD HH:mm:ss"),
+                            "user_name": "Technician",
+                            "event_type": "Action Type"
+                        }
+                    )
             else:
                 st.info("No completed replenishment cycles found in this date range.")
