@@ -115,48 +115,48 @@ else:
             st.dataframe(view_pharm, use_container_width=True)
 
 
-st.divider()
-st.subheader("🔄 Full Lifecycle: Stockout to Replenishment")
-st.caption("Tracking the delay between a 'Zero' event and the 'Refill' event.")
-
-if not df_events.empty and not df_pharm.empty:
-    # 1. Identify "Zero Out" Events from Pyxis
-    zeros = df_events[df_events['ending_qty'] == 0].copy()
-    zeros = zeros[['dt', 'device', 'med_id', 'med_desc']].rename(columns={'dt': 'Stockout_Time'})
-
-    # 2. Identify "Refill" Events from Pyxis
-    refills = df_events[df_events['event_type'].str.contains('REFILL|LOAD', case=False, na=False)].copy()
-    refills = refills[['dt', 'device', 'med_id', 'qty']].rename(columns={'dt': 'Refill_Time', 'qty': 'Refill_Qty'})
-
-    # 3. Join with Workflow (Stockouts)
-    # We match by Unit (Device) and Medication (med_id)
-    lifecycle = pd.merge(zeros, stockout_only, left_on=['device', 'med_id'], right_on=['destination', 'med_id'], how='inner')
-    
-    # 4. Find the first refill that happened AFTER the stockout
-    # We merge and then filter for Refill_Time > Stockout_Time
-    full_path = pd.merge(lifecycle, refills, on=['device', 'med_id'], how='left')
-    full_path = full_path[full_path['Refill_Time'] > full_path['Stockout_Time']]
-    
-    # Get the earliest refill for each stockout
-    full_path = full_path.sort_values('Refill_Time').groupby(['device', 'med_id', 'Stockout_Time']).first().reset_index()
-
-    # 5. Calculate Delay
-    full_path['Replenish_Time_Min'] = (full_path['Refill_Time'] - full_path['Stockout_Time']).dt.total_seconds() / 60
-
-    # Display the Full Story
-    st.dataframe(
-        full_path[['device', 'med_desc_x', 'Stockout_Time', 'dt', 'Refill_Time', 'Replenish_Time_Min']],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "device": "Unit",
-            "med_desc_x": "Medication",
-            "Stockout_Time": "Time Hit Zero",
-            "dt": "Carousel Order Time",
-            "Refill_Time": "Actual Refill",
-            "Replenish_Time_Min": st.column_config.NumberColumn("Total Outage (Min)", format="%d")
-        }
-    )
-    
-    avg_outage = full_path['Replenish_Time_Min'].mean()
-    st.metric("Average Time Unit Stays Empty", f"{int(avg_outage)} Minutes" if not full_path.empty else "N/A")
+        st.divider()
+        st.subheader("🔄 Full Lifecycle: Stockout to Replenishment")
+        st.caption("Tracking the delay between a 'Zero' event and the 'Refill' event.")
+        
+        if not df_events.empty and not df_pharm.empty:
+            # 1. Identify "Zero Out" Events from Pyxis
+            zeros = df_events[df_events['ending_qty'] == 0].copy()
+            zeros = zeros[['dt', 'device', 'med_id', 'med_desc']].rename(columns={'dt': 'Stockout_Time'})
+        
+            # 2. Identify "Refill" Events from Pyxis
+            refills = df_events[df_events['event_type'].str.contains('REFILL|LOAD', case=False, na=False)].copy()
+            refills = refills[['dt', 'device', 'med_id', 'qty']].rename(columns={'dt': 'Refill_Time', 'qty': 'Refill_Qty'})
+        
+            # 3. Join with Workflow (Stockouts)
+            # We match by Unit (Device) and Medication (med_id)
+            lifecycle = pd.merge(zeros, stockout_only, left_on=['device', 'med_id'], right_on=['destination', 'med_id'], how='inner')
+            
+            # 4. Find the first refill that happened AFTER the stockout
+            # We merge and then filter for Refill_Time > Stockout_Time
+            full_path = pd.merge(lifecycle, refills, on=['device', 'med_id'], how='left')
+            full_path = full_path[full_path['Refill_Time'] > full_path['Stockout_Time']]
+            
+            # Get the earliest refill for each stockout
+            full_path = full_path.sort_values('Refill_Time').groupby(['device', 'med_id', 'Stockout_Time']).first().reset_index()
+        
+            # 5. Calculate Delay
+            full_path['Replenish_Time_Min'] = (full_path['Refill_Time'] - full_path['Stockout_Time']).dt.total_seconds() / 60
+        
+            # Display the Full Story
+            st.dataframe(
+                full_path[['device', 'med_desc_x', 'Stockout_Time', 'dt', 'Refill_Time', 'Replenish_Time_Min']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "device": "Unit",
+                    "med_desc_x": "Medication",
+                    "Stockout_Time": "Time Hit Zero",
+                    "dt": "Carousel Order Time",
+                    "Refill_Time": "Actual Refill",
+                    "Replenish_Time_Min": st.column_config.NumberColumn("Total Outage (Min)", format="%d")
+                }
+            )
+            
+            avg_outage = full_path['Replenish_Time_Min'].mean()
+            st.metric("Average Time Unit Stays Empty", f"{int(avg_outage)} Minutes" if not full_path.empty else "N/A")
