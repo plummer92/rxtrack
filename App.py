@@ -982,41 +982,6 @@ elif selected_page == "⚡ Efficiency":
         fig = px.bar(inefficient, x='Trips', y='med_desc', orientation='h', title="High Frequency, Low Yield Refills", color='Trips')
         st.plotly_chart(fig, use_container_width=True)
 
-# 9. PHARMACY WORKFLOW
-elif selected_page == "🏥 Pharmacy Workflow":
-    if not df_pharm.empty:
-        st.markdown("### 🏥 Central Pharmacy Workflow")
-        c_filter1, c_filter2 = st.columns(2)
-        priorities = sorted(df_pharm['priority'].dropna().unique())
-        sel_prio = c_filter1.multiselect("Filter Transaction Type (Priority)", priorities)
-        view_pharm = df_pharm.copy()
-        if sel_prio: view_pharm = view_pharm[view_pharm['priority'].isin(sel_prio)]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Orders", len(view_pharm))
-        c2.metric("Critical/STAT", len(view_pharm[view_pharm['priority'].str.contains('STAT|Critical', case=False, na=False)]))
-        top_dest = view_pharm['destination'].mode()[0] if not view_pharm['destination'].empty else "N/A"
-        c3.metric("Top Destination", top_dest)
-        st.dataframe(view_pharm, use_container_width=True)
-        st.divider()
-        st.subheader("💡 Par Level Recommendations")
-        stockout_only = df_pharm[df_pharm['priority'].str.contains(r'Stock\s*Out|Stockout', case=False, na=False)].copy()
-        if not stockout_only.empty:
-            stockout_agg = stockout_only.groupby(['destination', 'med_id']).agg(med_desc=('med_desc', 'first'), Stockout_Count=('pk', 'count'), Avg_Stockout_Req=('qty', 'mean')).reset_index().rename(columns={'destination': 'device'})
-            if not df_events.empty:
-                is_refill = df_events['event_type'].astype(str).str.contains(r'REFILL|LOAD|STOCK|ADD', case=False, na=False)
-                refill_stats = df_events[is_refill].groupby(['device', 'med_id'])['qty'].mean().reset_index(name='Avg_Refill_Qty')
-                recs = pd.merge(stockout_agg, refill_stats, on=['device', 'med_id'], how='left')
-            else:
-                recs = stockout_agg.copy()
-                recs['Avg_Refill_Qty'] = 0
-            recs['Avg_Refill_Qty'] = recs['Avg_Refill_Qty'].fillna(0)
-            base_capacity = np.where(recs['Avg_Refill_Qty'] > 0, recs['Avg_Refill_Qty'], recs['Avg_Stockout_Req'])
-            recs['Suggested Min'] = np.clip(np.ceil(base_capacity * 1.5), 1, None)
-            recs['Suggested Max'] = np.ceil(recs['Suggested Min'] * 2.5)
-            st.dataframe(recs[['device', 'med_desc', 'Stockout_Count', 'Suggested Min', 'Suggested Max']], use_container_width=True)
-        else:
-            st.success("No Stockouts found! Par levels look good.")
-
 # 10. RETURN RECONCILIATION
 elif selected_page == "🔄 Return Reconciliation":
     st.markdown("### 🔄 Unload vs. Return Reconciliation")
