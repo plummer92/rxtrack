@@ -121,6 +121,7 @@ else:
         
         if not df_events.empty and not df_pharm.empty:
             # 1. Identify "Zero Out" Events from Pyxis
+            st.write("Columns found in df_events:", df_events.columns.tolist())
             zeros = df_events[df_events['ending_qty'] == 0].copy()
             zeros = zeros[['dt', 'device', 'med_id', 'med_desc']].rename(columns={'dt': 'Stockout_Time'})
         
