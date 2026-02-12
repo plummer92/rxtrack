@@ -115,7 +115,7 @@ else:
             st.dataframe(view_pharm, use_container_width=True)
 
 
-       st.divider()
+        st.divider()
         st.subheader("🔄 Full Lifecycle: Stockout to Replenishment")
         st.caption("Tracking the sequence: Outage Discovery ➔ Carousel Order ➔ Actual Refill.")
 
