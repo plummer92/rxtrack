@@ -60,7 +60,7 @@ try:
             st.error(f"🚩 High Alert: {len(critical)} imminent stockout risks found in global scan.")
             st.dataframe(critical, width='stretch')
 
-    st.divider()
+st.divider()
         st.subheader("🎯 Restock Accuracy Auditor (Last Touch)")
         st.caption("Identifying discrepancies discovered immediately after a restock event.")
 
@@ -105,7 +105,6 @@ try:
                 st.bar_chart(error_counts, x='Technician', y='Potential Entry Errors')
             else:
                 st.success("✅ No discrepancies found immediately following a restock event.")
-
     # 2. Inventory Drift Auditor
     st.divider()
     st.subheader("🕵️ Global Drift Auditor")
