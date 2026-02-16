@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data, engine # Now this import will work!
+import plotly.express as px
+from App import load_data, engine 
 
 st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 
@@ -12,14 +13,12 @@ def load_all_time_data():
     df_e = pd.read_sql("SELECT * FROM events", engine)
     df_p = pd.read_sql("SELECT * FROM pharmacy_orders", engine)
     
-    # 2. FORCE NUMERIC TYPES (This fixes the 'str' vs 'float' error)
-    # We apply this to qty and inventory levels to ensure math works
+    # 2. FORCE NUMERIC TYPES
     for df in [df_e, df_p]:
         if 'qty' in df.columns:
             df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
             
     if not df_e.empty:
-        # Standardizing naming and types for Pyxis events
         if 'ending_qty' in df_e.columns:
             df_e['ending_qty'] = pd.to_numeric(df_e['ending_qty'], errors='coerce').fillna(0)
         else:
@@ -39,15 +38,18 @@ def load_all_time_data():
 st.header("🧠 RxTrack Intelligence Engine")
 st.caption("Scanning global historical data for trends and anomalies.")
 
+# Initialize empty to prevent NameErrors if loading fails
+df_events_all = pd.DataFrame()
+df_pharm_all = pd.DataFrame()
+
 try:
     df_events_all, df_pharm_all = load_all_time_data()
     
-    # 1. Burn Rate Prediction (Scan the last 24h of the whole DB)
+    # 1. Burn Rate Prediction
     if not df_events_all.empty:
         last_time = df_events_all['dt'].max()
         recent_24h = df_events_all[df_events_all['dt'] > (last_time - pd.Timedelta(hours=24))].copy()
         
-        # Aggregate logic
         burn = recent_24h.dropna(subset=['ending_qty']).groupby(['device', 'med_desc']).agg(
             pulled=('qty', 'sum'),
             current_inv=('ending_qty', 'last')
@@ -75,45 +77,44 @@ except Exception as e:
     st.error(f"Brain Scan failed: {e}")
     st.info("Ensure the database engine is correctly configured in App.py.")
 
-# --- RESTOCK ACCURACY AUDITOR ---
-        st.divider()
-        st.subheader("🎯 Restock Accuracy Auditor (Last Touch)")
-        st.caption("Identifying discrepancies discovered immediately after a restock event.")
+# --- RESTOCK ACCURACY AUDITOR (FIXED INDENTATION) ---
+st.divider()
+st.subheader("🎯 Restock Accuracy Auditor (Last Touch)")
+st.caption("Identifying discrepancies discovered immediately after a restock event.")
 
-        if not df_events_all.empty:
-            # 1. Prepare data for sequence analysis
-            audit_df = df_events_all.sort_values(['device', 'med_id', 'dt']).copy()
-            
-            # 2. Shift values to identify the previous technician and action
-            audit_df['prev_tech'] = audit_df.groupby(['device', 'med_id'])['user_name'].shift(1)
-            audit_df['prev_event'] = audit_df.groupby(['device', 'med_id'])['event_type'].shift(1)
-            
-            # 3. Filter for discrepancies found directly after a REFILL/LOAD
-            # Ensure the bitwise '&' is used with properly wrapped parentheses
-            error_mask = (
-                (audit_df['discrepancy_qty'] != 0) & 
-                (audit_df['prev_event'].str.contains('REFILL|LOAD', case=False, na=False))
-            )
-            errors = audit_df[error_mask].copy()
+if not df_events_all.empty:
+    # 1. Prepare data for sequence analysis
+    audit_df = df_events_all.sort_values(['device', 'med_id', 'dt']).copy()
+    
+    # 2. Shift values to identify previous tech
+    audit_df['prev_tech'] = audit_df.groupby(['device', 'med_id'])['user_name'].shift(1)
+    audit_df['prev_event'] = audit_df.groupby(['device', 'med_id'])['event_type'].shift(1)
+    
+    # 3. Filter for discrepancies after REFILL/LOAD
+    error_mask = (
+        (audit_df['discrepancy_qty'] != 0) & 
+        (audit_df['prev_event'].str.contains('REFILL|LOAD', case=False, na=False))
+    )
+    errors = audit_df[error_mask].copy()
 
-            if not errors.empty:
-                st.warning(f"⚠️ Found {len(errors)} potential restock entry errors.")
-                
-                st.dataframe(
-                    errors[['dt', 'device', 'med_desc', 'prev_tech', 'prev_event', 'user_name', 'discrepancy_qty', 'discrepancy_reason']],
-                    width='stretch',
-                    hide_index=True,
-                    column_config={
-                        "dt": st.column_config.DatetimeColumn("Discovery Time", format="MM/DD HH:mm"),
-                        "prev_tech": "Tech Who Restocked",
-                        "user_name": "Tech Who Found Error"
-                    }
-                )
-                
-                # Visual Leaderboard
-                error_counts = errors['prev_tech'].value_counts().reset_index()
-                error_counts.columns = ['Technician', 'Count']
-                fig_errors = px.bar(error_counts, x='Count', y='Technician', orientation='h', title="Potential Entry Errors by Tech")
-                st.plotly_chart(fig_errors, width='stretch')
-            else:
-                st.success("✅ No discrepancies found immediately following restocks.")
+    if not errors.empty:
+        st.warning(f"⚠️ Found {len(errors)} potential restock entry errors.")
+        
+        st.dataframe(
+            errors[['dt', 'device', 'med_desc', 'prev_tech', 'prev_event', 'user_name', 'discrepancy_qty', 'discrepancy_reason']],
+            width='stretch',
+            hide_index=True,
+            column_config={
+                "dt": st.column_config.DatetimeColumn("Discovery Time", format="MM/DD HH:mm"),
+                "prev_tech": "Tech Who Restocked",
+                "user_name": "Tech Who Found Error"
+            }
+        )
+        
+        # Visual Leaderboard
+        error_counts = errors['prev_tech'].value_counts().reset_index()
+        error_counts.columns = ['Technician', 'Count']
+        fig_errors = px.bar(error_counts, x='Count', y='Technician', orientation='h', title="Potential Entry Errors by Tech")
+        st.plotly_chart(fig_errors, width='stretch')
+    else:
+        st.success("✅ No discrepancies found immediately following restocks.")
