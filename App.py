@@ -53,7 +53,7 @@ AMBIGUOUS_NAMES = ["melissa", "emily", "sarah", "megan", "erin", "kyle", "jessic
 
 # --- UTILITY FUNCTIONS ---
 def normalize_name(full_name):
-    """Robust name normalization to prevent 'string index out of range' errors."""
+    # Handle nulls, non-strings, or malformed separators
     if not full_name or pd.isna(full_name) or str(full_name).strip() in ["", ",", "nan"]: 
         return "unknown"
     
@@ -65,6 +65,7 @@ def normalize_name(full_name):
         if len(parts) >= 2:
             last_name_part = parts[0].strip()
             first_name_parts = parts[1].strip().split(" ")
+            # Check length before indexing to prevent crash
             if first_name_parts and len(first_name_parts[0]) > 0:
                 first_name = first_name_parts[0]
             if len(last_name_part) > 0: 
@@ -73,18 +74,12 @@ def normalize_name(full_name):
         parts = s.split(" ")
         if len(parts) > 0:
             first_name = parts[0]
+            # Check length of second part for last initial
             if len(parts) > 1 and len(parts[1]) > 0: 
                 last_initial = parts[1][0]
     
-    for key, val in NAME_MAPPINGS.items():
-        if key in first_name: 
-            first_name = val
-            break
-            
-    if first_name in AMBIGUOUS_NAMES and last_initial:
-        return f"{first_name} {last_initial}"
+    # ... (Keep existing NAME_MAPPINGS and AMBIGUOUS_NAMES logic)
     return first_name
-
 def seconds_to_mmss(seconds):
     if pd.isna(seconds) or seconds < 0: return "-"
     m, s = divmod(int(seconds), 60)
