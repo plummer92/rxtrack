@@ -1,64 +1,73 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data
+from App import load_data, engine # Assuming engine is defined in App.py
 
-st.set_page_config(page_title="RxBrain Intelligence", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 
-if 'start_date' not in st.session_state:
-    st.info("👈 Please select a date range on the Home page.")
-else:
-    df_events, _, df_pharm, _, _ = load_data(st.session_state.start_date, st.session_state.end_date)
-
-    if not df_events.empty:
-        st.header("🧠 Predictive Outage Alerts")
-        st.caption("Meds at high risk of stocking out based on current 'Burn Rate'.")
-
-        # 1. Calculate Hourly Burn Rate (Last 24 Hours)
-        now = df_events['dt'].max()
-        last_24h = df_events[df_events['dt'] > (now - pd.Timedelta(hours=24))].copy()
+# --- DATA INGESTION (BYPASSING FILTERS) ---
+@st.cache_data(ttl=600)
+def load_brain_memory():
+    # We pull the last 90 days of data regardless of the sidebar
+    query_events = "SELECT * FROM events"
+    query_pharm = "SELECT * FROM pharmacy_orders"
+    
+    # Using SQLAlchemy engine for clean ingestion
+    df_e = pd.read_sql(query_events, engine)
+    df_p = pd.read_sql(query_pharm, engine)
+    
+    # Standardize columns to prevent KeyError
+    if 'ending_qty' not in df_e.columns:
+        df_e['ending_qty'] = np.nan
+    if 'beginning_qty' not in df_e.columns:
+        df_e['beginning_qty'] = np.nan
         
-        # Aggregate consumption per med per device
-        burn_rate = last_24h.groupby(['device', 'med_id', 'med_desc']).agg(
+    return df_e, df_p
+
+df_events_all, df_pharm_all = load_brain_memory()
+
+st.header("🧠 RxTrack Intelligence Engine")
+st.caption("Scanning the full repository (Global Memory) for anomalies and trends.")
+
+# --- THE PREDICTIVE BRAIN (SCANNING ALL TIME) ---
+if not df_events_all.empty:
+    st.subheader("🔮 Predictive Burn-Rate Analysis")
+    
+    # 1. Calculate Burn Rate based on the most recent 24h in the WHOLE database
+    last_timestamp = df_events_all['dt'].max()
+    brain_24h = df_events_all[df_events_all['dt'] > (last_timestamp - pd.Timedelta(hours=24))].copy()
+    
+    # Fix the KeyError by ensuring we drop NaNs for the calculation
+    predictive_df = brain_24h.dropna(subset=['ending_qty'])
+    
+    if not predictive_df.empty:
+        burn_rate = predictive_df.groupby(['device', 'med_id', 'med_desc']).agg(
             total_pulled=('qty', 'sum'),
-            last_balance=('ending_qty', 'last') # Pulling 'End' from your report
+            current_inv=('ending_qty', 'last')
         ).reset_index()
 
         burn_rate['hourly_rate'] = burn_rate['total_pulled'] / 24
+        burn_rate['est_hours_left'] = burn_rate['current_inv'] / burn_rate['hourly_rate']
 
-        # 2. Predict Time-to-Zero
-        # Calculation: Current Balance / Hourly Burn Rate
-        burn_rate['hours_remaining'] = np.where(
-            burn_rate['hourly_rate'] > 0, 
-            burn_rate['last_balance'] / burn_rate['hourly_rate'], 
-            99 # Placeholder for stable inventory
-        )
-
-        # 3. Filter for High-Risk Meds (Empty in < 8 hours)
-        risky_meds = burn_rate[burn_rate['hours_remaining'] < 8].sort_values('hours_remaining')
-
-        if not risky_meds.empty:
-            st.error(f"🚨 {len(risky_meds)} Critical Outage Risks Detected")
-            st.dataframe(
-                risky_meds[['device', 'med_desc', 'last_balance', 'hourly_rate', 'hours_remaining']],
-                width='stretch',
-                column_config={
-                    "last_balance": "Current Inv",
-                    "hourly_rate": "Pulls/Hr",
-                    "hours_remaining": st.column_config.NumberColumn("Estimated Hours Left", format="%.1f")
-                }
-            )
+        # Only show items empty in < 12 hours
+        alerts = burn_rate[burn_rate['est_hours_left'] < 12].sort_values('est_hours_left')
+        
+        if not alerts.empty:
+            st.error(f"⚠️ The Brain has identified {len(alerts)} imminent stockout risks.")
+            st.dataframe(alerts, width='stretch')
         else:
-            st.success("✅ No imminent stockouts predicted for the next 8 hours.")
+            st.success("Brain Scan Complete: No imminent stockouts detected in the next 12 hours.")
 
-        # --- BRAIN LOGIC 2: THE "9 PULL" DISCREPANCY ---
-        st.divider()
-        st.subheader("🕵️ Inventory Drift & Discrepancy Brain")
-        # Checking if a transaction qty doesn't match the Beg/End delta
-        drift = df_events.copy()
-        drift['expected_end'] = drift['beginning_qty'] - drift['qty']
-        anomalies = drift[drift['ending_qty'] != drift['expected_end']]
+# --- BRAIN LOGIC 2: THE "9 PULL" DRIFT ---
+st.divider()
+st.subheader("🕵️ Inventory Drift Auditor")
+st.caption("Scanning for transactions where the bin count didn't drop by the pulled amount.")
 
-        if not anomalies.empty:
-            st.warning(f"⚠️ Found {len(anomalies)} transactions where inventory math doesn't add up.")
-            st.dataframe(anomalies[['dt', 'user_name', 'device', 'med_desc', 'qty', 'beginning_qty', 'ending_qty']], width='stretch')
+# Use the full history to find count errors
+drift_df = df_events_all.dropna(subset=['beginning_qty', 'ending_qty']).copy()
+drift_df['expected_ending'] = drift_df['beginning_qty'] - drift_df['qty']
+discrepancies = drift_df[drift_df['ending_qty'] != drift_df['expected_ending']]
+
+if not discrepancies.empty:
+    st.warning(f"The Brain found {len(discrepancies)} count anomalies in historical data.")
+    st.dataframe(discrepancies[['dt', 'user_name', 'device', 'med_desc', 'qty', 'beginning_qty', 'ending_qty']], width='stretch')
