@@ -9,25 +9,19 @@ st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 # --- ALWAYS-ON BRAIN SCAN ---
 @st.cache_data(ttl=600)
 def load_all_time_data():
-    # 1. Pull the raw data using the engine defined in App.py
+    # 1. Pull raw data
     df_e = pd.read_sql("SELECT * FROM events", engine)
     df_p = pd.read_sql("SELECT * FROM pharmacy_orders", engine)
     
-    # 2. FORCE NUMERIC TYPES
-    for df in [df_e, df_p]:
-        if 'qty' in df.columns:
-            df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
-            
-    if not df_e.empty:
-        if 'ending_qty' in df_e.columns:
-            df_e['ending_qty'] = pd.to_numeric(df_e['ending_qty'], errors='coerce').fillna(0)
-        else:
-            df_e['ending_qty'] = np.nan
-            
-        if 'beginning_qty' in df_e.columns:
-            df_e['beginning_qty'] = pd.to_numeric(df_e['beginning_qty'], errors='coerce').fillna(0)
-        else:
-            df_e['beginning_qty'] = np.nan
+    # 2. CLEAN ALL NUMERIC COLUMNS (Prevents 'None' and 'Syntax' errors)
+    # We must explicitly clean these for the Brain to work correctly
+    numeric_cols = ['qty', 'discrepancy_qty', 'beginning_qty', 'ending_qty']
+    
+    for col in numeric_cols:
+        if col in df_e.columns:
+            df_e[col] = pd.to_numeric(df_e[col], errors='coerce').fillna(0)
+        if col in df_p.columns and col == 'qty':
+            df_p[col] = pd.to_numeric(df_p[col], errors='coerce').fillna(0)
 
     # 3. Ensure Timestamps are actual Datetime objects
     df_e['dt'] = pd.to_datetime(df_e['dt'], errors='coerce')
