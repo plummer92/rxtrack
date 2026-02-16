@@ -6,23 +6,23 @@ from App import engine, normalize_name # Import normalization from main App
 
 st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 
-# --- ALWAYS-ON BRAIN SCAN ---
 @st.cache_data(ttl=600)
 def load_all_time_data():
-    # 1. Pull all three core tables for the Brain
+    # 1. Pull all three tables to enable Shift-Level auditing
     df_e = pd.read_sql("SELECT * FROM events", engine)
     df_p = pd.read_sql("SELECT * FROM pharmacy_orders", engine)
     df_s = pd.read_sql("SELECT * FROM staff_schedule", engine)
     
-    # 2. CLEAN NUMERIC COLUMNS
+    # 2. Force numeric types on inventory columns
     numeric_cols = ['qty', 'discrepancy_qty', 'beginning_qty', 'ending_qty']
     for col in numeric_cols:
         if col in df_e.columns:
             df_e[col] = pd.to_numeric(df_e[col], errors='coerce').fillna(0)
     
-    # 3. Standardize dates and names for matching
+    # 3. Standardize dates and names for the Global Brain
     df_e['dt'] = pd.to_datetime(df_e['dt'], errors='coerce')
     df_e['date_only'] = df_e['dt'].dt.date
+    # Apply the fixed normalize_name to create the link
     df_e['match_key'] = df_e['user_name'].apply(normalize_name)
     
     df_s['date_obj'] = pd.to_datetime(df_s['dt']).dt.date
