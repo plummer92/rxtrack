@@ -8,15 +8,31 @@ st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 # --- ALWAYS-ON BRAIN SCAN ---
 @st.cache_data(ttl=600)
 def load_all_time_data():
-    # Scanning the entire database, not just the filtered view
+    # 1. Pull the raw data using the engine defined in App.py
     df_e = pd.read_sql("SELECT * FROM events", engine)
     df_p = pd.read_sql("SELECT * FROM pharmacy_orders", engine)
     
-    # Safety Check: Ensure 'ending_qty' exists to prevent KeyErrors
-    if 'ending_qty' not in df_e.columns:
-        df_e['ending_qty'] = np.nan
-    if 'beginning_qty' not in df_e.columns:
-        df_e['beginning_qty'] = np.nan
+    # 2. FORCE NUMERIC TYPES (This fixes the 'str' vs 'float' error)
+    # We apply this to qty and inventory levels to ensure math works
+    for df in [df_e, df_p]:
+        if 'qty' in df.columns:
+            df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
+            
+    if not df_e.empty:
+        # Standardizing naming and types for Pyxis events
+        if 'ending_qty' in df_e.columns:
+            df_e['ending_qty'] = pd.to_numeric(df_e['ending_qty'], errors='coerce').fillna(0)
+        else:
+            df_e['ending_qty'] = np.nan
+            
+        if 'beginning_qty' in df_e.columns:
+            df_e['beginning_qty'] = pd.to_numeric(df_e['beginning_qty'], errors='coerce').fillna(0)
+        else:
+            df_e['beginning_qty'] = np.nan
+
+    # 3. Ensure Timestamps are actual Datetime objects
+    df_e['dt'] = pd.to_datetime(df_e['dt'], errors='coerce')
+    df_p['dt'] = pd.to_datetime(df_p['dt'], errors='coerce')
         
     return df_e, df_p
 
