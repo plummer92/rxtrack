@@ -68,59 +68,61 @@ else:
                                  labels={'count': 'Stockout Count', 'med_desc': 'Medication'}, color='count')
                 st.plotly_chart(fig_med, use_container_width=True)
 
-        # --- PYXIS TRANSACTION ANALYZER ---
+        # --- CAROUSEL TRANSACTION ANALYZER ---
         st.divider()
-        st.subheader("🔍 Pyxis Transaction Code Analyzer")
-        st.caption("Deep-dive into specific transaction types to find high-volume meds and station trends.")
+        st.subheader("🎡 Carousel Transaction Analyzer")
+        st.caption("Deep-dive into central pharmacy workflow codes (e.g., STAT, Stockout, Routine) to find order trends.")
 
-        if not df_events.empty:
-            # 1. Selection Filter
-            all_codes = sorted(df_events['event_type'].dropna().unique())
-            selected_code = st.selectbox("Select Transaction Code to Analyze:", all_codes)
+        if not df_pharm.empty:
+            # 1. Selection Filter (Using priority/transaction codes from Pharmacy Workflow)
+            all_carousel_codes = sorted(df_pharm['priority'].dropna().unique())
+            selected_carousel_code = st.selectbox("Select Carousel Transaction Type:", all_carousel_codes)
             
-            # 2. Filter the Data
-            code_df = df_events[df_events['event_type'] == selected_code].copy()
+            # 2. Filter the Pharmacy Data
+            car_df = df_pharm[df_pharm['priority'] == selected_carousel_code].copy()
             
-            if not code_df.empty:
-                # 3. Summary Metrics
+            if not car_df.empty:
+                # 3. Summary Metrics for Carousel Workflow
                 m1, m2, m3 = st.columns(3)
-                m1.metric(f"Total '{selected_code}' Events", len(code_df))
-                m2.metric("Busiest Station", code_df['device'].mode()[0])
-                m3.metric("Heaviest Med", code_df['med_desc'].mode()[0])
+                m1.metric(f"Total '{selected_carousel_code}' Orders", len(car_df))
+                m2.metric("Primary Destination", car_df['destination'].mode()[0])
+                m3.metric("Highest Volume Med", car_df['med_desc'].mode()[0])
 
-                # 4. Station and Med Trends
+                # 4. Destination and Med Trends
                 col_tr1, col_tr2 = st.columns(2)
                 
                 with col_tr1:
-                    st.markdown("##### Station Volume")
-                    station_counts = code_df['device'].value_counts().reset_index().head(10)
-                    station_counts.columns = ['Station', 'Count']
-                    fig_sta = px.bar(station_counts, x='Count', y='Station', orientation='h', color='Count')
-                    st.plotly_chart(fig_sta, width='stretch')
+                    st.markdown("##### Top Destination Units")
+                    dest_counts = car_df['destination'].value_counts().reset_index().head(10)
+                    dest_counts.columns = ['Unit', 'Order Count']
+                    fig_dest = px.bar(dest_counts, x='Order Count', y='Unit', orientation='h', color='Order Count')
+                    st.plotly_chart(fig_dest, width='stretch')
 
                 with col_tr2:
-                    st.markdown("##### Top Medications for this Code")
-                    med_counts = code_df['med_desc'].value_counts().reset_index().head(10)
-                    med_counts.columns = ['Medication', 'Count']
-                    fig_med_code = px.bar(med_counts, x='Count', y='Medication', orientation='h', color='Count', color_continuous_scale='Viridis')
-                    st.plotly_chart(fig_med_code, width='stretch')
+                    st.markdown("##### Heaviest Medications (Carousel Pulls)")
+                    car_med_counts = car_df['med_desc'].value_counts().reset_index().head(10)
+                    car_med_counts.columns = ['Medication', 'Pull Count']
+                    fig_med_car = px.bar(car_med_counts, x='Pull Count', y='Medication', orientation='h', 
+                                         color='Pull Count', color_continuous_scale='Bluered')
+                    st.plotly_chart(fig_med_car, width='stretch')
 
-                # 5. Daily Trend Line
-                st.markdown(f"##### Daily Trend: {selected_code}")
-                code_df['date_only'] = code_df['dt'].dt.date
-                trend_data = code_df.groupby('date_only').size().reset_index(name='Daily Events')
-                fig_trend = px.line(trend_data, x='date_only', y='Daily Events', markers=True)
-                st.plotly_chart(fig_trend, width='stretch')
+                # 5. Hourly Trend: When are these orders hitting the Carousel?
+                st.markdown(f"##### Peak Order Times: {selected_carousel_code}")
+                car_df['hour'] = car_df['dt'].dt.hour
+                hourly_trend = car_df.groupby('hour').size().reset_index(name='Order Volume')
+                fig_hour = px.line(hourly_trend, x='hour', y='Order Volume', markers=True, 
+                                   labels={'hour': 'Hour of Day (24h)', 'Order Volume': 'Number of Pulls'})
+                st.plotly_chart(fig_hour, width='stretch')
 
-                # 6. Raw Data for the Selected Code
-                with st.expander(f"📋 View all '{selected_code}' Transactions"):
+                # 6. Carousel Raw Log
+                with st.expander(f"📋 View Raw '{selected_carousel_code}' Carousel Log"):
                     st.dataframe(
-                        code_df[['dt', 'user_name', 'device', 'med_desc', 'qty']],
+                        car_df[['dt', 'user_name', 'destination', 'med_desc', 'qty', 'priority']],
                         width='stretch',
                         hide_index=True
                     )
             else:
-                st.info(f"No transactions found for code: {selected_code}")
+                st.info(f"No carousel records found for code: {selected_carousel_code}")
 
         # --- PYXIS TRANSACTION DEEP-DIVE ---
         st.divider()
