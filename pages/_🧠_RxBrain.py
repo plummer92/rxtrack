@@ -8,29 +8,34 @@ st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 
 @st.cache_data(ttl=600)
 def load_all_time_data():
-    # 1. Pull core tables from global engine
+    # 1. Pull core tables
     df_e = pd.read_sql("SELECT * FROM events", engine)
     df_p = pd.read_sql("SELECT * FROM pharmacy_orders", engine)
     df_s = pd.read_sql("SELECT * FROM staff_schedule", engine)
     
-    # 2. Force numeric types for inventory math
-    numeric_cols = ['qty', 'discrepancy_qty', 'beginning_qty', 'ending_qty']
-    for col in numeric_cols:
+    # 2. Aggressive Fillna for names
+    df_e['user_name'] = df_e['user_name'].fillna('unknown').astype(str)
+    df_s['staff_name'] = df_s['staff_name'].fillna('unknown').astype(str)
+    
+    # 3. Numeric cleaning
+    for col in ['qty', 'discrepancy_qty', 'beginning_qty', 'ending_qty']:
         if col in df_e.columns:
             df_e[col] = pd.to_numeric(df_e[col], errors='coerce').fillna(0)
     
-    # 3. THE NULL GUARD: Fixes the 'None' crash
-    # We fill 'None' usernames with 'unknown' before applying normalize_name
-    df_e['user_name'] = df_e['user_name'].fillna('unknown')
-    
-    # 4. Standardize dates and names
+    # 4. Standardize Dates
     df_e['dt'] = pd.to_datetime(df_e['dt'], errors='coerce')
     df_e['date_only'] = df_e['dt'].dt.date
-    # Now this won't crash even if the DB has nulls
-    df_e['match_key'] = df_e['user_name'].apply(normalize_name)
+    
+    # 5. Safe Normalization
+    # This lambda is the 'final shield' against index errors
+    df_e['match_key'] = df_e['user_name'].apply(
+        lambda x: normalize_name(x) if (isinstance(x, str) and len(x) > 1) else "unknown"
+    )
     
     df_s['date_obj'] = pd.to_datetime(df_s['dt']).dt.date
-    df_s['match_key'] = df_s['staff_name'].apply(normalize_name)
+    df_s['match_key'] = df_s['staff_name'].apply(
+        lambda x: normalize_name(x) if (isinstance(x, str) and len(x) > 1) else "unknown"
+    )
         
     return df_e, df_p, df_s
 st.header("🧠 RxTrack Intelligence Engine")
