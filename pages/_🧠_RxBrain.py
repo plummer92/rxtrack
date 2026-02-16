@@ -6,7 +6,6 @@ from App import engine, normalize_name
 
 st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 
-# --- ALWAYS-ON BRAIN SCAN ---
 @st.cache_data(ttl=600)
 def load_all_time_data():
     # 1. Pull core tables from global engine
@@ -20,7 +19,11 @@ def load_all_time_data():
         if col in df_e.columns:
             df_e[col] = pd.to_numeric(df_e[col], errors='coerce').fillna(0)
     
-    # 3. Standardize dates and names
+    # 3. THE NULL GUARD: Fixes the 'None' crash
+    # We fill 'None' usernames with 'unknown' before applying normalize_name
+    df_e['user_name'] = df_e['user_name'].fillna('unknown')
+    
+    # 4. Standardize dates and names
     df_e['dt'] = pd.to_datetime(df_e['dt'], errors='coerce')
     df_e['date_only'] = df_e['dt'].dt.date
     df_e['match_key'] = df_e['user_name'].apply(normalize_name)
