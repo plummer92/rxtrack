@@ -13,7 +13,7 @@ def load_all_time_data():
     df_p = pd.read_sql("SELECT * FROM pharmacy_orders", engine)
     df_s = pd.read_sql("SELECT * FROM staff_schedule", engine)
     
-    # 2. Force numeric types for math
+    # 2. Force numeric types for inventory math
     numeric_cols = ['qty', 'discrepancy_qty', 'beginning_qty', 'ending_qty']
     for col in numeric_cols:
         if col in df_e.columns:
@@ -26,13 +26,13 @@ def load_all_time_data():
     # 4. Standardize dates and names
     df_e['dt'] = pd.to_datetime(df_e['dt'], errors='coerce')
     df_e['date_only'] = df_e['dt'].dt.date
+    # Now this won't crash even if the DB has nulls
     df_e['match_key'] = df_e['user_name'].apply(normalize_name)
     
     df_s['date_obj'] = pd.to_datetime(df_s['dt']).dt.date
     df_s['match_key'] = df_s['staff_name'].apply(normalize_name)
         
     return df_e, df_p, df_s
-
 st.header("🧠 RxTrack Intelligence Engine")
 st.caption("Scanning global historical data for trends and anomalies.")
 
