@@ -68,6 +68,60 @@ else:
                                  labels={'count': 'Stockout Count', 'med_desc': 'Medication'}, color='count')
                 st.plotly_chart(fig_med, use_container_width=True)
 
+        # --- PYXIS TRANSACTION ANALYZER ---
+        st.divider()
+        st.subheader("🔍 Pyxis Transaction Code Analyzer")
+        st.caption("Deep-dive into specific transaction types to find high-volume meds and station trends.")
+
+        if not df_events.empty:
+            # 1. Selection Filter
+            all_codes = sorted(df_events['event_type'].dropna().unique())
+            selected_code = st.selectbox("Select Transaction Code to Analyze:", all_codes)
+            
+            # 2. Filter the Data
+            code_df = df_events[df_events['event_type'] == selected_code].copy()
+            
+            if not code_df.empty:
+                # 3. Summary Metrics
+                m1, m2, m3 = st.columns(3)
+                m1.metric(f"Total '{selected_code}' Events", len(code_df))
+                m2.metric("Busiest Station", code_df['device'].mode()[0])
+                m3.metric("Heaviest Med", code_df['med_desc'].mode()[0])
+
+                # 4. Station and Med Trends
+                col_tr1, col_tr2 = st.columns(2)
+                
+                with col_tr1:
+                    st.markdown("##### Station Volume")
+                    station_counts = code_df['device'].value_counts().reset_index().head(10)
+                    station_counts.columns = ['Station', 'Count']
+                    fig_sta = px.bar(station_counts, x='Count', y='Station', orientation='h', color='Count')
+                    st.plotly_chart(fig_sta, width='stretch')
+
+                with col_tr2:
+                    st.markdown("##### Top Medications for this Code")
+                    med_counts = code_df['med_desc'].value_counts().reset_index().head(10)
+                    med_counts.columns = ['Medication', 'Count']
+                    fig_med_code = px.bar(med_counts, x='Count', y='Medication', orientation='h', color='Count', color_continuous_scale='Viridis')
+                    st.plotly_chart(fig_med_code, width='stretch')
+
+                # 5. Daily Trend Line
+                st.markdown(f"##### Daily Trend: {selected_code}")
+                code_df['date_only'] = code_df['dt'].dt.date
+                trend_data = code_df.groupby('date_only').size().reset_index(name='Daily Events')
+                fig_trend = px.line(trend_data, x='date_only', y='Daily Events', markers=True)
+                st.plotly_chart(fig_trend, width='stretch')
+
+                # 6. Raw Data for the Selected Code
+                with st.expander(f"📋 View all '{selected_code}' Transactions"):
+                    st.dataframe(
+                        code_df[['dt', 'user_name', 'device', 'med_desc', 'qty']],
+                        width='stretch',
+                        hide_index=True
+                    )
+            else:
+                st.info(f"No transactions found for code: {selected_code}")
+
         # --- PYXIS TRANSACTION DEEP-DIVE ---
         st.divider()
         st.subheader("🔍 Pyxis Transaction Drill-Down")
