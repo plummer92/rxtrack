@@ -68,6 +68,55 @@ else:
                                  labels={'count': 'Stockout Count', 'med_desc': 'Medication'}, color='count')
                 st.plotly_chart(fig_med, use_container_width=True)
 
+        # --- PYXIS TRANSACTION DEEP-DIVE ---
+        st.divider()
+        st.subheader("🔍 Pyxis Transaction Drill-Down")
+        st.caption("Filter and analyze specific action types within the Pyxis events.")
+
+        if not df_events.empty:
+            # 1. Setup Filters for Transaction Types
+            all_event_types = sorted(df_events['event_type'].dropna().unique())
+            
+            c_dr1, c_dr2 = st.columns([1, 2])
+            with c_dr1:
+                selected_types = st.multiselect(
+                    "Select Transaction Types:", 
+                    all_event_types, 
+                    # Default to common replenishment/pull actions for pharmacy focus
+                    default=[t for t in all_event_types if any(word in t.upper() for word in ['REFILL', 'LOAD', 'DISPENSE'])]
+                )
+            
+            # 2. Filter the Data
+            drill_df = df_events.copy()
+            if selected_types:
+                drill_df = drill_df[drill_df['event_type'].isin(selected_types)]
+
+            # 3. Visual Breakdown
+            with c_dr2:
+                if not drill_df.empty:
+                    fig_type = px.pie(
+                        drill_df, 
+                        names='event_type', 
+                        title="Distribution of Selected Transactions",
+                        hole=0.4
+                    )
+                    st.plotly_chart(fig_type, width='stretch')
+
+            # 4. Detailed Transaction Table
+            st.dataframe(
+                drill_df[['dt', 'user_name', 'device', 'med_desc', 'event_type', 'qty']],
+                width='stretch',
+                hide_index=True,
+                column_config={
+                    "dt": st.column_config.DatetimeColumn("Timestamp", format="MM/DD HH:mm"),
+                    "user_name": "Technician",
+                    "device": "Pyxis Unit",
+                    "event_type": "Action"
+                }
+            )
+        else:
+            st.info("No Pyxis event data available for deep-dive.")
+
         # --- PAR LEVEL RECOMMENDATIONS ---
         st.divider()
         st.subheader("💡 AI Par Level Recommendations")
