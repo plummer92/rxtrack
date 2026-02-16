@@ -199,11 +199,12 @@ def generate_pk(row):
     return hashlib.sha256(row_str.encode()).hexdigest()
 
 def normalize_name(full_name):
+    # Handle nulls or non-strings
     if not full_name or pd.isna(full_name): 
         return "unknown"
     
     s = str(full_name).strip().lower()
-    if not s: 
+    if not s or s == ",": 
         return "unknown"
         
     first_name, last_initial = "", ""
@@ -212,16 +213,19 @@ def normalize_name(full_name):
         parts = s.split(",")
         if len(parts) >= 2:
             last_name_part = parts[0].strip()
-            first_name_part = parts[1].strip().split(" ")[0]
-            first_name = first_name_part
-            # Added length check to prevent "string index out of range"
+            # Split and check if first name part actually exists
+            first_name_parts = parts[1].strip().split(" ")
+            if first_name_parts and len(first_name_parts[0]) > 0:
+                first_name = first_name_parts[0]
+            
+            # Prevent 'index out of range' by checking string length
             if len(last_name_part) > 0: 
                 last_initial = last_name_part[0]
     else:
         parts = s.split(" ")
         if len(parts) > 0:
             first_name = parts[0]
-            # Added length check for last initial
+            # Verify second part exists and has at least one character
             if len(parts) > 1 and len(parts[1]) > 0: 
                 last_initial = parts[1][0]
     
