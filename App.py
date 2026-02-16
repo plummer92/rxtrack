@@ -199,23 +199,37 @@ def generate_pk(row):
     return hashlib.sha256(row_str.encode()).hexdigest()
 
 def normalize_name(full_name):
+    if not full_name or pd.isna(full_name): 
+        return "unknown"
+    
     s = str(full_name).strip().lower()
+    if not s: 
+        return "unknown"
+        
     first_name, last_initial = "", ""
+    
     if "," in s:
         parts = s.split(",")
         if len(parts) >= 2:
             last_name_part = parts[0].strip()
             first_name_part = parts[1].strip().split(" ")[0]
             first_name = first_name_part
-            if last_name_part: last_initial = last_name_part[0]
+            # Added length check to prevent "string index out of range"
+            if len(last_name_part) > 0: 
+                last_initial = last_name_part[0]
     else:
         parts = s.split(" ")
-        first_name = parts[0]
-        if len(parts) > 1: last_initial = parts[1][0]
+        if len(parts) > 0:
+            first_name = parts[0]
+            # Added length check for last initial
+            if len(parts) > 1 and len(parts[1]) > 0: 
+                last_initial = parts[1][0]
+    
     for key, val in NAME_MAPPINGS.items():
         if key in first_name: 
             first_name = val
             break
+            
     if first_name in AMBIGUOUS_NAMES and last_initial:
         return f"{first_name} {last_initial}"
     return first_name
