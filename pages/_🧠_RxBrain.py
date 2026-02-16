@@ -38,6 +38,33 @@ df_events_all = pd.DataFrame()
 df_pharm_all = pd.DataFrame()
 df_sched_all = pd.DataFrame()
 
+# --- EMERGENCY HEARTBEAT DEBUG ---
+with st.expander("🛠️ System Heartbeat (Debug Console)", expanded=True):
+    try:
+        # 1. Test the Raw Connection
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            # Check row counts across all tables
+            e_count = conn.execute(text("SELECT COUNT(*) FROM events")).scalar()
+            s_count = conn.execute(text("SELECT COUNT(*) FROM staff_schedule")).scalar()
+            
+            st.write(f"✅ Connection: Active")
+            st.write(f"📊 Events in DB: **{e_count}**")
+            st.write(f"📅 Schedule Rows: **{s_count}**")
+
+            # 2. Inspect Malformed Usernames
+            # This targets the "string index out of range" crash
+            st.write("🕵️ Scanning for malformed names...")
+            bad_names = pd.read_sql("SELECT DISTINCT user_name FROM events WHERE user_name IS NULL OR user_name = '' OR user_name = ',' LIMIT 5", engine)
+            if not bad_names.empty:
+                st.error(f"Found {len(bad_names)} malformed usernames that might be crashing the Brain.")
+                st.dataframe(bad_names)
+            else:
+                st.success("No empty/comma-only usernames found in top results.")
+
+    except Exception as db_err:
+        st.error(f"❌ Heartbeat Failed: {db_err}")
+
 try:
     df_events_all, df_pharm_all, df_sched_all = load_all_time_data()
     
