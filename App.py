@@ -23,7 +23,8 @@ from sqlalchemy import create_engine
 
 # --- DATABASE CONFIGURATION ---
 # Shared engine used by all pages and the RxBrain
-DB_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?" 
+# Update this line in App.py
+DB_URL = st.secrets["neon"]["db_url"] 
 engine = create_engine(DB_URL)
 
 # --- STREAMLIT CONFIGURATION ---
