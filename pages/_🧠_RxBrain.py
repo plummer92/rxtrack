@@ -1,22 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data, engine # Assuming engine is defined in App.py
+from App import load_data, engine # Now this import will work!
 
 st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
 
-# --- DATA INGESTION (BYPASSING FILTERS) ---
+# --- ALWAYS-ON BRAIN SCAN ---
 @st.cache_data(ttl=600)
-def load_brain_memory():
-    # We pull the last 90 days of data regardless of the sidebar
-    query_events = "SELECT * FROM events"
-    query_pharm = "SELECT * FROM pharmacy_orders"
+def load_all_time_data():
+    # Scanning the entire database, not just the filtered view
+    df_e = pd.read_sql("SELECT * FROM events", engine)
+    df_p = pd.read_sql("SELECT * FROM pharmacy_orders", engine)
     
-    # Using SQLAlchemy engine for clean ingestion
-    df_e = pd.read_sql(query_events, engine)
-    df_p = pd.read_sql(query_pharm, engine)
-    
-    # Standardize columns to prevent KeyError
+    # Safety Check: Ensure 'ending_qty' exists to prevent KeyErrors
     if 'ending_qty' not in df_e.columns:
         df_e['ending_qty'] = np.nan
     if 'beginning_qty' not in df_e.columns:
@@ -24,50 +20,41 @@ def load_brain_memory():
         
     return df_e, df_p
 
-df_events_all, df_pharm_all = load_brain_memory()
-
 st.header("🧠 RxTrack Intelligence Engine")
-st.caption("Scanning the full repository (Global Memory) for anomalies and trends.")
+st.caption("Scanning global historical data for trends and anomalies.")
 
-# --- THE PREDICTIVE BRAIN (SCANNING ALL TIME) ---
-if not df_events_all.empty:
-    st.subheader("🔮 Predictive Burn-Rate Analysis")
+try:
+    df_events_all, df_pharm_all = load_all_time_data()
     
-    # 1. Calculate Burn Rate based on the most recent 24h in the WHOLE database
-    last_timestamp = df_events_all['dt'].max()
-    brain_24h = df_events_all[df_events_all['dt'] > (last_timestamp - pd.Timedelta(hours=24))].copy()
-    
-    # Fix the KeyError by ensuring we drop NaNs for the calculation
-    predictive_df = brain_24h.dropna(subset=['ending_qty'])
-    
-    if not predictive_df.empty:
-        burn_rate = predictive_df.groupby(['device', 'med_id', 'med_desc']).agg(
-            total_pulled=('qty', 'sum'),
+    # 1. Burn Rate Prediction (Scan the last 24h of the whole DB)
+    if not df_events_all.empty:
+        last_time = df_events_all['dt'].max()
+        recent_24h = df_events_all[df_events_all['dt'] > (last_time - pd.Timedelta(hours=24))].copy()
+        
+        # Aggregate logic
+        burn = recent_24h.dropna(subset=['ending_qty']).groupby(['device', 'med_desc']).agg(
+            pulled=('qty', 'sum'),
             current_inv=('ending_qty', 'last')
         ).reset_index()
-
-        burn_rate['hourly_rate'] = burn_rate['total_pulled'] / 24
-        burn_rate['est_hours_left'] = burn_rate['current_inv'] / burn_rate['hourly_rate']
-
-        # Only show items empty in < 12 hours
-        alerts = burn_rate[burn_rate['est_hours_left'] < 12].sort_values('est_hours_left')
         
-        if not alerts.empty:
-            st.error(f"⚠️ The Brain has identified {len(alerts)} imminent stockout risks.")
-            st.dataframe(alerts, width='stretch')
-        else:
-            st.success("Brain Scan Complete: No imminent stockouts detected in the next 12 hours.")
+        burn['hrs_left'] = burn['current_inv'] / (burn['pulled'] / 24)
+        critical = burn[burn['hrs_left'] < 12].sort_values('hrs_left')
+        
+        if not critical.empty:
+            st.error(f"🚩 High Alert: {len(critical)} imminent stockout risks found in global scan.")
+            st.dataframe(critical, width='stretch')
 
-# --- BRAIN LOGIC 2: THE "9 PULL" DRIFT ---
-st.divider()
-st.subheader("🕵️ Inventory Drift Auditor")
-st.caption("Scanning for transactions where the bin count didn't drop by the pulled amount.")
+    # 2. Inventory Drift Auditor
+    st.divider()
+    st.subheader("🕵️ Global Drift Auditor")
+    drift_df = df_events_all.dropna(subset=['beginning_qty', 'ending_qty']).copy()
+    drift_df['expected'] = drift_df['beginning_qty'] - drift_df['qty']
+    mismatch = drift_df[drift_df['ending_qty'] != drift_df['expected']]
+    
+    if not mismatch.empty:
+        st.warning(f"The Brain identified {len(mismatch)} historical count discrepancies.")
+        st.dataframe(mismatch[['dt', 'device', 'med_desc', 'qty', 'beginning_qty', 'ending_qty']], width='stretch')
 
-# Use the full history to find count errors
-drift_df = df_events_all.dropna(subset=['beginning_qty', 'ending_qty']).copy()
-drift_df['expected_ending'] = drift_df['beginning_qty'] - drift_df['qty']
-discrepancies = drift_df[drift_df['ending_qty'] != drift_df['expected_ending']]
-
-if not discrepancies.empty:
-    st.warning(f"The Brain found {len(discrepancies)} count anomalies in historical data.")
-    st.dataframe(discrepancies[['dt', 'user_name', 'device', 'med_desc', 'qty', 'beginning_qty', 'ending_qty']], width='stretch')
+except Exception as e:
+    st.error(f"Brain Scan failed: {e}")
+    st.info("Ensure the database engine is correctly configured in App.py.")
