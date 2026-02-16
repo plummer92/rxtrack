@@ -60,51 +60,6 @@ try:
             st.error(f"🚩 High Alert: {len(critical)} imminent stockout risks found in global scan.")
             st.dataframe(critical, width='stretch')
 
-st.divider()
-        st.subheader("🎯 Restock Accuracy Auditor (Last Touch)")
-        st.caption("Identifying discrepancies discovered immediately after a restock event.")
-
-        if not df_events_all.empty:
-            # 1. Isolate Restocks and Discrepancies
-            # We sort by device, med_id, and time to see the sequence
-            audit_df = df_events_all.sort_values(['device', 'med_id', 'dt']).copy()
-            
-            # 2. Flag the "Previous Tech" for every transaction
-            audit_df['prev_tech'] = audit_df.groupby(['device', 'med_id'])['user_name'].shift(1)
-            audit_df['prev_event'] = audit_df.groupby(['device', 'med_id'])['event_type'].shift(1)
-            audit_df['prev_dt'] = audit_df.groupby(['device', 'med_id'])['dt'].shift(1)
-
-            # 3. Identify the "Smoking Gun": Discrepancy found after a REFILL
-            # We look for rows where a discrepancy exists and the previous event was a restock
-            errors = audit_df[
-                (audit_df['discrepancy_qty'] != 0) & 
-                (audit_df['prev_event'].str.contains('REFILL|LOAD', case=False, na=False))
-            ].copy()
-
-            if not errors.empty:
-                st.warning(f"⚠️ Found {len(errors)} potential restock entry errors.")
-                
-                # Format for display
-                st.dataframe(
-                    errors[['dt', 'device', 'med_desc', 'prev_tech', 'prev_event', 'user_name', 'discrepancy_qty', 'discrepancy_reason']],
-                    width='stretch',
-                    hide_index=True,
-                    column_config={
-                        "dt": st.column_config.DatetimeColumn("Discovery Time", format="MM/DD HH:mm"),
-                        "prev_tech": "Tech Who Restocked",
-                        "prev_event": "Restock Action",
-                        "user_name": "Tech Who Found Error",
-                        "discrepancy_qty": "Variance"
-                    }
-                )
-                
-                # Leaderboard of potential entry errors
-                st.subheader("📊 Potential Restock Error Leaderboard")
-                error_counts = errors['prev_tech'].value_counts().reset_index()
-                error_counts.columns = ['Technician', 'Potential Entry Errors']
-                st.bar_chart(error_counts, x='Technician', y='Potential Entry Errors')
-            else:
-                st.success("✅ No discrepancies found immediately following a restock event.")
     # 2. Inventory Drift Auditor
     st.divider()
     st.subheader("🕵️ Global Drift Auditor")
@@ -119,3 +74,46 @@ st.divider()
 except Exception as e:
     st.error(f"Brain Scan failed: {e}")
     st.info("Ensure the database engine is correctly configured in App.py.")
+
+# --- RESTOCK ACCURACY AUDITOR ---
+        st.divider()
+        st.subheader("🎯 Restock Accuracy Auditor (Last Touch)")
+        st.caption("Identifying discrepancies discovered immediately after a restock event.")
+
+        if not df_events_all.empty:
+            # 1. Prepare data for sequence analysis
+            audit_df = df_events_all.sort_values(['device', 'med_id', 'dt']).copy()
+            
+            # 2. Shift values to identify the previous technician and action
+            audit_df['prev_tech'] = audit_df.groupby(['device', 'med_id'])['user_name'].shift(1)
+            audit_df['prev_event'] = audit_df.groupby(['device', 'med_id'])['event_type'].shift(1)
+            
+            # 3. Filter for discrepancies found directly after a REFILL/LOAD
+            # Ensure the bitwise '&' is used with properly wrapped parentheses
+            error_mask = (
+                (audit_df['discrepancy_qty'] != 0) & 
+                (audit_df['prev_event'].str.contains('REFILL|LOAD', case=False, na=False))
+            )
+            errors = audit_df[error_mask].copy()
+
+            if not errors.empty:
+                st.warning(f"⚠️ Found {len(errors)} potential restock entry errors.")
+                
+                st.dataframe(
+                    errors[['dt', 'device', 'med_desc', 'prev_tech', 'prev_event', 'user_name', 'discrepancy_qty', 'discrepancy_reason']],
+                    width='stretch',
+                    hide_index=True,
+                    column_config={
+                        "dt": st.column_config.DatetimeColumn("Discovery Time", format="MM/DD HH:mm"),
+                        "prev_tech": "Tech Who Restocked",
+                        "user_name": "Tech Who Found Error"
+                    }
+                )
+                
+                # Visual Leaderboard
+                error_counts = errors['prev_tech'].value_counts().reset_index()
+                error_counts.columns = ['Technician', 'Count']
+                fig_errors = px.bar(error_counts, x='Count', y='Technician', orientation='h', title="Potential Entry Errors by Tech")
+                st.plotly_chart(fig_errors, width='stretch')
+            else:
+                st.success("✅ No discrepancies found immediately following restocks.")
