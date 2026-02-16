@@ -21,6 +21,13 @@ import contextlib
 import io
 import warnings
 
+from sqlalchemy import create_engine
+
+# 1. Define the engine at the top level of App.py
+# Replace 'your_db_url' with your actual Neon/PostgreSQL connection string
+DB_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?" 
+engine = create_engine(DB_URL)
+
 # --- CONFIGURATION ---
 st.set_page_config(
     page_title="RxTrack: Workforce & Efficiency", 
@@ -616,8 +623,7 @@ with st.sidebar:
     st.subheader("📤 Ingest Data")
     u_type = st.selectbox("File Type:", [
         "Daily Transaction Report", "Device Activity Log (Pends)", 
-        "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", 
-        "Pharmacy Workflow Report", "Staff Schedule", "Attendance Tracking"
+        "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking"
     ])
     uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
     if uploaded and st.button(f"Process {u_type}"):
