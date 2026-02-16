@@ -163,6 +163,56 @@ else:
         with st.expander("📄 View Detailed Workflow Log"):
             st.dataframe(view_pharm, use_container_width=True)
 
+        # --- PLACE AT THE VERY END OF THE FILE ---
+        st.divider()
+        st.subheader("♻️ Outdate Lifecycle & Replenishment")
+        st.caption("Tracking the time between an 'Outdate' removal and the next 'Refill/Load'.")
+
+        if not df_events.empty:
+            # 1. Identify "Outdate" removals
+            outdate_removals = df_events[
+                df_events['event_type'].str.contains('OUTDATE|EXPIRED', case=False, na=False)
+            ].copy()
+            
+            if not outdate_removals.empty:
+                outdate_removals = outdate_removals[['dt', 'device', 'med_id', 'med_desc', 'user_name']].rename(
+                    columns={'dt': 'Removal_Time', 'user_name': 'Removed_By'}
+                )
+
+                # 2. Match with the next Refill/Load
+                refills = df_events[df_events['event_type'].str.contains('REFILL|LOAD', case=False, na=False)].copy()
+                refills = refills[['dt', 'device', 'med_id', 'qty', 'user_name']].rename(
+                    columns={'dt': 'Refill_Time', 'qty': 'Refill_Qty', 'user_name': 'Refilled_By'}
+                )
+
+                # 3. Pair them up
+                outdate_path = pd.merge(outdate_removals, refills, on=['device', 'med_id'], how='inner')
+                outdate_path = outdate_path[outdate_path['Refill_Time'] > outdate_path['Removal_Time']]
+                
+                # Get the first refill after the outdate
+                outdate_path = outdate_path.sort_values('Refill_Time').groupby(['device', 'med_id', 'Removal_Time']).first().reset_index()
+
+                # 4. Calculate Turnaround (in Hours)
+                outdate_path['Outage_Duration_Hrs'] = (outdate_path['Refill_Time'] - outdate_path['Removal_Time']).dt.total_seconds() / 3600
+
+                # 5. Display Table
+                st.dataframe(
+                    outdate_path[['device', 'med_desc', 'Removal_Time', 'Refill_Time', 'Outage_Duration_Hrs', 'Removed_By', 'Refilled_By']],
+                    width='stretch',
+                    hide_index=True,
+                    column_config={
+                        "Removal_Time": st.column_config.DatetimeColumn("1. Outdate Removed", format="MM/DD HH:mm"),
+                        "Refill_Time": st.column_config.DatetimeColumn("2. Replenished", format="MM/DD HH:mm"),
+                        "Outage_Duration_Hrs": st.column_config.NumberColumn("Hours Empty", format="%.1f")
+                    }
+                )
+
+                if not outdate_path.empty:
+                    avg_outdate_gap = outdate_path['Outage_Duration_Hrs'].mean()
+                    st.metric("Avg Outdate Replenishment Time", f"{avg_outdate_gap:.1f} Hours")
+            else:
+                st.info("No 'Outdate' transaction types found in the current Pyxis event data.")
+
 
         st.divider()
         st.subheader("🔄 Full Lifecycle: Stockout to Replenishment")
