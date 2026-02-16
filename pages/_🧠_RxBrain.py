@@ -1,50 +1,64 @@
 import streamlit as st
 import pandas as pd
-from App import load_data, seconds_to_mmss
+import numpy as np
+from App import load_data
 
-st.set_page_config(page_title="RxTrack Brain", page_icon="🧠", layout="wide")
-st.header("🧠 RxTrack Intelligence Engine")
-st.caption("Scanning workflows for anomalies, drift, and efficiency gaps.")
+st.set_page_config(page_title="RxBrain Intelligence", page_icon="🧠", layout="wide")
 
 if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the Home page.")
 else:
     df_events, _, df_pharm, _, _ = load_data(st.session_state.start_date, st.session_state.end_date)
 
-    if not df_events.empty and not df_pharm.empty:
-        st.subheader("🚩 Today's Priority Flags")
-        
-        # --- BRAIN LOGIC 1: THE LONG WALK (LATENCY) ---
-        # Identifying replenishment delays over 2 hours
-        orders = df_pharm[df_pharm['priority'].str.contains('Stockout|Critical', case=False, na=False)].copy()
-        refills = df_events[df_events['event_type'].str.contains('REFILL|LOAD', case=False, na=False)].copy()
-        
-        latency = pd.merge(orders, refills, on=['destination', 'med_id'], suffixes=('_order', '_refill'))
-        latency['gap'] = (latency['dt_refill'] - latency['dt_order']).dt.total_seconds() / 60
-        long_walks = latency[latency['gap'] > 120] # 2-hour threshold
+    if not df_events.empty:
+        st.header("🧠 Predictive Outage Alerts")
+        st.caption("Meds at high risk of stocking out based on current 'Burn Rate'.")
 
-        # --- BRAIN LOGIC 2: INVENTORY DRIFT ---
-        # Logic to find if a pull didn't decrease inventory as expected
-        # (Requires beginning_qty and ending_qty columns to be active)
+        # 1. Calculate Hourly Burn Rate (Last 24 Hours)
+        now = df_events['dt'].max()
+        last_24h = df_events[df_events['dt'] > (now - pd.Timedelta(hours=24))].copy()
         
-        # --- BRAIN LOGIC 3: REPETITIVE PULLS ---
-        # Finding same med pulled for same unit > 3 times in 4 hours
-        df_pharm['hour_block'] = df_pharm['dt'].dt.floor('4H')
-        repeats = df_pharm.groupby(['hour_block', 'destination', 'med_id']).size().reset_index(name='count')
-        inefficient_batches = repeats[repeats['count'] > 3]
+        # Aggregate consumption per med per device
+        burn_rate = last_24h.groupby(['device', 'med_id', 'med_desc']).agg(
+            total_pulled=('qty', 'sum'),
+            last_balance=('ending_qty', 'last') # Pulling 'End' from your report
+        ).reset_index()
 
-        # --- DISPLAY ALERTS ---
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.error(f"⚠️ {len(long_walks)} Delivery Latency Alerts")
-            if not long_walks.empty:
-                st.dataframe(long_walks[['med_desc_order', 'destination', 'gap']], width='stretch')
-        
-        with col2:
-            st.warning(f"📉 {len(inefficient_batches)} Batching Inefficiencies")
-            if not inefficient_batches.empty:
-                st.dataframe(inefficient_batches[['destination', 'count']], width='stretch')
+        burn_rate['hourly_rate'] = burn_rate['total_pulled'] / 24
 
-    else:
-        st.info("Waiting for data stream to analyze...")
+        # 2. Predict Time-to-Zero
+        # Calculation: Current Balance / Hourly Burn Rate
+        burn_rate['hours_remaining'] = np.where(
+            burn_rate['hourly_rate'] > 0, 
+            burn_rate['last_balance'] / burn_rate['hourly_rate'], 
+            99 # Placeholder for stable inventory
+        )
+
+        # 3. Filter for High-Risk Meds (Empty in < 8 hours)
+        risky_meds = burn_rate[burn_rate['hours_remaining'] < 8].sort_values('hours_remaining')
+
+        if not risky_meds.empty:
+            st.error(f"🚨 {len(risky_meds)} Critical Outage Risks Detected")
+            st.dataframe(
+                risky_meds[['device', 'med_desc', 'last_balance', 'hourly_rate', 'hours_remaining']],
+                width='stretch',
+                column_config={
+                    "last_balance": "Current Inv",
+                    "hourly_rate": "Pulls/Hr",
+                    "hours_remaining": st.column_config.NumberColumn("Estimated Hours Left", format="%.1f")
+                }
+            )
+        else:
+            st.success("✅ No imminent stockouts predicted for the next 8 hours.")
+
+        # --- BRAIN LOGIC 2: THE "9 PULL" DISCREPANCY ---
+        st.divider()
+        st.subheader("🕵️ Inventory Drift & Discrepancy Brain")
+        # Checking if a transaction qty doesn't match the Beg/End delta
+        drift = df_events.copy()
+        drift['expected_end'] = drift['beginning_qty'] - drift['qty']
+        anomalies = drift[drift['ending_qty'] != drift['expected_end']]
+
+        if not anomalies.empty:
+            st.warning(f"⚠️ Found {len(anomalies)} transactions where inventory math doesn't add up.")
+            st.dataframe(anomalies[['dt', 'user_name', 'device', 'med_desc', 'qty', 'beginning_qty', 'ending_qty']], width='stretch')
