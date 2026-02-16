@@ -71,39 +71,88 @@ except Exception as e:
     st.error(f"Brain Scan failed: {e}")
     st.info("Ensure the database engine is correctly configured in App.py.")
 
-# --- RESTOCK ACCURACY AUDITOR (FIXED INDENTATION) ---
-st.divider()
-st.subheader("🎯 Restock Accuracy Auditor (Last Touch)")
-st.caption("Identifying discrepancies discovered immediately after a restock event.")
+RILL-DOWN ---
+        st.divider()
+        st.subheader("🎯 Restock Accuracy Auditor (Last Touch)")
+        st.caption("👆 Click a row to see the exact raw logs for that specific inventory drift.")
 
-if not df_events_all.empty:
-    # 1. Prepare data for sequence analysis
-    audit_df = df_events_all.sort_values(['device', 'med_id', 'dt']).copy()
-    
-    # 2. Shift values to identify previous tech
-    audit_df['prev_tech'] = audit_df.groupby(['device', 'med_id'])['user_name'].shift(1)
-    audit_df['prev_event'] = audit_df.groupby(['device', 'med_id'])['event_type'].shift(1)
-    
-    # 3. Filter for discrepancies after REFILL/LOAD
-    error_mask = (
-        (audit_df['discrepancy_qty'] != 0) & 
-        (audit_df['prev_event'].str.contains('REFILL|LOAD', case=False, na=False))
-    )
-    errors = audit_df[error_mask].copy()
+        if not df_events_all.empty and not df_sched_all.empty:
+            # 1. Sequence Analysis logic (Keep as is)
+            audit_df = df_events_all.sort_values(['device', 'med_id', 'dt']).copy()
+            audit_df['prev_tech'] = audit_df.groupby(['device', 'med_id'])['user_name'].shift(1)
+            audit_df['prev_event'] = audit_df.groupby(['device', 'med_id'])['event_type'].shift(1)
+            audit_df['prev_match_key'] = audit_df.groupby(['device', 'med_id'])['match_key'].shift(1)
+            audit_df['prev_date'] = audit_df.groupby(['device', 'med_id'])['date_only'].shift(1)
 
-    if not errors.empty:
-        st.warning(f"⚠️ Found {len(errors)} potential restock entry errors.")
-        
-        st.dataframe(
-            errors[['dt', 'device', 'med_desc', 'prev_tech', 'prev_event', 'user_name', 'discrepancy_qty', 'discrepancy_reason']],
-            width='stretch',
-            hide_index=True,
-            column_config={
-                "dt": st.column_config.DatetimeColumn("Discovery Time", format="MM/DD HH:mm"),
-                "prev_tech": "Tech Who Restocked",
-                "user_name": "Tech Who Found Error"
-            }
-        )
+            error_mask = (
+                (audit_df['discrepancy_qty'] != 0) & 
+                (audit_df['prev_event'].str.contains('REFILL|LOAD', case=False, na=False))
+            )
+            errors = audit_df[error_mask].copy()
+
+            if not errors.empty:
+                # 2. Join with Schedule for Shift data
+                errors_with_shift = pd.merge(
+                    errors, 
+                    df_sched_all[['date_obj', 'match_key', 'shift_type']], 
+                    left_on=['prev_date', 'prev_match_key'], 
+                    right_on=['date_obj', 'match_key'], 
+                    how='left'
+                )
+
+                # 3. Interactive Main Table
+                # We store the user's selection in 'event_selection'
+                event_selection = st.dataframe(
+                    errors_with_shift[['dt', 'device', 'med_desc', 'prev_tech', 'shift_type', 'discrepancy_qty', 'user_name']],
+                    width='stretch',
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    column_config={
+                        "dt": st.column_config.DatetimeColumn("Discovery Time", format="MM/DD HH:mm"),
+                        "prev_tech": "Restock Tech",
+                        "shift_type": "Shift worked",
+                        "user_name": "Discovering Tech",
+                        "discrepancy_qty": "Variance"
+                    }
+                )
+
+                # 4. Drill-Down Logic: The "Micro-Audit"
+                if len(event_selection.selection.rows) > 0:
+                    idx = event_selection.selection.rows[0]
+                    sel_row = errors_with_shift.iloc[idx]
+                    
+                    st.divider()
+                    st.subheader(f"🔬 Audit Trail: {sel_row['med_desc']} at {sel_row['device']}")
+                    
+                    # Pull the raw sequence of transactions for this specific medication/device
+                    # This shows what happened just before the restock and just after
+                    raw_trail = df_events_all[
+                        (df_events_all['device'] == sel_row['device']) & 
+                        (df_events_all['med_id'] == sel_row['med_id'])
+                    ].copy()
+                    
+                    # Filter for events within +/- 1 hour of the discovery to keep it clean
+                    start_audit = sel_row['dt'] - pd.Timedelta(hours=4)
+                    end_audit = sel_row['dt'] + pd.Timedelta(hours=1)
+                    raw_trail = raw_trail[(raw_trail['dt'] >= start_audit) & (raw_trail['dt'] <= end_audit)]
+
+                    st.dataframe(
+                        raw_trail[['dt', 'user_name', 'event_type', 'qty', 'beginning_qty', 'ending_qty', 'discrepancy_qty']],
+                        width='stretch',
+                        hide_index=True,
+                        column_config={
+                            "dt": st.column_config.DatetimeColumn("Exact Timestamp", format="MM/DD HH:mm:ss"),
+                            "qty": "Action Qty",
+                            "beginning_qty": "Start Count",
+                            "ending_qty": "End Count"
+                        }
+                    )
+                    
+                    st.info(f"💡 Investigation Note: {sel_row['prev_tech']} performed a {sel_row['prev_event']} at {sel_row['dt']}. "
+                            f"The very next user, {sel_row['user_name']}, identified a discrepancy of {sel_row['discrepancy_qty']}.")
+            else:
+                st.success("✅ Global memory scan complete: No restock accuracy errors found.")
         
         # Visual Leaderboard
         error_counts = errors['prev_tech'].value_counts().reset_index()
