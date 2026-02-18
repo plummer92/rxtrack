@@ -759,7 +759,7 @@ try:
 except Exception as e:
     st.error(f"Failed to load data: {e}")
     
-   # --- EXECUTE DATA LOADER ---
+# --- EXECUTE DATA LOADER ---
 # This ensures variables are always populated with something (even if empty)
 if 'start_date' in locals() and 'end_date' in locals():
     try:
