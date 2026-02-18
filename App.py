@@ -502,8 +502,24 @@ def load_data(start_date, end_date):
 
     df = results["events"]
     if not df.empty:
+
+    # 🔒 GLOBAL NONE GUARD (CRITICAL)
+        df["user_name"] = (
+            df["user_name"]
+            .fillna("unknown")
+            .astype(str)
+            .str.strip()
+            .replace(["None", "none", ""], "unknown")
+        )
+    
+        df["med_desc"] = df["med_desc"].fillna("unknown").astype(str)
+        df["device"] = df["device"].fillna("unknown").astype(str)
+    
+        # Numeric stability
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
         df["qty"] = df["qty"].fillna(0).astype('float32')
+
+    
         df = df[~df['med_desc'].astype(str).str.contains(r'Drw|Pkt|Cubic', regex=True, case=False, na=False)]
         df.sort_values(['user_name', 'dt'], inplace=True)
         df['next_dt'] = df.groupby('user_name')['dt'].shift(-1)
