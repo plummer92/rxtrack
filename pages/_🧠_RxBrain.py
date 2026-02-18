@@ -176,13 +176,13 @@ with st.expander("🛠️ System Heartbeat (Debug Console)", expanded=True):
             with col2:
                 st.plotly_chart(px.pie(errors_with_shift['shift_type'].value_counts().reset_index(), names='shift_type', values='count', hole=0.4, title="Errors by Shift"), width='stretch')
 
-except Exception as e:
-    st.error(f"Brain Scan failed: {e}")
-    # --- DEBUGGING LAB ---
-    with st.expander("🛠️ Troubleshooting: View Raw Data Integrity"):
-        st.write("Current Database Schema Check:")
-        if not df_events_all.empty:
-            st.write("Events Table Columns:", df_events_all.columns.tolist())
-            st.write("Sample Row:", df_events_all.iloc[0].to_dict())
-        else:
-            st.warning("Events table is currently empty or failed to load.")
+    except Exception as e:
+        st.error(f"Brain Scan failed: {e}")
+        # --- DEBUGGING LAB ---
+        with st.expander("🛠️ Troubleshooting: View Raw Data Integrity"):
+            st.write("Current Database Schema Check:")
+            if not df_events_all.empty:
+                st.write("Events Table Columns:", df_events_all.columns.tolist())
+                st.write("Sample Row:", df_events_all.iloc[0].to_dict())
+            else:
+                st.warning("Events table is currently empty or failed to load.")
