@@ -63,7 +63,16 @@ with st.expander("🛠️ System Heartbeat (Debug Console)", expanded=True):
             # 2. Inspect Malformed Usernames
             # This targets the "string index out of range" crash
             st.write("🕵️ Scanning for malformed names...")
-            bad_names = pd.read_sql("SELECT DISTINCT user_name FROM events WHERE user_name IS NULL OR user_name = '' OR user_name = ',' LIMIT 5", engine)
+            bad_names = pd.read_sql(
+                """
+                SELECT DISTINCT user_name 
+                FROM events 
+                WHERE user_name IS NULL 
+                   OR TRIM(user_name) IN ('', ',', 'None', 'none') 
+                LIMIT 5
+                """,
+                engine
+            )
             if not bad_names.empty:
                 st.error(f"Found {len(bad_names)} malformed usernames that might be crashing the Brain.")
                 st.dataframe(bad_names)
