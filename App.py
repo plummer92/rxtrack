@@ -237,32 +237,50 @@ def normalize_name(full_name):
     if first_name in AMBIGUOUS_NAMES and last_initial:
         return f"{first_name} {last_initial}"
     return first_name
-
 def parse_shift_start(date_obj, shift_str):
-    if not shift_str or pd.isna(shift_str): return None
+    if not shift_str or pd.isna(shift_str):
+        return None
+
     s = str(shift_str).lower().strip()
+
+    # Format: 7:00a / 07:30pm
     m_time = re.search(r'(\d{1,2}):(\d{2})', s)
     if m_time:
         h, m = int(m_time.group(1)), int(m_time.group(2))
-        if 'p' in s and h < 12: h += 12
-        if 'a' in s and h == 12: h = 0
-        try: return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
-        except: return None
+        if 'p' in s and h < 12:
+            h += 12
+        if 'a' in s and h == 12:
+            h = 0
+        try:
+            return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
+        except:
+            return None
+
+    # Format: 7a / 7p
     m_ampm = re.search(r'(\d{1,2})\s*([ap])', s)
     if m_ampm:
         h = int(m_ampm.group(1))
         ampm = m_ampm.group(2)
-        if ampm == 'p' and h < 12: h += 12
-        if ampm == 'a' and h == 12: h = 0
-        try: return pd.to_datetime(f"{date_obj} {h:02d}:00")
-        except: return None
+        if ampm == 'p' and h < 12:
+            h += 12
+        if ampm == 'a' and h == 12:
+            h = 0
+        try:
+            return pd.to_datetime(f"{date_obj} {h:02d}:00")
+        except:
+            return None
+
+    # Military time: 0700 / 1500
     m_mil = re.search(r'(\d{4})', s)
     if m_mil:
         val = int(m_mil.group(1))
         if 0 <= val <= 2400:
             h, m = divmod(val, 100)
-            try: return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
-            except: return None
+            try:
+                return pd.to_datetime(f"{date_obj} {h:02d}:{m:02d}")
+            except:
+                return None
+
     return None
 
 # --- DATA CLEANING ---
