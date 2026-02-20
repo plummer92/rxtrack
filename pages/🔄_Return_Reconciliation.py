@@ -30,6 +30,13 @@ df = df_events.copy()
 df['dt'] = pd.to_datetime(df['dt'])
 df.sort_values(['device', 'med_id', 'dt'], inplace=True)
 
+available_cols = set(df.columns)
+
+has_beginning = 'beginning_qty' in available_cols
+has_ending = 'ending_qty' in available_cols
+has_discrepancy = 'discrepancy_qty' in available_cols
+has_resolution = 'resolution_dt' in available_cols
+
 # ----------------------------
 # 2️⃣ Unresolved Discrepancies
 # ----------------------------
@@ -50,10 +57,12 @@ else:
 # 3️⃣ Inventory Gap Detection
 # ----------------------------
 
-df['next_beginning'] = df.groupby(['device', 'med_id'])['beginning_qty'].shift(-1)
-df['inventory_gap'] = df['ending_qty'] - df['next_beginning']
-
-gaps = df[df['inventory_gap'].fillna(0) != 0]
+if has_beginning and has_ending:
+    df['next_beginning'] = df.groupby(['device','med_id'])['beginning_qty'].shift(-1)
+    df['inventory_gap'] = df['ending_qty'] - df['next_beginning']
+    gaps = df[df['inventory_gap'].fillna(0) != 0]
+else:
+    gaps = pd.DataFrame()
 
 # ----------------------------
 # 4️⃣ Return Behavior Analysis
@@ -87,17 +96,16 @@ st.divider()
 
 st.subheader("🚨 Unresolved Discrepancies")
 
-if unresolved.empty:
-    st.success("No unresolved discrepancies detected.")
+if has_discrepancy:
+    if has_resolution:
+        unresolved = df[
+            (df['discrepancy_qty'].fillna(0) != 0) &
+            (df['resolution_dt'].isna())
+        ]
+    else:
+        unresolved = df[df['discrepancy_qty'].fillna(0) != 0]
 else:
-    st.dataframe(
-        unresolved[['dt', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason']],
-        use_container_width=True,
-        column_config={
-            "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm"),
-            "discrepancy_qty": st.column_config.NumberColumn("Qty Diff", format="%.0f")
-        }
-    )
+    unresolved = pd.DataFrame()
 
 # ----------------------------
 # 📋 SECTION 2: INVENTORY GAPS
