@@ -168,10 +168,69 @@ st.subheader("🚨 Unmatched Workflow Events")
 if unmatched.empty:
     st.success("✅ 100% Reconciliation Achieved.")
 else:
-    st.dataframe(
-        unmatched.sort_values('difference', key=abs, ascending=False),
-        use_container_width=True
+    display = unmatched.sort_values('difference', key=abs, ascending=False).reset_index(drop=True)
+
+    event = st.dataframe(
+        display,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        hide_index=True
     )
+
+    # ----------------------------------------
+    # 🔍 Drill-Down Logic
+    # ----------------------------------------
+
+    if len(event.selection.rows) > 0:
+        idx = event.selection.rows[0]
+        selected = display.iloc[idx]
+
+        med_id = selected['med_id']
+        date = selected['date']
+
+        st.divider()
+        st.subheader(f"🔎 Drilldown: {selected['med_desc']} — {date}")
+
+        # Filter exact transactions
+        unload_detail = pyxis_unload[
+            (pyxis_unload['med_id'] == med_id) &
+            (pyxis_unload['date'] == date)
+        ].sort_values('dt')
+
+        return_detail = pharm_return[
+            (pharm_return['med_id'] == med_id) &
+            (pharm_return['date'] == date)
+        ].sort_values('dt')
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.markdown("### 🟦 Pyxis Unload Events")
+            if unload_detail.empty:
+                st.info("No unload events found.")
+            else:
+                st.dataframe(
+                    unload_detail[['dt', 'user_name', 'device', 'qty']],
+                    use_container_width=True
+                )
+
+        with c2:
+            st.markdown("### 🟩 Pharmacy Return/Restock Events")
+            if return_detail.empty:
+                st.info("No return/restock events found.")
+            else:
+                st.dataframe(
+                    return_detail[['dt', 'user_name', 'destination', 'qty']],
+                    use_container_width=True
+                )
+
+        st.divider()
+
+        st.metric(
+            "Net Quantity Difference",
+            int(selected['difference'])
+        )
 
 # ----------------------------------------------------
 # 9️⃣ Medication Variance Ranking
