@@ -86,15 +86,23 @@ if not df_pharm.empty:
             )
         ].copy()
 
-        # HARD EXCLUDE CASSETTE
-        if 'destination' in pharm_return.columns:
-            pharm_return = pharm_return[
-                ~pharm_return['destination'].astype(str).str.contains(
-                    "cass|patient",
-                    case=False,
-                    na=False
-                )
-            ]
+# ----------------------------------------------------
+# 🚫 REMOVE DUMMY CASSETTE MEDICATIONS
+# ----------------------------------------------------
+
+def remove_dummy_med(df):
+    if df.empty:
+        return df
+
+    mask = (
+        df['med_desc'].astype(str).str.contains("cassette", case=False, na=False) |
+        df['med_id'].astype(str).isin(['99995'])
+    )
+
+    return df[~mask]
+
+pyxis_unload = remove_dummy_med(pyxis_unload)
+pharm_return = remove_dummy_med(pharm_return)
 
 # ----------------------------------------------------
 # 3️⃣ Normalize Date
