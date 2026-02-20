@@ -6,14 +6,20 @@ from App import load_data, seconds_to_mmss
 st.set_page_config(page_title="Session Explorer", page_icon="🔍", layout="wide")
 st.header("🔍 Unified Session Explorer")
 st.caption("Analyzing chronological work blocks across Pyxis and Pharmacy systems.")
+# ----------------------------------------------------
+# Independent Date Filter
+# ----------------------------------------------------
 
-import datetime
+c1, c2 = st.columns(2)
 
-today = datetime.date.today()
-default_start = today - datetime.timedelta(days=7)
+start_date = c1.date_input("Start Date")
+end_date = c2.date_input("End Date")
 
-start_date = c1.date_input("Start Date", value=default_start)
-end_date = c2.date_input("End Date", value=today))
+if start_date > end_date:
+    st.error("Start date must be before end date.")
+    st.stop()
+
+df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
 # ----------------------------
 # Data Unification
