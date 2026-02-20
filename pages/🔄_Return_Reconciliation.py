@@ -126,15 +126,46 @@ if pyxis_sum.empty and pharm_sum.empty:
     st.warning("No unload/return workflow events found.")
     st.stop()
 
+# Ensure med_desc exists before dropping
+if 'med_desc' in pyxis_sum.columns:
+    pyxis_merge = pyxis_sum.drop(columns=['med_desc'])
+else:
+    pyxis_merge = pyxis_sum.copy()
+
+if 'med_desc' in pharm_sum.columns:
+    pharm_merge = pharm_sum.drop(columns=['med_desc'])
+else:
+    pharm_merge = pharm_sum.copy()
+
+# Merge strictly on med_id + date
 recon = pd.merge(
-    pyxis_sum,
-    pharm_sum,
-    on=['med_id', 'med_desc', 'date'],
+    pyxis_merge,
+    pharm_merge,
+    on=['med_id', 'date'],
     how='outer'
 )
 
+# Fill missing qty columns if one side was empty
+if 'qty_pyxis' not in recon.columns:
+    recon['qty_pyxis'] = 0
+
+if 'qty_pharm' not in recon.columns:
+    recon['qty_pharm'] = 0
+
 recon[['qty_pyxis', 'qty_pharm']] = recon[['qty_pyxis', 'qty_pharm']].fillna(0)
-recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']
+
+# Attach ONE clean med description
+med_lookup = pd.concat([
+    pyxis_sum[['med_id','med_desc']] if 'med_desc' in pyxis_sum.columns else pd.DataFrame(),
+    pharm_sum[['med_id','med_desc']] if 'med_desc' in pharm_sum.columns else pd.DataFrame()
+])
+
+if not med_lookup.empty:
+    med_lookup = med_lookup.drop_duplicates('med_id')
+    recon = recon.merge(med_lookup, on='med_id', how='left')
+
+# Final difference calculation
+recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']recon['qty_pharm']
 
 # ----------------------------------------------------
 # 7️⃣ Executive Metrics
