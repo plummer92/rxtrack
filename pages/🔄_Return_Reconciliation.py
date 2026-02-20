@@ -12,6 +12,7 @@ st.set_page_config(
 st.header("🔄 Closed-Loop Return Integrity Engine")
 st.caption("Validating Pyxis unload workflow against Pharmacy return/restock activity.")
 
+
 # ----------------------------------------------------
 # 1️⃣ Independent Date Filter
 # ----------------------------------------------------
@@ -24,27 +25,30 @@ if start_date > end_date:
     st.error("Start date must be before end date.")
     st.stop()
 
+# Optional filter controls
+exclude_controls = st.checkbox("Exclude Controlled Substances")
+exclude_dummy = st.checkbox("Exclude Dummy Medications", value=True)
+
 df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
 if df_events.empty and df_pharm.empty:
     st.warning("No data found for selected dates.")
     st.stop()
 
-# Ensure datetime
-if not df_events.empty and 'dt' in df_events.columns:
-    df_events['dt'] = pd.to_datetime(df_events['dt'], errors='coerce')
+# Ensure datetime safety
+for df in [df_events, df_pharm]:
+    if not df.empty and 'dt' in df.columns:
+        df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
 
-if not df_pharm.empty and 'dt' in df_pharm.columns:
-    df_pharm['dt'] = pd.to_datetime(df_pharm['dt'], errors='coerce')
 
 # ----------------------------------------------------
-# 2️⃣ Identify Workflow Events (Hard Cassette Exclusion)
+# 2️⃣ Identify Workflow Events
 # ----------------------------------------------------
 
 pyxis_unload = pd.DataFrame()
 pharm_return = pd.DataFrame()
 
-# 🔹 PYXIS UNLOAD DETECTION
+# ---------------- PYXIS UNLOAD ----------------
 if not df_events.empty and 'event_type' in df_events.columns:
 
     pyxis_unload = df_events[
@@ -55,7 +59,7 @@ if not df_events.empty and 'event_type' in df_events.columns:
         )
     ].copy()
 
-    # HARD EXCLUDE CASSETTE
+    # Hard exclude cassette devices
     if 'device' in pyxis_unload.columns:
         pyxis_unload = pyxis_unload[
             ~pyxis_unload['device'].astype(str).str.contains(
@@ -65,7 +69,7 @@ if not df_events.empty and 'event_type' in df_events.columns:
             )
         ]
 
-# 🔹 PHARMACY RETURN DETECTION
+# ---------------- PHARM RETURN ----------------
 if not df_pharm.empty:
 
     pharm_df = df_pharm.copy()
@@ -86,12 +90,16 @@ if not df_pharm.empty:
             )
         ].copy()
 
+
 # ----------------------------------------------------
-# 🚫 REMOVE DUMMY CASSETTE MEDICATIONS
+# 3️⃣ Remove Dummy Medications
 # ----------------------------------------------------
 
 def remove_dummy_med(df):
     if df.empty:
+        return df
+
+    if 'med_desc' not in df.columns or 'med_id' not in df.columns:
         return df
 
     mask = (
@@ -101,11 +109,47 @@ def remove_dummy_med(df):
 
     return df[~mask]
 
-pyxis_unload = remove_dummy_med(pyxis_unload)
-pharm_return = remove_dummy_med(pharm_return)
+if exclude_dummy:
+    pyxis_unload = remove_dummy_med(pyxis_unload)
+    pharm_return = remove_dummy_med(pharm_return)
+
 
 # ----------------------------------------------------
-# 3️⃣ Normalize Date
+# 4️⃣ Optional Control Exclusion
+# ----------------------------------------------------
+
+def remove_controls(df):
+    if df.empty:
+        return df
+
+    # Structured flags first
+    if 'is_control' in df.columns:
+        return df[df['is_control'] != True]
+
+    if 'control_flag' in df.columns:
+        return df[df['control_flag'] != True]
+
+    if 'schedule' in df.columns:
+        return df[df['schedule'].isna()]
+
+    # Fallback keyword detection
+    if 'med_desc' in df.columns:
+        mask = df['med_desc'].astype(str).str.contains(
+            "CII|CIII|CIV|CV|control|narc|morphine|hydromorphone|oxycodone|fentanyl|amphetamine|methylphenidate",
+            case=False,
+            na=False
+        )
+        return df[~mask]
+
+    return df
+
+if exclude_controls:
+    pyxis_unload = remove_controls(pyxis_unload)
+    pharm_return = remove_controls(pharm_return)
+
+
+# ----------------------------------------------------
+# 5️⃣ Normalize Dates
 # ----------------------------------------------------
 
 if not pyxis_unload.empty:
@@ -114,8 +158,9 @@ if not pyxis_unload.empty:
 if not pharm_return.empty:
     pharm_return['date'] = pharm_return['dt'].dt.date
 
+
 # ----------------------------------------------------
-# 4️⃣ Aggregate Quantities
+# 6️⃣ Aggregate Quantities
 # ----------------------------------------------------
 
 pyxis_sum = pd.DataFrame()
@@ -143,11 +188,11 @@ if pyxis_sum.empty and pharm_sum.empty:
     st.warning("No unload/return workflow events found.")
     st.stop()
 
+
 # ----------------------------------------------------
-# 5️⃣ Reconciliation Engine
+# 7️⃣ Reconciliation Engine
 # ----------------------------------------------------
 
-# Remove med_desc before merge to avoid duplication
 pyxis_merge = pyxis_sum.drop(columns=['med_desc'], errors='ignore')
 pharm_merge = pharm_sum.drop(columns=['med_desc'], errors='ignore')
 
@@ -158,16 +203,12 @@ recon = pd.merge(
     how='outer'
 )
 
-# Ensure quantity columns exist
-if 'qty_pyxis' not in recon.columns:
-    recon['qty_pyxis'] = 0
-
-if 'qty_pharm' not in recon.columns:
-    recon['qty_pharm'] = 0
+recon['qty_pyxis'] = recon.get('qty_pyxis', 0)
+recon['qty_pharm'] = recon.get('qty_pharm', 0)
 
 recon[['qty_pyxis', 'qty_pharm']] = recon[['qty_pyxis', 'qty_pharm']].fillna(0)
 
-# Attach ONE med description
+# Attach med description
 med_lookup = pd.concat([
     pyxis_sum[['med_id', 'med_desc']],
     pharm_sum[['med_id', 'med_desc']]
@@ -178,8 +219,9 @@ if not med_lookup.empty:
 
 recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']
 
+
 # ----------------------------------------------------
-# 6️⃣ Executive Metrics
+# 8️⃣ Executive Metrics
 # ----------------------------------------------------
 
 total_unload = recon['qty_pyxis'].sum()
@@ -200,8 +242,9 @@ m4.metric("Unmatched Med-Days", len(unmatched))
 
 st.divider()
 
+
 # ----------------------------------------------------
-# 7️⃣ Variance Table + Drilldown
+# 9️⃣ Variance Table + Drilldown
 # ----------------------------------------------------
 
 st.subheader("🚨 Unmatched Workflow Events")
@@ -248,46 +291,23 @@ else:
 
         with c1:
             st.markdown("### 🟦 Pyxis Unload Events")
-            if unload_detail.empty:
-                st.info("No unload events found.")
-            else:
-                st.dataframe(
-                    unload_detail[['dt', 'user_name', 'device', 'qty']],
-                    use_container_width=True
-                )
+            st.dataframe(
+                unload_detail[['dt', 'user_name', 'device', 'qty']],
+                use_container_width=True
+            )
 
         with c2:
             st.markdown("### 🟩 Pharmacy Return/Restock Events")
-            if return_detail.empty:
-                st.info("No return events found.")
-            else:
-                st.dataframe(
-                    return_detail[['dt', 'user_name', 'destination', 'qty']],
-                    use_container_width=True
-                )
+            st.dataframe(
+                return_detail[['dt', 'user_name', 'destination', 'qty']],
+                use_container_width=True
+            )
 
         st.metric("Net Quantity Difference", int(selected['difference']))
 
-# ----------------------------------------------------
-# 8️⃣ Medication Variance Ranking
-# ----------------------------------------------------
-
-st.subheader("💊 Medication Variance Concentration")
-
-if not unmatched.empty:
-    med_variance = (
-        unmatched
-        .groupby('med_desc')['difference']
-        .sum()
-        .reset_index()
-        .sort_values('difference', key=abs, ascending=False)
-    )
-    st.dataframe(med_variance.head(10), use_container_width=True)
-else:
-    st.info("No medication-level variance detected.")
 
 # ----------------------------------------------------
-# Debug
+# 🔎 Debug
 # ----------------------------------------------------
 
 with st.expander("🛠 Debug Info"):
