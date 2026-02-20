@@ -5,138 +5,190 @@ from App import load_data, seconds_to_mmss
 
 st.set_page_config(page_title="Return Reconciliation", page_icon="🔄", layout="wide")
 
-st.header("🔄 Return Reconciliation Intelligence")
-st.caption("Inventory integrity monitoring and unresolved discrepancy detection.")
+st.header("🔄 Closed-Loop Return Integrity")
+st.caption("Validating Pyxis unload events against Pharmacy return/restock activity.")
+
+# ----------------------------------------------------
+# 1️⃣ Load Data
+# ----------------------------------------------------
 
 if 'start_date' not in st.session_state:
     st.info("👈 Select a date range on Overview first.")
     st.stop()
 
-# Load event data only
-df_events, _, _, _, _ = load_data(
+df_events, _, df_pharm, _, _ = load_data(
     st.session_state.start_date,
     st.session_state.end_date
 )
 
-if df_events.empty:
-    st.warning("No transaction data found for selected range.")
+if df_events.empty and df_pharm.empty:
+    st.warning("No data found for selected dates.")
     st.stop()
 
-# ----------------------------
-# 1️⃣ Basic Cleanup
-# ----------------------------
+# Ensure datetime
+if not df_events.empty:
+    df_events['dt'] = pd.to_datetime(df_events['dt'], errors='coerce')
 
-df = df_events.copy()
-df['dt'] = pd.to_datetime(df['dt'])
-df.sort_values(['device', 'med_id', 'dt'], inplace=True)
+if not df_pharm.empty:
+    df_pharm['dt'] = pd.to_datetime(df_pharm['dt'], errors='coerce')
 
-available_cols = set(df.columns)
+# ----------------------------------------------------
+# 2️⃣ Identify Workflow Events
+# ----------------------------------------------------
 
-has_beginning = 'beginning_qty' in available_cols
-has_ending = 'ending_qty' in available_cols
-has_discrepancy = 'discrepancy_qty' in available_cols
-has_resolution = 'resolution_dt' in available_cols
+pyxis_unload = pd.DataFrame()
+pharm_return = pd.DataFrame()
 
-# ----------------------------
-# 2️⃣ Unresolved Discrepancies
-# ----------------------------
+if not df_events.empty:
+    pyxis_unload = df_events[
+        df_events['event_type'].str.contains(
+            "empty|unload|return bin", case=False, na=False
+        )
+    ].copy()
 
-# Handle optional resolution column safely
-if 'resolution_dt' in df.columns:
-    unresolved = df[
-        (df['discrepancy_qty'].fillna(0) != 0) &
-        (df['resolution_dt'].isna())
-    ]
+if not df_pharm.empty:
+    pharm_return = df_pharm[
+        df_pharm['event_type'].str.contains(
+            "return|restock|instant", case=False, na=False
+        )
+    ].copy()
+
+# ----------------------------------------------------
+# 3️⃣ Normalize Date Window (Daily)
+# ----------------------------------------------------
+
+if not pyxis_unload.empty:
+    pyxis_unload['date'] = pyxis_unload['dt'].dt.date
+
+if not pharm_return.empty:
+    pharm_return['date'] = pharm_return['dt'].dt.date
+
+# ----------------------------------------------------
+# 4️⃣ Aggregate Quantities
+# ----------------------------------------------------
+
+pyxis_sum = pd.DataFrame()
+pharm_sum = pd.DataFrame()
+
+if not pyxis_unload.empty:
+    pyxis_sum = (
+        pyxis_unload
+        .groupby(['med_id', 'med_desc', 'date'])['qty']
+        .sum()
+        .reset_index()
+        .rename(columns={'qty': 'qty_pyxis'})
+    )
+
+if not pharm_return.empty:
+    pharm_sum = (
+        pharm_return
+        .groupby(['med_id', 'med_desc', 'date'])['qty']
+        .sum()
+        .reset_index()
+        .rename(columns={'qty': 'qty_pharm'})
+    )
+
+# ----------------------------------------------------
+# 5️⃣ Merge + Reconcile
+# ----------------------------------------------------
+
+if not pyxis_sum.empty or not pharm_sum.empty:
+
+    recon = pd.merge(
+        pyxis_sum,
+        pharm_sum,
+        on=['med_id', 'med_desc', 'date'],
+        how='outer'
+    )
+
+    recon[['qty_pyxis', 'qty_pharm']] = recon[['qty_pyxis', 'qty_pharm']].fillna(0)
+
+    recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']
+
 else:
-    # If no resolution tracking exists, treat all discrepancies as unresolved
-    unresolved = df[
-        (df['discrepancy_qty'].fillna(0) != 0)
-    ]
+    recon = pd.DataFrame()
 
-# ----------------------------
-# 3️⃣ Inventory Gap Detection
-# ----------------------------
+# ----------------------------------------------------
+# 6️⃣ Director Metrics
+# ----------------------------------------------------
 
-if has_beginning and has_ending:
-    df['next_beginning'] = df.groupby(['device','med_id'])['beginning_qty'].shift(-1)
-    df['inventory_gap'] = df['ending_qty'] - df['next_beginning']
-    gaps = df[df['inventory_gap'].fillna(0) != 0]
-else:
-    gaps = pd.DataFrame()
+if recon.empty:
+    st.warning("No unload/return workflow activity detected.")
+    st.stop()
 
-# ----------------------------
-# 4️⃣ Return Behavior Analysis
-# ----------------------------
+total_unload = recon['qty_pyxis'].sum()
+total_return = recon['qty_pharm'].sum()
 
-returns = df[df['event_type'].str.contains("return", case=False, na=False)]
-pulls = df[df['event_type'].str.contains("remove|pull", case=False, na=False)]
+reconciliation_pct = (
+    (min(total_unload, total_return) / total_unload) * 100
+    if total_unload > 0 else 100
+)
 
-user_returns = returns.groupby('user_name')['qty'].count()
-user_pulls = pulls.groupby('user_name')['qty'].count()
+unmatched = recon[recon['difference'] != 0]
 
-behavior = pd.concat([user_returns, user_pulls], axis=1).fillna(0)
-behavior.columns = ['returns', 'pulls']
-behavior['return_ratio'] = behavior['returns'] / behavior['pulls'].replace(0, np.nan)
-behavior = behavior.reset_index()
+c1, c2, c3, c4 = st.columns(4)
 
-# ----------------------------
-# 📊 DASHBOARD METRICS
-# ----------------------------
-
-c1, c2, c3 = st.columns(3)
-c1.metric("Unresolved Discrepancies", len(unresolved))
-c2.metric("Inventory Gaps", len(gaps))
-c3.metric("High Return Users", len(behavior[behavior['return_ratio'] > 0.5]))
+c1.metric("Total Pyxis Unload Qty", int(total_unload))
+c2.metric("Total Pharmacy Return Qty", int(total_return))
+c3.metric("Reconciliation %", f"{reconciliation_pct:.2f}%")
+c4.metric("Unmatched Med Days", len(unmatched))
 
 st.divider()
 
-# ----------------------------
-# 📋 SECTION 1: UNRESOLVED
-# ----------------------------
+# ----------------------------------------------------
+# 7️⃣ Mismatch Table
+# ----------------------------------------------------
 
-st.subheader("🚨 Unresolved Discrepancies")
+st.subheader("🚨 Unmatched Workflow Events")
 
-if has_discrepancy:
-    if has_resolution:
-        unresolved = df[
-            (df['discrepancy_qty'].fillna(0) != 0) &
-            (df['resolution_dt'].isna())
-        ]
-    else:
-        unresolved = df[df['discrepancy_qty'].fillna(0) != 0]
-else:
-    unresolved = pd.DataFrame()
-
-# ----------------------------
-# 📋 SECTION 2: INVENTORY GAPS
-# ----------------------------
-
-st.subheader("📦 Inventory Continuity Gaps")
-
-if gaps.empty:
-    st.success("No inventory continuity issues detected.")
+if unmatched.empty:
+    st.success("✅ 100% Reconciliation Achieved.")
 else:
     st.dataframe(
-        gaps[['dt', 'device', 'med_desc', 'ending_qty', 'next_beginning', 'inventory_gap']],
-        use_container_width=True,
-        column_config={
-            "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm"),
-            "inventory_gap": st.column_config.NumberColumn("Gap", format="%.0f")
-        }
+        unmatched.sort_values('difference', key=abs, ascending=False),
+        use_container_width=True
     )
 
-# ----------------------------
-# 📋 SECTION 3: RETURN RISK
-# ----------------------------
+# ----------------------------------------------------
+# 8️⃣ Medication Risk Concentration
+# ----------------------------------------------------
 
-st.subheader("👤 Technician Return Behavior")
+st.subheader("💊 Medication Variance Concentration")
 
-st.dataframe(
-    behavior.sort_values('return_ratio', ascending=False),
-    use_container_width=True,
-    column_config={
-        "return_ratio": st.column_config.NumberColumn("Return Ratio", format="%.2f")
-    }
+med_variance = (
+    unmatched
+    .groupby('med_desc')['difference']
+    .sum()
+    .reset_index()
+    .sort_values('difference', key=abs, ascending=False)
 )
 
-st.caption("⚠ Return Ratio > 0.50 may indicate excessive pull-return cycles.")
+if not med_variance.empty:
+    st.dataframe(med_variance.head(10), use_container_width=True)
+else:
+    st.info("No medication-level variance detected.")
+
+# ----------------------------------------------------
+# 9️⃣ Time-Based Pattern
+# ----------------------------------------------------
+
+st.subheader("📆 Daily Workflow Integrity")
+
+daily = (
+    recon
+    .groupby('date')[['qty_pyxis', 'qty_pharm']]
+    .sum()
+    .reset_index()
+)
+
+daily['difference'] = daily['qty_pyxis'] - daily['qty_pharm']
+
+st.dataframe(daily.sort_values('date'), use_container_width=True)
+
+# ----------------------------------------------------
+# 🔍 Developer Debug (Optional)
+# ----------------------------------------------------
+
+with st.expander("🛠 Debug: Raw Event Counts", expanded=False):
+    st.write("Pyxis Unload Events:", len(pyxis_unload))
+    st.write("Pharmacy Return Events:", len(pharm_return))
