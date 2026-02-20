@@ -7,24 +7,20 @@ st.set_page_config(page_title="Session Explorer", page_icon="🔍", layout="wide
 st.header("🔍 Unified Session Explorer")
 st.caption("Analyzing chronological work blocks across Pyxis and Pharmacy systems.")
 
-# ----------------------------
-# Date Guard
-# ----------------------------
-if 'start_date' not in st.session_state:
-    st.info("👈 Please select a date range on the **Overview** page first.")
+# ----------------------------------------------------
+# Independent Date Filter
+# ----------------------------------------------------
+
+c1, c2 = st.columns(2)
+
+start_date = c1.date_input("Start Date")
+end_date = c2.date_input("End Date")
+
+if start_date > end_date:
+    st.error("Start date must be before end date.")
     st.stop()
 
-# ----------------------------
-# Load Data
-# ----------------------------
-df_events, _, df_pharm, _, _ = load_data(
-    st.session_state.start_date, 
-    st.session_state.end_date
-)
-
-if df_events.empty and df_pharm.empty:
-    st.warning("No activity found for the selected dates.")
-    st.stop()
+df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
 # ----------------------------
 # Data Unification
