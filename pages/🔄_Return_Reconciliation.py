@@ -165,7 +165,7 @@ if not med_lookup.empty:
     recon = recon.merge(med_lookup, on='med_id', how='left')
 
 # Final difference calculation
-recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']recon['qty_pharm']
+recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']
 
 # ----------------------------------------------------
 # 7️⃣ Executive Metrics
