@@ -47,11 +47,25 @@ if not df_events.empty:
     ].copy()
 
 if not df_pharm.empty:
-    pharm_return = df_pharm[
-        df_pharm['event_type'].str.contains(
-            "return|restock|instant", case=False, na=False
-        )
-    ].copy()
+
+    # Normalize event column
+    pharm_df = df_pharm.copy()
+
+    if 'event_type' in pharm_df.columns:
+        event_col = 'event_type'
+    elif 'priority' in pharm_df.columns:
+        event_col = 'priority'
+    else:
+        event_col = None
+
+    if event_col:
+        pharm_return = pharm_df[
+            pharm_df[event_col].astype(str).str.contains(
+                "return|restock|instant", case=False, na=False
+            )
+        ].copy()
+    else:
+        pharm_return = pd.DataFrame()
 
 # ----------------------------------------------------
 # 3️⃣ Normalize Date Window (Daily)
