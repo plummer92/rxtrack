@@ -674,7 +674,7 @@ with st.sidebar:
     # --- UNIVERSAL DATA INGEST ---
     st.subheader("📤 Ingest Data")
     u_type = st.selectbox("File Type:", [
-        "Daily Transaction Report", "Device Activity Log (Pends)", 
+        "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
         "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking"
     ])
     uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
@@ -739,6 +739,15 @@ with st.sidebar:
                          VALUES (%(pk)s, %(raw_name)s, %(dt_date)s, %(start_dt)s, %(end_dt)s) 
                          ON CONFLICT (pk) DO NOTHING;"""
                 execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
+
+            elif u_type == "Inventory Audit (Detailed RC)":
+                clean = clean_detailed_inventory(raw)
+                sql = """INSERT INTO inventory_detailed 
+                         (pk, station, med_id, med_desc, unit_cost, current_count, pocket_location)
+                         VALUES (%(pk)s, %(station)s, %(med_id)s, %(med_desc)s, 
+                                 %(unit_cost)s, %(current_count)s, %(pocket_location)s)
+                         ON CONFLICT (pk) DO NOTHING;"""
+                execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Detailed Inventory")
             
             # 3. Success & Refresh
             if clean is not None:
