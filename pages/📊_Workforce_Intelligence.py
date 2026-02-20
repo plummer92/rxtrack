@@ -115,7 +115,8 @@ else:
             how='left'
         )
 
-    summary['tardies'] = summary.get('tardies', 0).fillna(0)
+    summary['tardies'] = summary.get('tardies', pd.Series(0, index=summary.index))
+    summary['tardies'] = summary['tardies'].fillna(0)
 
     # Efficiency score
     summary['efficiency_score'] = (
