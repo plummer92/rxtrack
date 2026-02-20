@@ -34,10 +34,17 @@ df.sort_values(['device', 'med_id', 'dt'], inplace=True)
 # 2️⃣ Unresolved Discrepancies
 # ----------------------------
 
-unresolved = df[
-    (df['discrepancy_qty'].fillna(0) != 0) &
-    (df['resolution_dt'].isna())
-]
+# Handle optional resolution column safely
+if 'resolution_dt' in df.columns:
+    unresolved = df[
+        (df['discrepancy_qty'].fillna(0) != 0) &
+        (df['resolution_dt'].isna())
+    ]
+else:
+    # If no resolution tracking exists, treat all discrepancies as unresolved
+    unresolved = df[
+        (df['discrepancy_qty'].fillna(0) != 0)
+    ]
 
 # ----------------------------
 # 3️⃣ Inventory Gap Detection
