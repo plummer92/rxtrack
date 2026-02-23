@@ -12,6 +12,7 @@ st.set_page_config(
 st.header("🔄 Closed-Loop Return Integrity Engine")
 st.caption("Validating Pyxis unload workflow against Pharmacy return/restock activity.")
 
+
 # ----------------------------------------------------
 # 1️⃣ Date Filter
 # ----------------------------------------------------
@@ -33,7 +34,7 @@ if df_events.empty and df_pharm.empty:
     st.warning("No data found for selected dates.")
     st.stop()
 
-# Standardize column names (prevents med_id mismatch errors)
+# Standardize column names
 for df in [df_events, df_pharm]:
     if not df.empty:
         df.columns = df.columns.str.strip().str.lower()
@@ -52,7 +53,7 @@ if not df_events.empty and 'user_name' in df_events.columns:
 if not df_pharm.empty and 'user_name' in df_pharm.columns:
     all_users.extend(df_pharm['user_name'].dropna().unique())
 
-all_users = sorted(list(set(all_users)))
+all_users = sorted(set(all_users))
 
 selected_users = st.multiselect(
     "Filter by User (Optional)",
@@ -66,9 +67,7 @@ selected_users = st.multiselect(
 pyxis_unload = pd.DataFrame()
 pharm_return = pd.DataFrame()
 
-# ---- PYXIS UNLOAD ----
 if not df_events.empty and 'event_type' in df_events.columns:
-
     pyxis_unload = df_events[
         df_events['event_type'].astype(str).str.contains(
             "empty|unload|return bin",
@@ -86,9 +85,7 @@ if not df_events.empty and 'event_type' in df_events.columns:
             )
         ]
 
-# ---- PHARM RETURN ----
 if not df_pharm.empty:
-
     pharm_df = df_pharm.copy()
 
     event_col = None
@@ -111,27 +108,29 @@ if not df_pharm.empty:
 # ----------------------------------------------------
 
 if selected_users:
-    if not pyxis_unload.empty and 'user_name' in pyxis_unload.columns:
+    if not pyxis_unload.empty:
         pyxis_unload = pyxis_unload[
             pyxis_unload['user_name'].isin(selected_users)
         ]
 
-    if not pharm_return.empty and 'user_name' in pharm_return.columns:
+    if not pharm_return.empty:
         pharm_return = pharm_return[
             pharm_return['user_name'].isin(selected_users)
         ]
 
 # ----------------------------------------------------
-# 5️⃣ Remove Dummy Medications
+# 5️⃣ Remove Dummy Meds
 # ----------------------------------------------------
 
 def remove_dummy(df):
-    if df.empty or 'med_desc' not in df.columns:
+    if df.empty:
         return df
-
-    mask = (
-        df['med_desc'].astype(str).str.contains("cassette", case=False, na=False) |
-        df.get('med_id', '').astype(str).isin(['99995'])
+    if 'med_desc' not in df.columns:
+        return df
+    mask = df['med_desc'].astype(str).str.contains(
+        "cassette",
+        case=False,
+        na=False
     )
     return df[~mask]
 
@@ -140,13 +139,12 @@ if exclude_dummy:
     pharm_return = remove_dummy(pharm_return)
 
 # ----------------------------------------------------
-# 6️⃣ Remove Controls (Optional)
+# 6️⃣ Remove Controls
 # ----------------------------------------------------
 
 def remove_controls(df):
     if df.empty or 'med_desc' not in df.columns:
         return df
-
     mask = df['med_desc'].astype(str).str.contains(
         "CII|CIII|CIV|CV|morphine|hydromorphone|oxycodone|fentanyl|amphetamine|methylphenidate",
         case=False,
@@ -159,61 +157,55 @@ if exclude_controls:
     pharm_return = remove_controls(pharm_return)
 
 # ----------------------------------------------------
-# 7️⃣ Normalize Date
+# 7️⃣ Ensure Required Columns Exist
 # ----------------------------------------------------
 
+required_cols = ['med_id', 'med_desc', 'dt', 'qty']
+
+for col in required_cols:
+    if col not in pyxis_unload.columns:
+        pyxis_unload[col] = np.nan
+    if col not in pharm_return.columns:
+        pharm_return[col] = np.nan
+
+# Create date column safely
 if not pyxis_unload.empty:
     pyxis_unload['date'] = pyxis_unload['dt'].dt.date
+else:
+    pyxis_unload['date'] = pd.Series(dtype='object')
 
 if not pharm_return.empty:
     pharm_return['date'] = pharm_return['dt'].dt.date
+else:
+    pharm_return['date'] = pd.Series(dtype='object')
 
 # ----------------------------------------------------
 # 8️⃣ Aggregate Safely
 # ----------------------------------------------------
 
-pyxis_sum = pd.DataFrame()
-pharm_sum = pd.DataFrame()
+pyxis_sum = (
+    pyxis_unload
+    .groupby(['med_id', 'med_desc', 'date'], dropna=False)['qty']
+    .sum()
+    .reset_index()
+    .rename(columns={'qty': 'qty_pyxis'})
+)
 
-required_cols = {'med_id', 'med_desc', 'date', 'qty'}
-
-if not pyxis_unload.empty and required_cols.issubset(pyxis_unload.columns):
-    pyxis_sum = (
-        pyxis_unload
-        .groupby(['med_id', 'med_desc', 'date'])['qty']
-        .sum()
-        .reset_index()
-        .rename(columns={'qty': 'qty_pyxis'})
-    )
-
-if not pharm_return.empty and required_cols.issubset(pharm_return.columns):
-    pharm_sum = (
-        pharm_return
-        .groupby(['med_id', 'med_desc', 'date'])['qty']
-        .sum()
-        .reset_index()
-        .rename(columns={'qty': 'qty_pharm'})
-    )
-
-if pyxis_sum.empty and pharm_sum.empty:
-    st.warning("No unload/return workflow events found.")
-    st.stop()
+pharm_sum = (
+    pharm_return
+    .groupby(['med_id', 'med_desc', 'date'], dropna=False)['qty']
+    .sum()
+    .reset_index()
+    .rename(columns={'qty': 'qty_pharm'})
+)
 
 # ----------------------------------------------------
-# 9️⃣ Safe Merge
+# 9️⃣ Safe Merge (No More Crashes)
 # ----------------------------------------------------
-
-if 'med_id' not in pyxis_sum.columns:
-    pyxis_sum['med_id'] = np.nan
-if 'med_id' not in pharm_sum.columns:
-    pharm_sum['med_id'] = np.nan
-
-pyxis_merge = pyxis_sum.drop(columns=['med_desc'], errors='ignore')
-pharm_merge = pharm_sum.drop(columns=['med_desc'], errors='ignore')
 
 recon = pd.merge(
-    pyxis_merge,
-    pharm_merge,
+    pyxis_sum,
+    pharm_sum,
     on=['med_id', 'date'],
     how='outer'
 )
@@ -222,15 +214,6 @@ recon['qty_pyxis'] = recon.get('qty_pyxis', 0)
 recon['qty_pharm'] = recon.get('qty_pharm', 0)
 
 recon[['qty_pyxis', 'qty_pharm']] = recon[['qty_pyxis', 'qty_pharm']].fillna(0)
-
-# Attach med description
-med_lookup = pd.concat([
-    pyxis_sum[['med_id', 'med_desc']] if not pyxis_sum.empty else pd.DataFrame(),
-    pharm_sum[['med_id', 'med_desc']] if not pharm_sum.empty else pd.DataFrame()
-]).drop_duplicates('med_id')
-
-if not med_lookup.empty:
-    recon = recon.merge(med_lookup, on='med_id', how='left')
 
 recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']
 
@@ -253,61 +236,3 @@ m1.metric("Total Pyxis Unload Qty", int(total_unload))
 m2.metric("Total Pharmacy Return Qty", int(total_return))
 m3.metric("Reconciliation %", f"{reconciliation_pct:.2f}%")
 m4.metric("Unmatched Med-Days", len(unmatched))
-
-st.divider()
-
-# ----------------------------------------------------
-# 1️⃣1️⃣ Variance + Drilldown
-# ----------------------------------------------------
-
-st.subheader("🚨 Unmatched Workflow Events")
-
-if unmatched.empty:
-    st.success("✅ 100% Reconciliation Achieved.")
-else:
-
-    display = unmatched.sort_values(
-        'difference',
-        key=abs,
-        ascending=False
-    ).reset_index(drop=True)
-
-    event = st.dataframe(
-        display,
-        width="stretch",
-        on_select="rerun",
-        selection_mode="single-row",
-        hide_index=True
-    )
-
-    if len(event.selection.rows) > 0:
-        idx = event.selection.rows[0]
-        selected = display.iloc[idx]
-
-        med_id = selected['med_id']
-        date = selected['date']
-
-        st.divider()
-        st.subheader(f"🔎 Drilldown: {selected.get('med_desc','')} — {date}")
-
-        unload_detail = pyxis_unload[
-            (pyxis_unload['med_id'] == med_id) &
-            (pyxis_unload['date'] == date)
-        ]
-
-        return_detail = pharm_return[
-            (pharm_return['med_id'] == med_id) &
-            (pharm_return['date'] == date)
-        ]
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            st.markdown("### 🟦 Pyxis Unload Events")
-            st.dataframe(unload_detail, width="stretch")
-
-        with c2:
-            st.markdown("### 🟩 Pharmacy Return Events")
-            st.dataframe(return_detail, width="stretch")
-
-        st.metric("Net Quantity Difference", int(selected['difference']))
