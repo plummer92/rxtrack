@@ -167,23 +167,34 @@ if not pharm_return.empty:
 # 9️⃣ Aggregate
 # ----------------------------------------------------
 
-def safe_group(df, qty_name):
-    if df.empty or "med_id" not in df.columns:
-        return pd.DataFrame()
+# ----------------------------------------------------
+# 9️⃣ Aggregate (Bulletproof)
+# ----------------------------------------------------
 
-    return (
+def safe_group(df, qty_name):
+    if df.empty:
+        return pd.DataFrame(
+            columns=["med_id", "med_desc", "date", qty_name]
+        )
+
+    required = {"med_id", "med_desc", "date", "qty"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame(
+            columns=["med_id", "med_desc", "date", qty_name]
+        )
+
+    grouped = (
         df.groupby(["med_id", "med_desc", "date"])["qty"]
         .sum()
         .reset_index()
         .rename(columns={"qty": qty_name})
     )
 
-pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
-pharm_sum = safe_group(pharm_return, "qty_pharm")
+    return grouped
 
-if pyxis_sum.empty and pharm_sum.empty:
-    st.warning("No unload/return workflow events found.")
-    st.stop()
+
+pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
+pharm_sum = safe_group(pharm_return, "qty_pharm")stop()
 
 # ----------------------------------------------------
 # 🔟 Merge Safely
