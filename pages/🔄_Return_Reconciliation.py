@@ -12,9 +12,8 @@ st.set_page_config(
 st.header("🔄 Closed-Loop Return Integrity Engine")
 st.caption("Validating Pyxis unload workflow against Pharmacy return/restock activity.")
 
-
 # ----------------------------------------------------
-# 1️⃣ Date Filter
+# 1️⃣ Date Selection
 # ----------------------------------------------------
 
 c1, c2 = st.columns(2)
@@ -25,8 +24,9 @@ if start_date > end_date:
     st.error("Start date must be before end date.")
     st.stop()
 
-exclude_controls = st.checkbox("Exclude Controlled Substances")
-exclude_dummy = st.checkbox("Exclude Dummy Medications", value=True)
+# ----------------------------------------------------
+# 2️⃣ Load Data ONCE
+# ----------------------------------------------------
 
 df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
@@ -34,65 +34,68 @@ if df_events.empty and df_pharm.empty:
     st.warning("No data found for selected dates.")
     st.stop()
 
-# Standardize column names
+# Ensure datetime safety
 for df in [df_events, df_pharm]:
-    if not df.empty:
-        df.columns = df.columns.str.strip().str.lower()
-        if 'dt' in df.columns:
-            df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
+    if not df.empty and "dt" in df.columns:
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
 
 # ----------------------------------------------------
-# 2️⃣ User Filter
+# 3️⃣ Build User Filter FIRST
 # ----------------------------------------------------
 
 all_users = []
 
-if not df_events.empty and 'user_name' in df_events.columns:
-    all_users.extend(df_events['user_name'].dropna().unique())
+if not df_events.empty and "user_name" in df_events.columns:
+    all_users.extend(df_events["user_name"].dropna().unique())
 
-if not df_pharm.empty and 'user_name' in df_pharm.columns:
-    all_users.extend(df_pharm['user_name'].dropna().unique())
+if not df_pharm.empty and "user_name" in df_pharm.columns:
+    all_users.extend(df_pharm["user_name"].dropna().unique())
 
-all_users = sorted(set(all_users))
+all_users = sorted(list(set(all_users)))
 
 selected_users = st.multiselect(
     "Filter by User (Optional)",
     options=all_users
 )
 
+exclude_controls = st.checkbox("Exclude Controlled Substances")
+exclude_dummy = st.checkbox("Exclude Dummy Medications", value=True)
+
 # ----------------------------------------------------
-# 3️⃣ Identify Workflow Events
+# 4️⃣ Identify Workflow Events
 # ----------------------------------------------------
 
 pyxis_unload = pd.DataFrame()
 pharm_return = pd.DataFrame()
 
-if not df_events.empty and 'event_type' in df_events.columns:
+# -------- PYXIS UNLOAD --------
+if not df_events.empty and "event_type" in df_events.columns:
     pyxis_unload = df_events[
-        df_events['event_type'].astype(str).str.contains(
+        df_events["event_type"].astype(str).str.contains(
             "empty|unload|return bin",
             case=False,
             na=False
         )
     ].copy()
 
-    if 'device' in pyxis_unload.columns:
+    if "device" in pyxis_unload.columns:
         pyxis_unload = pyxis_unload[
-            ~pyxis_unload['device'].astype(str).str.contains(
+            ~pyxis_unload["device"].astype(str).str.contains(
                 "cass|patient",
                 case=False,
                 na=False
             )
         ]
 
+# -------- PHARMACY RETURN --------
 if not df_pharm.empty:
     pharm_df = df_pharm.copy()
 
     event_col = None
-    if 'event_type' in pharm_df.columns:
-        event_col = 'event_type'
-    elif 'priority' in pharm_df.columns:
-        event_col = 'priority'
+    if "event_type" in pharm_df.columns:
+        event_col = "event_type"
+    elif "priority" in pharm_df.columns:
+        event_col = "priority"
 
     if event_col:
         pharm_return = pharm_df[
@@ -104,34 +107,28 @@ if not df_pharm.empty:
         ].copy()
 
 # ----------------------------------------------------
-# 4️⃣ Apply User Filter
+# 5️⃣ Apply User Filter
 # ----------------------------------------------------
 
 if selected_users:
-    if not pyxis_unload.empty:
+    if not pyxis_unload.empty and "user_name" in pyxis_unload.columns:
         pyxis_unload = pyxis_unload[
-            pyxis_unload['user_name'].isin(selected_users)
+            pyxis_unload["user_name"].isin(selected_users)
         ]
 
-    if not pharm_return.empty:
+    if not pharm_return.empty and "user_name" in pharm_return.columns:
         pharm_return = pharm_return[
-            pharm_return['user_name'].isin(selected_users)
+            pharm_return["user_name"].isin(selected_users)
         ]
 
 # ----------------------------------------------------
-# 5️⃣ Remove Dummy Meds
+# 6️⃣ Remove Dummy Medications
 # ----------------------------------------------------
 
 def remove_dummy(df):
-    if df.empty:
+    if df.empty or "med_desc" not in df.columns:
         return df
-    if 'med_desc' not in df.columns:
-        return df
-    mask = df['med_desc'].astype(str).str.contains(
-        "cassette",
-        case=False,
-        na=False
-    )
+    mask = df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)
     return df[~mask]
 
 if exclude_dummy:
@@ -139,14 +136,14 @@ if exclude_dummy:
     pharm_return = remove_dummy(pharm_return)
 
 # ----------------------------------------------------
-# 6️⃣ Remove Controls
+# 7️⃣ Remove Controls (Keyword Fallback)
 # ----------------------------------------------------
 
 def remove_controls(df):
-    if df.empty or 'med_desc' not in df.columns:
+    if df.empty or "med_desc" not in df.columns:
         return df
-    mask = df['med_desc'].astype(str).str.contains(
-        "CII|CIII|CIV|CV|morphine|hydromorphone|oxycodone|fentanyl|amphetamine|methylphenidate",
+    mask = df["med_desc"].astype(str).str.contains(
+        "morphine|hydromorphone|oxycodone|fentanyl|amphetamine|methylphenidate|CII|CIII|CIV|CV",
         case=False,
         na=False
     )
@@ -157,82 +154,139 @@ if exclude_controls:
     pharm_return = remove_controls(pharm_return)
 
 # ----------------------------------------------------
-# 7️⃣ Ensure Required Columns Exist
+# 8️⃣ Normalize Date
 # ----------------------------------------------------
 
-required_cols = ['med_id', 'med_desc', 'dt', 'qty']
-
-for col in required_cols:
-    if col not in pyxis_unload.columns:
-        pyxis_unload[col] = np.nan
-    if col not in pharm_return.columns:
-        pharm_return[col] = np.nan
-
-# Create date column safely
 if not pyxis_unload.empty:
-    pyxis_unload['date'] = pyxis_unload['dt'].dt.date
-else:
-    pyxis_unload['date'] = pd.Series(dtype='object')
+    pyxis_unload["date"] = pyxis_unload["dt"].dt.date
 
 if not pharm_return.empty:
-    pharm_return['date'] = pharm_return['dt'].dt.date
-else:
-    pharm_return['date'] = pd.Series(dtype='object')
+    pharm_return["date"] = pharm_return["dt"].dt.date
 
 # ----------------------------------------------------
-# 8️⃣ Aggregate Safely
+# 9️⃣ Aggregate
 # ----------------------------------------------------
 
-pyxis_sum = (
-    pyxis_unload
-    .groupby(['med_id', 'med_desc', 'date'], dropna=False)['qty']
-    .sum()
-    .reset_index()
-    .rename(columns={'qty': 'qty_pyxis'})
-)
+def safe_group(df, qty_name):
+    if df.empty or "med_id" not in df.columns:
+        return pd.DataFrame()
 
-pharm_sum = (
-    pharm_return
-    .groupby(['med_id', 'med_desc', 'date'], dropna=False)['qty']
-    .sum()
-    .reset_index()
-    .rename(columns={'qty': 'qty_pharm'})
-)
+    return (
+        df.groupby(["med_id", "med_desc", "date"])["qty"]
+        .sum()
+        .reset_index()
+        .rename(columns={"qty": qty_name})
+    )
+
+pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
+pharm_sum = safe_group(pharm_return, "qty_pharm")
+
+if pyxis_sum.empty and pharm_sum.empty:
+    st.warning("No unload/return workflow events found.")
+    st.stop()
 
 # ----------------------------------------------------
-# 9️⃣ Safe Merge (No More Crashes)
+# 🔟 Merge Safely
 # ----------------------------------------------------
 
 recon = pd.merge(
-    pyxis_sum,
-    pharm_sum,
-    on=['med_id', 'date'],
-    how='outer'
+    pyxis_sum.drop(columns=["med_desc"], errors="ignore"),
+    pharm_sum.drop(columns=["med_desc"], errors="ignore"),
+    on=["med_id", "date"],
+    how="outer"
 )
 
-recon['qty_pyxis'] = recon.get('qty_pyxis', 0)
-recon['qty_pharm'] = recon.get('qty_pharm', 0)
+recon["qty_pyxis"] = recon.get("qty_pyxis", 0)
+recon["qty_pharm"] = recon.get("qty_pharm", 0)
 
-recon[['qty_pyxis', 'qty_pharm']] = recon[['qty_pyxis', 'qty_pharm']].fillna(0)
+recon[["qty_pyxis", "qty_pharm"]] = recon[["qty_pyxis", "qty_pharm"]].fillna(0)
 
-recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']
+med_lookup = pd.concat([
+    pyxis_sum[["med_id", "med_desc"]],
+    pharm_sum[["med_id", "med_desc"]]
+]).drop_duplicates("med_id")
+
+recon = recon.merge(med_lookup, on="med_id", how="left")
+
+recon["difference"] = recon["qty_pyxis"] - recon["qty_pharm"]
 
 # ----------------------------------------------------
-# 🔟 Metrics
+# 1️⃣1️⃣ Executive Metrics
 # ----------------------------------------------------
 
-total_unload = recon['qty_pyxis'].sum()
-total_return = recon['qty_pharm'].sum()
+total_unload = recon["qty_pyxis"].sum()
+total_return = recon["qty_pharm"].sum()
 
-reconciliation_pct = (
+recon_pct = (
     (min(total_unload, total_return) / total_unload) * 100
     if total_unload > 0 else 100
 )
 
-unmatched = recon[recon['difference'] != 0]
+unmatched = recon[recon["difference"] != 0]
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total Pyxis Unload Qty", int(total_unload))
 m2.metric("Total Pharmacy Return Qty", int(total_return))
-m3.metric("Reconciliation %", f"{reconciliation_pct:.2f}%")
+m3.metric("Reconciliation %", f"{recon_pct:.2f}%")
 m4.metric("Unmatched Med-Days", len(unmatched))
+
+st.divider()
+
+# ----------------------------------------------------
+# 1️⃣2️⃣ Variance Table + Drilldown
+# ----------------------------------------------------
+
+st.subheader("🚨 Unmatched Workflow Events")
+
+if unmatched.empty:
+    st.success("✅ 100% Reconciliation Achieved.")
+else:
+    display = unmatched.sort_values(
+        "difference",
+        key=abs,
+        ascending=False
+    ).reset_index(drop=True)
+
+    event = st.dataframe(
+        display,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="single-row",
+        hide_index=True
+    )
+
+    if len(event.selection.rows) > 0:
+        idx = event.selection.rows[0]
+        selected = display.iloc[idx]
+
+        med_id = selected["med_id"]
+        date = selected["date"]
+
+        st.divider()
+        st.subheader(f"🔎 Drilldown: {selected['med_desc']} — {date}")
+
+        unload_detail = pyxis_unload[
+            (pyxis_unload["med_id"] == med_id) &
+            (pyxis_unload["date"] == date)
+        ].sort_values("dt")
+
+        return_detail = pharm_return[
+            (pharm_return["med_id"] == med_id) &
+            (pharm_return["date"] == date)
+        ].sort_values("dt")
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.markdown("### 🟦 Pyxis Unload Events")
+            st.dataframe(
+                unload_detail[["dt", "user_name", "device", "qty"]],
+                width="stretch"
+            )
+
+        with c2:
+            st.markdown("### 🟩 Pharmacy Return Events")
+            st.dataframe(
+                return_detail[["dt", "user_name", "destination", "qty"]],
+                width="stretch"
+            )
