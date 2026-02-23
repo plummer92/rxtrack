@@ -14,7 +14,7 @@ st.caption("Validating Pyxis unload workflow against Pharmacy return/restock act
 
 
 # ----------------------------------------------------
-# 1️⃣ Independent Date Filter
+# 1️⃣ Date Filter
 # ----------------------------------------------------
 
 c1, c2 = st.columns(2)
@@ -25,7 +25,6 @@ if start_date > end_date:
     st.error("Start date must be before end date.")
     st.stop()
 
-# Optional filter controls
 exclude_controls = st.checkbox("Exclude Controlled Substances")
 exclude_dummy = st.checkbox("Exclude Dummy Medications", value=True)
 
@@ -35,16 +34,34 @@ if df_events.empty and df_pharm.empty:
     st.warning("No data found for selected dates.")
     st.stop()
 
-# Ensure datetime safety
+# Ensure datetime
 for df in [df_events, df_pharm]:
     if not df.empty and 'dt' in df.columns:
         df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
 
-df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
+
+# ----------------------------------------------------
+# 2️⃣ User Filter (Defined EARLY)
+# ----------------------------------------------------
+
+all_users = []
+
+if not df_events.empty and 'user_name' in df_events.columns:
+    all_users.extend(df_events['user_name'].dropna().unique())
+
+if not df_pharm.empty and 'user_name' in df_pharm.columns:
+    all_users.extend(df_pharm['user_name'].dropna().unique())
+
+all_users = sorted(list(set(all_users)))
+
+selected_users = st.multiselect(
+    "Filter by User (Optional)",
+    options=all_users
+)
 
 
 # ----------------------------------------------------
-# 2️⃣ Identify Workflow Events
+# 3️⃣ Identify Workflow Events
 # ----------------------------------------------------
 
 pyxis_unload = pd.DataFrame()
@@ -71,22 +88,6 @@ if not df_events.empty and 'event_type' in df_events.columns:
             )
         ]
 
-# ----------------------------------------------------
-# Apply User Filter
-# ----------------------------------------------------
-
-if selected_users:
-
-    if not pyxis_unload.empty and 'user_name' in pyxis_unload.columns:
-        pyxis_unload = pyxis_unload[
-            pyxis_unload['user_name'].isin(selected_users)
-        ]
-
-    if not pharm_return.empty and 'user_name' in pharm_return.columns:
-        pharm_return = pharm_return[
-            pharm_return['user_name'].isin(selected_users)
-        ]
-
 # ---------------- PHARM RETURN ----------------
 if not df_pharm.empty:
 
@@ -110,13 +111,29 @@ if not df_pharm.empty:
 
 
 # ----------------------------------------------------
-# 3️⃣ Remove Dummy Medications
+# 4️⃣ Apply User Filter (Correct Placement)
+# ----------------------------------------------------
+
+if selected_users:
+
+    if not pyxis_unload.empty and 'user_name' in pyxis_unload.columns:
+        pyxis_unload = pyxis_unload[
+            pyxis_unload['user_name'].isin(selected_users)
+        ]
+
+    if not pharm_return.empty and 'user_name' in pharm_return.columns:
+        pharm_return = pharm_return[
+            pharm_return['user_name'].isin(selected_users)
+        ]
+
+
+# ----------------------------------------------------
+# 5️⃣ Remove Dummy Medications
 # ----------------------------------------------------
 
 def remove_dummy_med(df):
     if df.empty:
         return df
-
     if 'med_desc' not in df.columns or 'med_id' not in df.columns:
         return df
 
@@ -124,7 +141,6 @@ def remove_dummy_med(df):
         df['med_desc'].astype(str).str.contains("cassette", case=False, na=False) |
         df['med_id'].astype(str).isin(['99995'])
     )
-
     return df[~mask]
 
 if exclude_dummy:
@@ -133,14 +149,14 @@ if exclude_dummy:
 
 
 # ----------------------------------------------------
-# 4️⃣ Optional Control Exclusion
+# 6️⃣ Remove Controlled Substances (Optional)
 # ----------------------------------------------------
 
 def remove_controls(df):
     if df.empty:
         return df
 
-    # Structured flags first
+    # Structured flags
     if 'is_control' in df.columns:
         return df[df['is_control'] != True]
 
@@ -153,7 +169,7 @@ def remove_controls(df):
     # Fallback keyword detection
     if 'med_desc' in df.columns:
         mask = df['med_desc'].astype(str).str.contains(
-            "CII|CIII|CIV|CV|control|narc|morphine|hydromorphone|oxycodone|fentanyl|amphetamine|methylphenidate",
+            "CII|CIII|CIV|CV|morphine|hydromorphone|oxycodone|fentanyl|amphetamine|methylphenidate",
             case=False,
             na=False
         )
@@ -165,28 +181,9 @@ if exclude_controls:
     pyxis_unload = remove_controls(pyxis_unload)
     pharm_return = remove_controls(pharm_return)
 
-# ----------------------------------------------------
-# 👤 Optional User Filter
-# ----------------------------------------------------
-
-all_users = []
-
-if not df_events.empty and 'user_name' in df_events.columns:
-    all_users.extend(df_events['user_name'].dropna().unique())
-
-if not df_pharm.empty and 'user_name' in df_pharm.columns:
-    all_users.extend(df_pharm['user_name'].dropna().unique())
-
-all_users = sorted(list(set(all_users)))
-
-selected_users = st.multiselect(
-    "Filter by User (Optional)",
-    options=all_users
-)
-
 
 # ----------------------------------------------------
-# 5️⃣ Normalize Dates
+# 7️⃣ Normalize Dates
 # ----------------------------------------------------
 
 if not pyxis_unload.empty:
@@ -197,7 +194,7 @@ if not pharm_return.empty:
 
 
 # ----------------------------------------------------
-# 6️⃣ Aggregate Quantities
+# 8️⃣ Aggregate Quantities
 # ----------------------------------------------------
 
 pyxis_sum = pd.DataFrame()
@@ -227,7 +224,7 @@ if pyxis_sum.empty and pharm_sum.empty:
 
 
 # ----------------------------------------------------
-# 7️⃣ Reconciliation Engine
+# 9️⃣ Reconciliation Engine
 # ----------------------------------------------------
 
 pyxis_merge = pyxis_sum.drop(columns=['med_desc'], errors='ignore')
@@ -258,7 +255,7 @@ recon['difference'] = recon['qty_pyxis'] - recon['qty_pharm']
 
 
 # ----------------------------------------------------
-# 8️⃣ Executive Metrics
+# 🔟 Executive Metrics
 # ----------------------------------------------------
 
 total_unload = recon['qty_pyxis'].sum()
@@ -281,7 +278,7 @@ st.divider()
 
 
 # ----------------------------------------------------
-# 9️⃣ Variance Table + Drilldown
+# 1️⃣1️⃣ Variance Table + Drilldown
 # ----------------------------------------------------
 
 st.subheader("🚨 Unmatched Workflow Events")
@@ -344,7 +341,7 @@ else:
 
 
 # ----------------------------------------------------
-# 🔎 Debug
+# Debug
 # ----------------------------------------------------
 
 with st.expander("🛠 Debug Info"):
