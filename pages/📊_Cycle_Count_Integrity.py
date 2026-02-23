@@ -10,10 +10,11 @@ st.set_page_config(
 )
 
 st.header("📊 Cycle Count Day Tracker")
-st.caption("Tracking days since last cycle count and time-to-contamination.")
+st.caption("Tracking days since last cycle count and post-cycle return activity.")
+
 
 # ----------------------------------------------------
-# 1️⃣ Independent Date Filter (Full Historical)
+# 1️⃣ Independent Date Filter
 # ----------------------------------------------------
 
 c1, c2 = st.columns(2)
@@ -24,48 +25,75 @@ if start_date > end_date:
     st.error("Start date must be before end date.")
     st.stop()
 
+
 # ----------------------------------------------------
 # 2️⃣ Load FULL Historical Data (Backdated)
 # ----------------------------------------------------
 
-df_events, _, df_pharm, _, df_cycle = load_data(
+df_events, _, df_pharm, _, _ = load_data(
     pd.to_datetime("2000-01-01"),
     pd.to_datetime("2100-01-01")
 )
 
-if df_events.empty and df_pharm.empty:
-    st.warning("No historical data found.")
+if df_pharm.empty:
+    st.warning("No Pharmacy Workflow data found.")
     st.stop()
 
-for df in [df_events, df_pharm, df_cycle]:
-    if not df.empty and "dt" in df.columns:
-        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
 
 # ----------------------------------------------------
-# 3️⃣ Identify Cycle Count Events
+# 3️⃣ Detect Datetime Column Dynamically
 # ----------------------------------------------------
 
-cycle_counts = pd.DataFrame()
+def detect_datetime_column(df):
+    possible_cols = [
+        "dt",
+        "transaction_datetime",
+        "transaction_date",
+        "event_datetime",
+        "timestamp",
+        "date"
+    ]
+    for col in possible_cols:
+        if col in df.columns:
+            return col
+    return None
 
-if not df_cycle.empty:
-    cycle_counts = df_cycle.copy()
+datetime_col = detect_datetime_column(df_pharm)
 
-elif not df_events.empty and "event_type" in df_events.columns:
-    cycle_counts = df_events[
-        df_events["event_type"].astype(str).str.contains(
-            "cycle",
-            case=False,
-            na=False
-        )
-    ].copy()
+if datetime_col is None:
+    st.error("No datetime column found in Pharmacy Workflow data.")
+    st.stop()
+
+df_pharm = df_pharm.copy()
+df_pharm[datetime_col] = pd.to_datetime(
+    df_pharm[datetime_col],
+    errors="coerce"
+)
+
+
+# ----------------------------------------------------
+# 4️⃣ Identify Cycle Counts (transaction_type)
+# ----------------------------------------------------
+
+if "transaction_type" not in df_pharm.columns:
+    st.error("transaction_type column not found in Pharmacy Workflow data.")
+    st.stop()
+
+cycle_counts = df_pharm[
+    df_pharm["transaction_type"].astype(str).str.contains(
+        "cycle",
+        case=False,
+        na=False
+    )
+].copy()
 
 if cycle_counts.empty:
-    st.warning("No cycle count events found.")
+    st.warning("No cycle count transactions found.")
     st.stop()
 
-cycle_counts["cycle_date"] = cycle_counts["dt"].dt.date
+cycle_counts["cycle_date"] = cycle_counts[datetime_col].dt.date
 
-# Get latest cycle count per med_id
+# Latest cycle count per med_id
 latest_cycle = (
     cycle_counts
     .groupby("med_id")["cycle_date"]
@@ -73,31 +101,38 @@ latest_cycle = (
     .reset_index()
 )
 
+
 # ----------------------------------------------------
-# 4️⃣ Identify Return Activity
+# 5️⃣ Identify Return Activity
 # ----------------------------------------------------
 
-returns = pd.DataFrame()
+returns = df_pharm[
+    df_pharm["transaction_type"].astype(str).str.contains(
+        "return|restock|instant",
+        case=False,
+        na=False
+    )
+].copy()
 
-if not df_pharm.empty and "event_type" in df_pharm.columns:
-    returns = df_pharm[
-        df_pharm["event_type"].astype(str).str.contains(
-            "return|restock|instant",
-            case=False,
-            na=False
-        )
-    ].copy()
+if returns.empty:
+    st.warning("No return activity found.")
+    st.stop()
 
-returns["return_date"] = returns["dt"].dt.date
+returns["return_date"] = returns[datetime_col].dt.date
 
-# Filter to selected window
+# Apply page date filter ONLY here
 returns = returns[
     (returns["return_date"] >= start_date) &
     (returns["return_date"] <= end_date)
-]
+].copy()
+
+if returns.empty:
+    st.warning("No return activity in selected date range.")
+    st.stop()
+
 
 # ----------------------------------------------------
-# 5️⃣ Merge Cycle Count Baseline
+# 6️⃣ Merge Cycle Count Baseline
 # ----------------------------------------------------
 
 tracker = returns.merge(
@@ -111,19 +146,8 @@ tracker["days_since_cycle"] = (
     pd.to_datetime(tracker["cycle_date"])
 ).dt.days
 
-# Flag meds with no cycle count history
 tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
 
-# ----------------------------------------------------
-# 6️⃣ First Post-Cycle Activity
-# ----------------------------------------------------
-
-first_after_cycle = (
-    tracker.sort_values("return_date")
-    .groupby("med_id")
-    .first()
-    .reset_index()
-)
 
 # ----------------------------------------------------
 # 7️⃣ Executive Metrics
@@ -134,15 +158,22 @@ max_days = tracker["days_since_cycle"].max()
 never_counted = tracker["never_cycle_counted"].sum()
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Average Days Since Cycle Count", f"{avg_days:.1f}")
-m2.metric("Max Days Since Cycle Count", int(max_days) if not np.isnan(max_days) else 0)
+m1.metric("Average Days Since Cycle Count", 
+          f"{avg_days:.1f}" if not np.isnan(avg_days) else "N/A")
+
+m2.metric("Max Days Since Cycle Count", 
+          int(max_days) if not np.isnan(max_days) else 0)
+
 m3.metric("Meds Never Cycle Counted", int(never_counted))
 
 st.divider()
 
+
 # ----------------------------------------------------
 # 8️⃣ Detailed Table
 # ----------------------------------------------------
+
+st.subheader("🔍 Post-Cycle Return Activity")
 
 display_cols = [
     "med_id",
@@ -152,12 +183,10 @@ display_cols = [
     "user_name"
 ]
 
-st.subheader("🔍 Post-Cycle Return Activity")
+available_cols = [col for col in display_cols if col in tracker.columns]
 
 st.dataframe(
-    tracker[display_cols].sort_values(
-        "days_since_cycle",
-        ascending=False
-    ),
+    tracker[available_cols]
+        .sort_values("days_since_cycle", ascending=False),
     width="stretch"
 )
