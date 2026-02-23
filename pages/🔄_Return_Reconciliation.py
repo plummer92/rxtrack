@@ -194,7 +194,7 @@ def safe_group(df, qty_name):
 
 
 pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
-pharm_sum = safe_group(pharm_return, "qty_pharm")stop()
+pharm_sum = safe_group(pharm_return, "qty_pharm")
 
 # ----------------------------------------------------
 # 🔟 Merge Safely
