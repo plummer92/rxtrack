@@ -40,6 +40,8 @@ for df in [df_events, df_pharm]:
     if not df.empty and 'dt' in df.columns:
         df['dt'] = pd.to_datetime(df['dt'], errors='coerce')
 
+df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
+
 
 # ----------------------------------------------------
 # 2️⃣ Identify Workflow Events
@@ -67,6 +69,22 @@ if not df_events.empty and 'event_type' in df_events.columns:
                 case=False,
                 na=False
             )
+        ]
+
+# ----------------------------------------------------
+# Apply User Filter
+# ----------------------------------------------------
+
+if selected_users:
+
+    if not pyxis_unload.empty and 'user_name' in pyxis_unload.columns:
+        pyxis_unload = pyxis_unload[
+            pyxis_unload['user_name'].isin(selected_users)
+        ]
+
+    if not pharm_return.empty and 'user_name' in pharm_return.columns:
+        pharm_return = pharm_return[
+            pharm_return['user_name'].isin(selected_users)
         ]
 
 # ---------------- PHARM RETURN ----------------
@@ -146,6 +164,25 @@ def remove_controls(df):
 if exclude_controls:
     pyxis_unload = remove_controls(pyxis_unload)
     pharm_return = remove_controls(pharm_return)
+
+# ----------------------------------------------------
+# 👤 Optional User Filter
+# ----------------------------------------------------
+
+all_users = []
+
+if not df_events.empty and 'user_name' in df_events.columns:
+    all_users.extend(df_events['user_name'].dropna().unique())
+
+if not df_pharm.empty and 'user_name' in df_pharm.columns:
+    all_users.extend(df_pharm['user_name'].dropna().unique())
+
+all_users = sorted(list(set(all_users)))
+
+selected_users = st.multiselect(
+    "Filter by User (Optional)",
+    options=all_users
+)
 
 
 # ----------------------------------------------------
