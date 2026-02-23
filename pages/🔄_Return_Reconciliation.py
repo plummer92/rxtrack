@@ -157,15 +157,20 @@ if exclude_controls:
 # 8️⃣ Normalize Date
 # ----------------------------------------------------
 
-if not pyxis_unload.empty:
-    pyxis_unload["date"] = pyxis_unload["dt"].dt.date
-
-if not pharm_return.empty:
-    pharm_return["date"] = pharm_return["dt"].dt.date
-
 # ----------------------------------------------------
-# 9️⃣ Aggregate
+# 8️⃣ Normalize Date (Bulletproof)
 # ----------------------------------------------------
+
+def ensure_date_column(df):
+    if "date" not in df.columns:
+        if "dt" in df.columns:
+            df["date"] = pd.to_datetime(df["dt"], errors="coerce").dt.date
+        else:
+            df["date"] = pd.Series(dtype="object")
+    return df
+
+pyxis_unload = ensure_date_column(pyxis_unload)
+pharm_return = ensure_date_column(pharm_return)
 
 # ----------------------------------------------------
 # 9️⃣ Aggregate (Bulletproof)
