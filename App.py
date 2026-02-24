@@ -25,15 +25,12 @@ from sqlalchemy import create_engine
 import os
 
 
-DATABASE_URL = os.getenv("postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?")
+DATABASE_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?"
 
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,      # 🔥 verifies connection before using
-    pool_recycle=300,        # 🔥 recycles stale connections every 5 min
-    pool_size=5,
-    max_overflow=2,
-    connect_args={"sslmode": "require"}  # Required for Neon
+    pool_pre_ping=True,
+    pool_recycle=300
 )
 # --- CONFIGURATION ---
 st.set_page_config(
