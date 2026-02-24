@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 st.header("📊 Cycle Count Integrity Dashboard")
-st.caption("Tracking days since last cycle count and mapping carousel locations.")
+st.caption("Tracking days since last cycle count, user accountability, and carousel location mapping.")
 
 # ----------------------------------------------------
 # 🔧 Normalization Function
@@ -61,7 +61,7 @@ df_pharm = df_pharm.copy()
 df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
 
 # ----------------------------------------------------
-# 3️⃣ Identify Cycle Counts
+# 3️⃣ Identify Cycle Count Events
 # ----------------------------------------------------
 
 cycle_counts = df_pharm[
@@ -78,12 +78,18 @@ if cycle_counts.empty:
 
 cycle_counts["cycle_date"] = cycle_counts["dt"].dt.date
 
+# Get latest cycle count per med INCLUDING user
 latest_cycle = (
     cycle_counts
-    .groupby("med_id")["cycle_date"]
-    .max()
-    .reset_index()
+    .sort_values("dt")
+    .groupby("med_id")
+    .last()
+    .reset_index()[["med_id", "cycle_date", "user_name"]]
 )
+
+latest_cycle = latest_cycle.rename(columns={
+    "user_name": "cycle_count_user"
+})
 
 # ----------------------------------------------------
 # 4️⃣ Identify Return Activity
@@ -113,7 +119,7 @@ if returns.empty:
     st.stop()
 
 # ----------------------------------------------------
-# 5️⃣ Merge Cycle Baseline
+# 5️⃣ Merge Cycle Data
 # ----------------------------------------------------
 
 tracker = returns.merge(
@@ -145,7 +151,7 @@ if df_master.empty:
     st.stop()
 
 # ----------------------------------------------------
-# 7️⃣ Description-Based Join (Harmonized)
+# 7️⃣ Harmonized Description-Based Join
 # ----------------------------------------------------
 
 tracker["join_key"] = tracker["med_desc"].apply(normalize)
@@ -192,7 +198,7 @@ m4.metric(
 st.divider()
 
 # ----------------------------------------------------
-# 9️⃣ Detailed Table
+# 9️⃣ Detailed Post-Cycle Return Table
 # ----------------------------------------------------
 
 st.subheader("🔍 Post-Cycle Return Activity")
@@ -203,6 +209,7 @@ display_cols = [
     "carousel_location",
     "return_date",
     "cycle_date",
+    "cycle_count_user",
     "days_since_cycle",
     "user_name",
     "qty"
@@ -215,3 +222,31 @@ st.dataframe(
     .sort_values("days_since_cycle", ascending=False),
     use_container_width=True
 )
+
+# ----------------------------------------------------
+# 🔴 Meds Never Cycle Counted Summary
+# ----------------------------------------------------
+
+st.divider()
+st.subheader("🚨 Medications NEVER Cycle Counted")
+
+never_df = tracker[tracker["never_cycle_counted"] == True].copy()
+
+if never_df.empty:
+    st.success("All returned medications have at least one recorded cycle count.")
+else:
+    never_summary = (
+        never_df
+        .groupby(["med_id", "med_desc", "carousel_location"], dropna=False)
+        .agg(
+            total_returns=("qty", "sum"),
+            occurrences=("med_id", "count")
+        )
+        .reset_index()
+        .sort_values("total_returns", ascending=False)
+    )
+
+    st.dataframe(
+        never_summary,
+        use_container_width=True
+    )
