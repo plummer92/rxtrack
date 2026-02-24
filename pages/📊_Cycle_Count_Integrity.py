@@ -41,6 +41,8 @@ if df_pharm.empty:
 df_pharm = df_pharm.copy()
 df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
 
+st.write(df_pharm.columns)
+
 # ----------------------------------------------------
 # 3️⃣ Cycle Count Events
 # ----------------------------------------------------
