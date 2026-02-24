@@ -99,18 +99,14 @@ if returns.empty:
 # 5️⃣ Merge Cycle Baseline
 # ----------------------------------------------------
 
-tracker = returns.merge(
-    latest_cycle,
-    on="med_id",
+tracker["med_desc"] = tracker["med_desc"].str.strip().str.upper()
+df_master["med_desc"] = df_master["med_desc"].str.strip().str.upper()
+
+tracker = tracker.merge(
+    df_master[["med_desc", "carousel_location"]],
+    on="med_desc",
     how="left"
 )
-
-tracker["days_since_cycle"] = (
-    pd.to_datetime(tracker["return_date"]) -
-    pd.to_datetime(tracker["cycle_date"])
-).dt.days
-
-tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
 
 # ----------------------------------------------------
 # 6️⃣ Pull Master Carousel Mapping (FIXED METHOD)
