@@ -110,6 +110,20 @@ tracker = returns.merge(
     how="left"
 )
 
+# ----------------------------------------------------
+# Extract Carousel Location
+# ----------------------------------------------------
+
+tracker["carousel_location"] = np.where(
+    tracker["destination"].astype(str).str.contains(
+        "CAR",
+        case=False,
+        na=False
+    ),
+    tracker["destination"],
+    None
+)
+
 tracker["days_since_cycle"] = (
     pd.to_datetime(tracker["return_date"]) -
     pd.to_datetime(tracker["cycle_date"])
@@ -138,16 +152,13 @@ m3.metric("Meds Never Cycle Counted", int(never_counted))
 st.divider()
 
 
-# ----------------------------------------------------
-# 7️⃣ Detailed Table
-# ----------------------------------------------------
-
 st.subheader("🔍 Post-Cycle Return Activity")
 
 st.dataframe(
     tracker[[
         "med_id",
         "med_desc",
+        "carousel_location",
         "return_date",
         "cycle_date",
         "days_since_cycle",
