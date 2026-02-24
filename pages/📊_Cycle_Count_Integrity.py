@@ -26,7 +26,7 @@ if start_date > end_date:
     st.stop()
 
 # ----------------------------------------------------
-# 2️⃣ Load Historical Workflow Data
+# 2️⃣ Load Workflow Data
 # ----------------------------------------------------
 
 df_events, _, df_pharm, _, _ = load_data(
@@ -40,8 +40,6 @@ if df_pharm.empty:
 
 df_pharm = df_pharm.copy()
 df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
-
-st.write(df_pharm.columns)
 
 # ----------------------------------------------------
 # 3️⃣ Cycle Count Events
@@ -69,7 +67,7 @@ latest_cycle = (
 )
 
 # ----------------------------------------------------
-# 4️⃣ Return / Restock Activity
+# 4️⃣ Return Activity
 # ----------------------------------------------------
 
 returns = df_pharm[
@@ -99,42 +97,89 @@ if returns.empty:
 # 5️⃣ Merge Cycle Baseline
 # ----------------------------------------------------
 
-tracker["med_desc"] = tracker["med_desc"].str.strip().str.upper()
-df_master["med_desc"] = df_master["med_desc"].str.strip().str.upper()
-
-tracker = tracker.merge(
-    df_master[["med_desc", "carousel_location"]],
-    on="med_desc",
+tracker = returns.merge(
+    latest_cycle,
+    on="med_id",
     how="left"
 )
 
+tracker["days_since_cycle"] = (
+    pd.to_datetime(tracker["return_date"]) -
+    pd.to_datetime(tracker["cycle_date"])
+).dt.days
+
+tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
+
 # ----------------------------------------------------
-# 6️⃣ Pull Master Carousel Mapping (FIXED METHOD)
+# 6️⃣ Pull Master Mapping (SQLAlchemy Safe Method)
 # ----------------------------------------------------
 
 with engine.connect() as conn:
     result = conn.execute(
         text("""
-            SELECT med_id, carousel_location
+            SELECT med_id, med_desc, drug_name, carousel_location
             FROM carousel_master_mapping
-            WHERE carousel_location LIKE 'CAR%'
         """)
     )
     rows = result.fetchall()
     df_master = pd.DataFrame(rows, columns=result.keys())
 
-# Safe merge
-if not df_master.empty:
-    tracker = tracker.merge(
-        df_master,
-        on="med_id",
-        how="left"
-    )
-else:
-    tracker["carousel_location"] = np.nan
+# Clean formatting
+tracker["med_id"] = tracker["med_id"].astype(str).str.strip().str.upper()
+df_master["med_id"] = df_master["med_id"].astype(str).str.strip().str.upper()
+
+if "drug_name" in df_master.columns:
+    df_master["drug_name"] = df_master["drug_name"].astype(str).str.strip().str.upper()
+
+if "med_desc" in df_master.columns:
+    df_master["med_desc"] = df_master["med_desc"].astype(str).str.strip().str.upper()
 
 # ----------------------------------------------------
-# 7️⃣ Executive Metrics
+# 🔎 DEBUG BLOCK
+# ----------------------------------------------------
+
+st.divider()
+st.subheader("🔎 DEBUG: Key Alignment Check")
+
+st.write("Workflow med_id sample:")
+st.write(tracker["med_id"].unique()[:10])
+
+st.write("Master med_id sample:")
+st.write(df_master["med_id"].unique()[:10])
+
+if "drug_name" in df_master.columns:
+    st.write("Master drug_name sample:")
+    st.write(df_master["drug_name"].unique()[:10])
+
+if "med_desc" in df_master.columns:
+    st.write("Master med_desc sample:")
+    st.write(df_master["med_desc"].unique()[:10])
+
+workflow_ids = set(tracker["med_id"].unique())
+master_ids = set(df_master["med_id"].unique())
+
+st.write("Matches on med_id:", len(workflow_ids.intersection(master_ids)))
+
+if "drug_name" in df_master.columns:
+    drug_names = set(df_master["drug_name"].unique())
+    st.write("Matches on drug_name:", len(workflow_ids.intersection(drug_names)))
+
+if "med_desc" in df_master.columns:
+    desc_names = set(df_master["med_desc"].unique())
+    st.write("Matches on med_desc:", len(workflow_ids.intersection(desc_names)))
+
+# ----------------------------------------------------
+# 7️⃣ TEMPORARY MERGE (TRY med_id FIRST)
+# ----------------------------------------------------
+
+tracker = tracker.merge(
+    df_master[["med_id", "carousel_location"]],
+    on="med_id",
+    how="left"
+)
+
+# ----------------------------------------------------
+# 8️⃣ Executive Metrics
 # ----------------------------------------------------
 
 avg_days = tracker["days_since_cycle"].mean()
@@ -161,7 +206,7 @@ m3.metric(
 st.divider()
 
 # ----------------------------------------------------
-# 8️⃣ Detailed Table
+# 9️⃣ Detailed Table
 # ----------------------------------------------------
 
 st.subheader("🔍 Post-Cycle Return Activity")
