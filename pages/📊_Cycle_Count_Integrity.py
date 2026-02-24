@@ -111,28 +111,32 @@ tracker["days_since_cycle"] = (
 tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
 
 # ----------------------------------------------------
-# 6️⃣ Pull Master Mapping (SQLAlchemy Safe Method)
+# 6️⃣ Pull Master Mapping (STRUCTURE SAFE)
 # ----------------------------------------------------
 
 with engine.connect() as conn:
     result = conn.execute(
         text("""
-            SELECT med_id, med_desc, drug_name, carousel_location
+            SELECT *
             FROM carousel_master_mapping
+            LIMIT 10
         """)
     )
     rows = result.fetchall()
     df_master = pd.DataFrame(rows, columns=result.keys())
 
-# Clean formatting
-tracker["med_id"] = tracker["med_id"].astype(str).str.strip().str.upper()
-df_master["med_id"] = df_master["med_id"].astype(str).str.strip().str.upper()
+# ----------------------------------------------------
+# 🔎 SHOW STRUCTURE (NO ASSUMPTIONS)
+# ----------------------------------------------------
 
-if "drug_name" in df_master.columns:
-    df_master["drug_name"] = df_master["drug_name"].astype(str).str.strip().str.upper()
+st.divider()
+st.subheader("🔎 MASTER TABLE STRUCTURE")
 
-if "med_desc" in df_master.columns:
-    df_master["med_desc"] = df_master["med_desc"].astype(str).str.strip().str.upper()
+st.write("Columns in carousel_master_mapping:")
+st.write(df_master.columns.tolist())
+
+st.write("Sample rows from master mapping:")
+st.dataframe(df_master)
 
 # ----------------------------------------------------
 # 🔎 DEBUG BLOCK
