@@ -34,7 +34,6 @@ if df_events.empty and df_pharm.empty:
     st.warning("No data found for selected dates.")
     st.stop()
 
-# Ensure datetime safety
 for df in [df_events, df_pharm]:
     if not df.empty and "dt" in df.columns:
         df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
@@ -100,11 +99,46 @@ if not df_pharm.empty:
     if event_col:
         pharm_return = pharm_df[
             pharm_df[event_col].astype(str).str.contains(
-                "return|restock|instant",
+                "return|restock|instant|inventory",
                 case=False,
                 na=False
             )
         ].copy()
+
+# ----------------------------------------------------
+# 🔹 Classify Pharmacy Workflow Type
+# ----------------------------------------------------
+
+def classify_workflow(row):
+    text_blob = ""
+
+    if "event_type" in row and pd.notna(row["event_type"]):
+        text_blob += str(row["event_type"]) + " "
+
+    if "priority" in row and pd.notna(row["priority"]):
+        text_blob += str(row["priority"]) + " "
+
+    text_blob = text_blob.lower()
+
+    if "inventory" in text_blob:
+        return "Inventory Move"
+
+    if "instant" in text_blob and "return" in text_blob:
+        return "Instant Return"
+
+    if "instant" in text_blob and "restock" in text_blob:
+        return "Instant Restock"
+
+    if "restock" in text_blob:
+        return "Restock"
+
+    if "return" in text_blob:
+        return "Return"
+
+    return "Other"
+
+if not pharm_return.empty:
+    pharm_return["workflow_type"] = pharm_return.apply(classify_workflow, axis=1)
 
 # ----------------------------------------------------
 # 5️⃣ Apply User Filter
@@ -136,7 +170,7 @@ if exclude_dummy:
     pharm_return = remove_dummy(pharm_return)
 
 # ----------------------------------------------------
-# 7️⃣ Remove Controls (Keyword Fallback)
+# 7️⃣ Remove Controls
 # ----------------------------------------------------
 
 def remove_controls(df):
@@ -157,10 +191,6 @@ if exclude_controls:
 # 8️⃣ Normalize Date
 # ----------------------------------------------------
 
-# ----------------------------------------------------
-# 8️⃣ Normalize Date (Bulletproof)
-# ----------------------------------------------------
-
 def ensure_date_column(df):
     if "date" not in df.columns:
         if "dt" in df.columns:
@@ -173,36 +203,29 @@ pyxis_unload = ensure_date_column(pyxis_unload)
 pharm_return = ensure_date_column(pharm_return)
 
 # ----------------------------------------------------
-# 9️⃣ Aggregate (Bulletproof)
+# 9️⃣ Aggregate
 # ----------------------------------------------------
 
 def safe_group(df, qty_name):
     if df.empty:
-        return pd.DataFrame(
-            columns=["med_id", "med_desc", "date", qty_name]
-        )
+        return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
 
     required = {"med_id", "med_desc", "date", "qty"}
     if not required.issubset(df.columns):
-        return pd.DataFrame(
-            columns=["med_id", "med_desc", "date", qty_name]
-        )
+        return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
 
-    grouped = (
+    return (
         df.groupby(["med_id", "med_desc", "date"])["qty"]
         .sum()
         .reset_index()
         .rename(columns={"qty": qty_name})
     )
 
-    return grouped
-
-
 pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
 pharm_sum = safe_group(pharm_return, "qty_pharm")
 
 # ----------------------------------------------------
-# 🔟 Merge Safely
+# 🔟 Merge
 # ----------------------------------------------------
 
 recon = pd.merge(
@@ -211,9 +234,6 @@ recon = pd.merge(
     on=["med_id", "date"],
     how="outer"
 )
-
-recon["qty_pyxis"] = recon.get("qty_pyxis", 0)
-recon["qty_pharm"] = recon.get("qty_pharm", 0)
 
 recon[["qty_pyxis", "qty_pharm"]] = recon[["qty_pyxis", "qty_pharm"]].fillna(0)
 
@@ -303,6 +323,6 @@ else:
         with c2:
             st.markdown("### 🟩 Pharmacy Return Events")
             st.dataframe(
-                return_detail[["dt", "user_name", "destination", "qty"]],
+                return_detail[["dt", "user_name", "workflow_type", "qty"]],
                 width="stretch"
             )
