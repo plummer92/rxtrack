@@ -22,12 +22,19 @@ import io
 import warnings
 
 from sqlalchemy import create_engine
+import os
 
-# 1. Define the engine at the top level of App.py
-# Replace 'your_db_url' with your actual Neon/PostgreSQL connection string
-DB_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?" 
-engine = create_engine(DB_URL)
 
+DATABASE_URL = os.getenv("postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?")
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,      # 🔥 verifies connection before using
+    pool_recycle=300,        # 🔥 recycles stale connections every 5 min
+    pool_size=5,
+    max_overflow=2,
+    connect_args={"sslmode": "require"}  # Required for Neon
+)
 # --- CONFIGURATION ---
 st.set_page_config(
     page_title="RxTrack: Workforce & Efficiency", 
