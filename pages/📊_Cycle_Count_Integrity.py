@@ -114,14 +114,15 @@ tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
 # 6️⃣ Pull Master Carousel Mapping
 # ----------------------------------------------------
 
-df_master = pd.read_sql(
-    """
-    SELECT med_id, carousel_location
-    FROM carousel_master_mapping
-    WHERE carousel_location LIKE 'CAR%'
-    """,
-    engine
-)
+with engine.connect() as conn:
+    df_master = pd.read_sql(
+        """
+        SELECT med_id, carousel_location
+        FROM carousel_master_mapping
+        WHERE carousel_location LIKE 'CAR%'
+        """,
+        conn
+    )
 
 tracker = tracker.merge(
     df_master,
