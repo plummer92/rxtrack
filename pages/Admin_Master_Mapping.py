@@ -16,11 +16,13 @@ if uploaded_file:
     # -------------------------------------------------
     # 1️⃣ Load CSV (skip first header row)
     # -------------------------------------------------
+
     df_master = pd.read_csv(uploaded_file, header=1)
 
     # -------------------------------------------------
     # 2️⃣ Standardize Column Names
     # -------------------------------------------------
+
     df_master.columns = (
         df_master.columns
         .str.strip()
@@ -28,7 +30,6 @@ if uploaded_file:
         .str.replace(" ", "_")
     )
 
-    # Rename if needed
     df_master = df_master.rename(columns={
         "description": "med_desc",
         "drug_name": "drug_name",
@@ -48,12 +49,20 @@ if uploaded_file:
     df_master = df_master[required_cols]
 
     # -------------------------------------------------
-    # 3️⃣ Clean Data
+    # 3️⃣ Clean & Normalize
     # -------------------------------------------------
-    df_master = df_master.dropna(subset=["med_id"])
+
+    df_master = df_master.dropna(subset=["med_id", "med_desc"])
 
     df_master["med_id"] = (
         df_master["med_id"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    df_master["med_desc"] = (
+        df_master["med_desc"]
         .astype(str)
         .str.strip()
         .str.upper()
@@ -67,9 +76,8 @@ if uploaded_file:
     )
 
     # -------------------------------------------------
-    # 4️⃣ REMOVE DUPLICATES (CRITICAL FIX)
+    # 4️⃣ Remove Duplicates
     # -------------------------------------------------
-    before = len(df_master)
 
     df_master = (
         df_master
@@ -77,17 +85,13 @@ if uploaded_file:
         .drop_duplicates(subset=["med_id"], keep="last")
     )
 
-    after = len(df_master)
-
-    st.subheader("Preview (Deduplicated)")
+    st.subheader("Preview")
     st.dataframe(df_master.head(), use_container_width=True)
-
-    st.write(f"Rows before dedupe: {before}")
-    st.write(f"Rows after dedupe: {after}")
 
     # -------------------------------------------------
     # 5️⃣ Replace Table Safely
     # -------------------------------------------------
+
     if st.button("🚀 Replace Master Mapping Table"):
 
         with engine.begin() as conn:
