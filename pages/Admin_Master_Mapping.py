@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from App import engine  # make sure this is your SQLAlchemy engine
+from App import engine
 
 st.header("📥 Master Carousel Mapping Upload")
 st.caption("Upload Item Location Report to update master carousel assignments.")
@@ -13,49 +13,85 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file:
 
-    # ----------------------------
-    # 1️⃣ Load CSV (skip header row)
-    # ----------------------------
+    # -------------------------------------------------
+    # 1️⃣ Load CSV (skip first header row)
+    # -------------------------------------------------
     df_master = pd.read_csv(uploaded_file, header=1)
 
-    # ----------------------------
-    # 2️⃣ Rename Columns Cleanly
-    # ----------------------------
+    # -------------------------------------------------
+    # 2️⃣ Standardize Column Names
+    # -------------------------------------------------
+    df_master.columns = (
+        df_master.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+    )
+
+    # Rename if needed
     df_master = df_master.rename(columns={
-        "Description": "med_desc",
-        "Drug Name": "drug_name",
-        "Trade Name": "trade_name",
-        "Med ID": "med_id",
-        "Location": "carousel_location"
+        "description": "med_desc",
+        "drug_name": "drug_name",
+        "trade_name": "trade_name",
+        "med_id": "med_id",
+        "location": "carousel_location"
     })
 
-    # Keep only what we need
-    df_master = df_master[[
+    required_cols = [
         "med_id",
         "med_desc",
         "drug_name",
         "trade_name",
         "carousel_location"
-    ]]
+    ]
 
-    # Drop rows missing med_id
+    df_master = df_master[required_cols]
+
+    # -------------------------------------------------
+    # 3️⃣ Clean Data
+    # -------------------------------------------------
     df_master = df_master.dropna(subset=["med_id"])
 
-    # Strip whitespace
-    df_master["med_id"] = df_master["med_id"].astype(str).str.strip()
-    df_master["carousel_location"] = df_master["carousel_location"].astype(str).str.strip()
+    df_master["med_id"] = (
+        df_master["med_id"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
 
-    st.subheader("Preview")
+    df_master["carousel_location"] = (
+        df_master["carousel_location"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    # -------------------------------------------------
+    # 4️⃣ REMOVE DUPLICATES (CRITICAL FIX)
+    # -------------------------------------------------
+    before = len(df_master)
+
+    df_master = (
+        df_master
+        .sort_values("carousel_location")
+        .drop_duplicates(subset=["med_id"], keep="last")
+    )
+
+    after = len(df_master)
+
+    st.subheader("Preview (Deduplicated)")
     st.dataframe(df_master.head(), use_container_width=True)
 
-    st.write(f"Total rows detected: {len(df_master)}")
+    st.write(f"Rows before dedupe: {before}")
+    st.write(f"Rows after dedupe: {after}")
 
-    # ----------------------------
-    # 3️⃣ Upload To Neon
-    # ----------------------------
+    # -------------------------------------------------
+    # 5️⃣ Replace Table Safely
+    # -------------------------------------------------
     if st.button("🚀 Replace Master Mapping Table"):
 
         with engine.begin() as conn:
+
             conn.execute(text("DROP TABLE IF EXISTS carousel_master_mapping"))
 
             conn.execute(text("""
@@ -72,7 +108,8 @@ if uploaded_file:
             "carousel_master_mapping",
             engine,
             if_exists="append",
-            index=False
+            index=False,
+            method="multi"
         )
 
         st.success("✅ Master mapping uploaded successfully.")
