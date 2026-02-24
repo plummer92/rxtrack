@@ -35,7 +35,6 @@ if df_events.empty and df_pharm.empty:
     st.warning("No data found for selected dates.")
     st.stop()
 
-# Ensure datetime safety
 for df in [df_events, df_pharm]:
     if not df.empty and "dt" in df.columns:
         df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
@@ -45,7 +44,7 @@ for df in [df_events, df_pharm]:
 # ----------------------------------------------------
 
 pyxis_unload = pd.DataFrame()
-pharm_return = pd.DataFrame()
+pharm_activity = pd.DataFrame()
 
 # -------- PYXIS UNLOAD --------
 if not df_events.empty and "event_type" in df_events.columns:
@@ -57,7 +56,6 @@ if not df_events.empty and "event_type" in df_events.columns:
         )
     ].copy()
 
-    # Exclude cassette & patient devices
     if "device" in pyxis_unload.columns:
         pyxis_unload = pyxis_unload[
             ~pyxis_unload["device"].astype(str).str.contains(
@@ -67,27 +65,22 @@ if not df_events.empty and "event_type" in df_events.columns:
             )
         ]
 
-# -------- PHARMACY RETURN --------
+# -------- PHARMACY ACTIVITY --------
 if not df_pharm.empty:
     pharm_df = df_pharm.copy()
 
-    event_col = None
-    if "event_type" in pharm_df.columns:
-        event_col = "event_type"
-    elif "priority" in pharm_df.columns:
-        event_col = "priority"
+    event_col = "priority" if "priority" in pharm_df.columns else "event_type"
 
-    if event_col:
-        pharm_return = pharm_df[
-            pharm_df[event_col].astype(str).str.contains(
-                "return|restock|instant",
-                case=False,
-                na=False
-            )
-        ].copy()
+    pharm_activity = pharm_df[
+        pharm_df[event_col].astype(str).str.contains(
+            "return|restock|instant|inventory|move",
+            case=False,
+            na=False
+        )
+    ].copy()
 
 # ----------------------------------------------------
-# 4️⃣ Load Master Mapping (For Control Classification)
+# 4️⃣ Load Master Mapping (Control Identification)
 # ----------------------------------------------------
 
 with engine.connect() as conn:
@@ -97,122 +90,105 @@ with engine.connect() as conn:
     rows = result.fetchall()
     df_master = pd.DataFrame(rows, columns=result.keys())
 
-# Merge mapping into both datasets
 if not pyxis_unload.empty:
-    pyxis_unload = pyxis_unload.merge(
-        df_master,
-        on="med_id",
-        how="left"
-    )
+    pyxis_unload = pyxis_unload.merge(df_master, on="med_id", how="left")
 
-if not pharm_return.empty:
-    pharm_return = pharm_return.merge(
-        df_master,
-        on="med_id",
-        how="left"
-    )
+if not pharm_activity.empty:
+    pharm_activity = pharm_activity.merge(df_master, on="med_id", how="left")
 
 # ----------------------------------------------------
 # 5️⃣ Filters
 # ----------------------------------------------------
 
-# Build user list
 all_users = sorted(list(set(
     list(pyxis_unload.get("user_name", pd.Series()).dropna().unique()) +
-    list(pharm_return.get("user_name", pd.Series()).dropna().unique())
+    list(pharm_activity.get("user_name", pd.Series()).dropna().unique())
 )))
 
-selected_users = st.multiselect(
-    "Filter by User (Optional)",
-    options=all_users
-)
+selected_users = st.multiselect("Filter by User (Optional)", options=all_users)
 
 exclude_controls = st.checkbox("Exclude Controlled Substances (CW)")
 exclude_dummy = st.checkbox("Exclude Dummy Medications", value=True)
 
-# Apply user filter
 if selected_users:
     if "user_name" in pyxis_unload.columns:
         pyxis_unload = pyxis_unload[
             pyxis_unload["user_name"].isin(selected_users)
         ]
-    if "user_name" in pharm_return.columns:
-        pharm_return = pharm_return[
-            pharm_return["user_name"].isin(selected_users)
+    if "user_name" in pharm_activity.columns:
+        pharm_activity = pharm_activity[
+            pharm_activity["user_name"].isin(selected_users)
         ]
 
-# Remove dummy meds
 def remove_dummy(df):
     if df.empty or "med_desc" not in df.columns:
         return df
-    mask = df["med_desc"].astype(str).str.contains(
-        "cassette",
-        case=False,
-        na=False
-    )
-    return df[~mask]
+    return df[~df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)]
 
-if exclude_dummy:
-    pyxis_unload = remove_dummy(pyxis_unload)
-    pharm_return = remove_dummy(pharm_return)
-
-# Remove controlled via CW mapping
 def remove_controls(df):
     if df.empty or "carousel_location" not in df.columns:
         return df
-    mask = df["carousel_location"].astype(str).str.contains(
-        "CW",
-        case=False,
-        na=False
-    )
-    return df[~mask]
+    return df[~df["carousel_location"].astype(str).str.contains("CW", case=False, na=False)]
+
+if exclude_dummy:
+    pyxis_unload = remove_dummy(pyxis_unload)
+    pharm_activity = remove_dummy(pharm_activity)
 
 if exclude_controls:
     pyxis_unload = remove_controls(pyxis_unload)
-    pharm_return = remove_controls(pharm_return)
+    pharm_activity = remove_controls(pharm_activity)
 
 # ----------------------------------------------------
 # 6️⃣ Normalize Date
 # ----------------------------------------------------
 
-def ensure_date_column(df):
-    if df.empty:
-        return df
-    df["date"] = pd.to_datetime(df["dt"], errors="coerce").dt.date
+def ensure_date(df):
+    if not df.empty:
+        df["date"] = pd.to_datetime(df["dt"], errors="coerce").dt.date
     return df
 
-pyxis_unload = ensure_date_column(pyxis_unload)
-pharm_return = ensure_date_column(pharm_return)
+pyxis_unload = ensure_date(pyxis_unload)
+pharm_activity = ensure_date(pharm_activity)
 
 # ----------------------------------------------------
-# 7️⃣ Aggregate Safely
+# 7️⃣ Aggregate with Movement Type
 # ----------------------------------------------------
 
-def safe_group(df, qty_name):
+def group_pyxis(df):
     if df.empty:
-        return pd.DataFrame(
-            columns=["med_id", "med_desc", "date", qty_name]
-        )
-
-    grouped = (
-        df.groupby(["med_id", "med_desc", "date"])["qty"]
+        return pd.DataFrame(columns=["med_id", "date", "qty_pyxis"])
+    return (
+        df.groupby(["med_id", "date"])["qty"]
         .sum()
         .reset_index()
-        .rename(columns={"qty": qty_name})
+        .rename(columns={"qty": "qty_pyxis"})
+    )
+
+def group_pharm(df):
+    if df.empty:
+        return pd.DataFrame(columns=["med_id", "date", "qty_pharm", "movement_type"])
+
+    grouped = (
+        df.groupby(["med_id", "date"])
+        .agg(
+            qty_pharm=("qty", "sum"),
+            movement_type=("priority", lambda x: ", ".join(x.dropna().unique()))
+        )
+        .reset_index()
     )
 
     return grouped
 
-pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
-pharm_sum = safe_group(pharm_return, "qty_pharm")
+pyxis_sum = group_pyxis(pyxis_unload)
+pharm_sum = group_pharm(pharm_activity)
 
 # ----------------------------------------------------
 # 8️⃣ Merge
 # ----------------------------------------------------
 
 recon = pd.merge(
-    pyxis_sum.drop(columns=["med_desc"], errors="ignore"),
-    pharm_sum.drop(columns=["med_desc"], errors="ignore"),
+    pyxis_sum,
+    pharm_sum,
     on=["med_id", "date"],
     how="outer"
 )
@@ -221,15 +197,24 @@ recon[["qty_pyxis", "qty_pharm"]] = recon[
     ["qty_pyxis", "qty_pharm"]
 ].fillna(0)
 
+recon["movement_type"] = recon.get("movement_type", "None").fillna("None")
+
 # Restore med_desc
 med_lookup = pd.concat([
-    pyxis_sum[["med_id", "med_desc"]],
-    pharm_sum[["med_id", "med_desc"]]
+    pyxis_unload[["med_id", "med_desc"]],
+    pharm_activity[["med_id", "med_desc"]]
 ]).drop_duplicates("med_id")
 
 recon = recon.merge(med_lookup, on="med_id", how="left")
 
 recon["difference"] = recon["qty_pyxis"] - recon["qty_pharm"]
+
+# Flag inventory moves clearly
+recon["event_flag"] = np.where(
+    recon["movement_type"].str.contains("inventory", case=False),
+    "Inventory Move",
+    "Return Workflow"
+)
 
 # ----------------------------------------------------
 # 9️⃣ Executive Metrics
@@ -247,14 +232,14 @@ unmatched = recon[recon["difference"] != 0]
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Total Pyxis Unload Qty", int(total_unload))
-m2.metric("Total Pharmacy Return Qty", int(total_return))
+m2.metric("Total Pharmacy Activity Qty", int(total_return))
 m3.metric("Reconciliation %", f"{recon_pct:.2f}%")
 m4.metric("Unmatched Med-Days", len(unmatched))
 
 st.divider()
 
 # ----------------------------------------------------
-# 🔟 Variance Table + Drilldown
+# 🔟 Variance Table
 # ----------------------------------------------------
 
 st.subheader("🚨 Unmatched Workflow Events")
@@ -268,46 +253,4 @@ else:
         ascending=False
     ).reset_index(drop=True)
 
-    event = st.dataframe(
-        display,
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        hide_index=True
-    )
-
-    if len(event.selection.rows) > 0:
-        idx = event.selection.rows[0]
-        selected = display.iloc[idx]
-
-        med_id = selected["med_id"]
-        date = selected["date"]
-
-        st.divider()
-        st.subheader(f"🔎 Drilldown: {selected['med_desc']} — {date}")
-
-        unload_detail = pyxis_unload[
-            (pyxis_unload["med_id"] == med_id) &
-            (pyxis_unload["date"] == date)
-        ].sort_values("dt")
-
-        return_detail = pharm_return[
-            (pharm_return["med_id"] == med_id) &
-            (pharm_return["date"] == date)
-        ].sort_values("dt")
-
-        c1, c2 = st.columns(2)
-
-        with c1:
-            st.markdown("### 🟦 Pyxis Unload Events")
-            st.dataframe(
-                unload_detail[["dt", "user_name", "device", "qty"]],
-                use_container_width=True
-            )
-
-        with c2:
-            st.markdown("### 🟩 Pharmacy Return Events")
-            st.dataframe(
-                return_detail[["dt", "user_name", "destination", "qty"]],
-                use_container_width=True
-            )
+    st.dataframe(display, use_container_width=True)
