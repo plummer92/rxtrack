@@ -39,6 +39,11 @@ if df_pharm.empty:
     st.warning("No Pharmacy Workflow data found.")
     st.stop()
 
+# 🔍 DEBUG: Inspect Pharmacy Workflow Schema
+with st.expander("🔍 Pharmacy Workflow Columns (DEBUG)"):
+    st.write(df_pharm.columns)
+    st.write(df_pharm.head())
+
 
 # ----------------------------------------------------
 # 3️⃣ Detect Datetime Column Dynamically
