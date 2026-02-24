@@ -1,78 +1,178 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from sqlalchemy import text
-from App import engine  # make sure this is your SQLAlchemy engine
+from App import load_data, engine
 
-st.header("📥 Master Carousel Mapping Upload")
-st.caption("Upload Item Location Report to update master carousel assignments.")
-
-uploaded_file = st.file_uploader(
-    "Upload Item Location Report CSV",
-    type=["csv"]
+st.set_page_config(
+    page_title="Cycle Count Integrity",
+    page_icon="📊",
+    layout="wide"
 )
 
-if uploaded_file:
+st.header("📊 Cycle Count Day Tracker")
+st.caption("Tracking days since last cycle count and identifying risk exposure.")
 
-    # ----------------------------
-    # 1️⃣ Load CSV (skip header row)
-    # ----------------------------
-    df_master = pd.read_csv(uploaded_file, header=1)
+# ----------------------------------------------------
+# 1️⃣ Independent Date Filter
+# ----------------------------------------------------
 
-    # ----------------------------
-    # 2️⃣ Rename Columns Cleanly
-    # ----------------------------
-    df_master = df_master.rename(columns={
-        "Description": "med_desc",
-        "Drug Name": "drug_name",
-        "Trade Name": "trade_name",
-        "Med ID": "med_id",
-        "Location": "carousel_location"
-    })
+col1, col2 = st.columns(2)
+start_date = col1.date_input("Start Date")
+end_date = col2.date_input("End Date")
 
-    # Keep only what we need
-    df_master = df_master[[
+if start_date > end_date:
+    st.error("Start date must be before end date.")
+    st.stop()
+
+# ----------------------------------------------------
+# 2️⃣ Load FULL Historical Data
+# ----------------------------------------------------
+
+df_events, _, df_pharm, _, _ = load_data(
+    pd.to_datetime("2000-01-01"),
+    pd.to_datetime("2100-01-01")
+)
+
+if df_pharm.empty:
+    st.warning("No Pharmacy Workflow data found.")
+    st.stop()
+
+df_pharm = df_pharm.copy()
+df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
+
+# ----------------------------------------------------
+# 3️⃣ Identify Cycle Count Events
+# ----------------------------------------------------
+
+cycle_counts = df_pharm[
+    df_pharm["priority"].astype(str).str.contains(
+        "cycle",
+        case=False,
+        na=False
+    )
+].copy()
+
+if cycle_counts.empty:
+    st.warning("No cycle count transactions found.")
+    st.stop()
+
+cycle_counts["cycle_date"] = cycle_counts["dt"].dt.date
+
+latest_cycle = (
+    cycle_counts
+    .groupby("med_id")["cycle_date"]
+    .max()
+    .reset_index()
+)
+
+# ----------------------------------------------------
+# 4️⃣ Identify Return Activity
+# ----------------------------------------------------
+
+returns = df_pharm[
+    df_pharm["priority"].astype(str).str.contains(
+        "return|restock|instant",
+        case=False,
+        na=False
+    )
+].copy()
+
+if returns.empty:
+    st.warning("No return activity found.")
+    st.stop()
+
+returns["return_date"] = returns["dt"].dt.date
+
+returns = returns[
+    (returns["return_date"] >= start_date) &
+    (returns["return_date"] <= end_date)
+].copy()
+
+if returns.empty:
+    st.warning("No return activity in selected date range.")
+    st.stop()
+
+# ----------------------------------------------------
+# 5️⃣ Merge Cycle Baseline
+# ----------------------------------------------------
+
+tracker = returns.merge(
+    latest_cycle,
+    on="med_id",
+    how="left"
+)
+
+tracker["days_since_cycle"] = (
+    pd.to_datetime(tracker["return_date"]) -
+    pd.to_datetime(tracker["cycle_date"])
+).dt.days
+
+tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
+
+# ----------------------------------------------------
+# 6️⃣ Pull Master Carousel Mapping
+# ----------------------------------------------------
+
+df_master = pd.read_sql(
+    """
+    SELECT med_id, carousel_location
+    FROM carousel_master_mapping
+    WHERE carousel_location LIKE 'CAR%'
+    """,
+    engine
+)
+
+tracker = tracker.merge(
+    df_master,
+    on="med_id",
+    how="left"
+)
+
+# ----------------------------------------------------
+# 7️⃣ Executive Metrics
+# ----------------------------------------------------
+
+avg_days = tracker["days_since_cycle"].mean()
+max_days = tracker["days_since_cycle"].max()
+never_counted = tracker["never_cycle_counted"].sum()
+
+m1, m2, m3 = st.columns(3)
+
+m1.metric(
+    "Average Days Since Cycle Count",
+    f"{avg_days:.1f}" if not np.isnan(avg_days) else "N/A"
+)
+
+m2.metric(
+    "Max Days Since Cycle Count",
+    int(max_days) if not np.isnan(max_days) else 0
+)
+
+m3.metric(
+    "Meds Never Cycle Counted",
+    int(never_counted)
+)
+
+st.divider()
+
+# ----------------------------------------------------
+# 8️⃣ Detailed Table
+# ----------------------------------------------------
+
+st.subheader("🔍 Post-Cycle Return Activity")
+
+st.dataframe(
+    tracker[[
         "med_id",
         "med_desc",
-        "drug_name",
-        "trade_name",
-        "carousel_location"
+        "carousel_location",
+        "return_date",
+        "cycle_date",
+        "days_since_cycle",
+        "user_name",
+        "qty"
     ]]
-
-    # Drop rows missing med_id
-    df_master = df_master.dropna(subset=["med_id"])
-
-    # Strip whitespace
-    df_master["med_id"] = df_master["med_id"].astype(str).str.strip()
-    df_master["carousel_location"] = df_master["carousel_location"].astype(str).str.strip()
-
-    st.subheader("Preview")
-    st.dataframe(df_master.head(), use_container_width=True)
-
-    st.write(f"Total rows detected: {len(df_master)}")
-
-    # ----------------------------
-    # 3️⃣ Upload To Neon
-    # ----------------------------
-    if st.button("🚀 Replace Master Mapping Table"):
-
-        with engine.begin() as conn:
-            conn.execute(text("DROP TABLE IF EXISTS carousel_master_mapping"))
-
-            conn.execute(text("""
-                CREATE TABLE carousel_master_mapping (
-                    med_id TEXT PRIMARY KEY,
-                    med_desc TEXT,
-                    drug_name TEXT,
-                    trade_name TEXT,
-                    carousel_location TEXT
-                )
-            """))
-
-        df_master.to_sql(
-            "carousel_master_mapping",
-            engine,
-            if_exists="append",
-            index=False
-        )
-
-        st.success("✅ Master mapping uploaded successfully.")
+    .sort_values("days_since_cycle", ascending=False),
+    use_container_width=True
+)
