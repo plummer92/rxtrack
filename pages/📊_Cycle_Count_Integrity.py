@@ -42,6 +42,9 @@ if df_pharm.empty:
 df_pharm = df_pharm.copy()
 df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
 
+with st.expander("🔍 Distinct Destination Values"):
+    st.write(df_pharm["destination"].dropna().unique()[:50])
+
 
 # ----------------------------------------------------
 # 3️⃣ Identify Cycle Counts (priority)
