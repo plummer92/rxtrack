@@ -14,7 +14,7 @@ st.header("📊 Cycle Count Day Tracker")
 st.caption("Tracking days since last cycle count and identifying risk exposure.")
 
 # ----------------------------------------------------
-# 1️⃣ Independent Date Filter
+# 1️⃣ Date Filter
 # ----------------------------------------------------
 
 col1, col2 = st.columns(2)
@@ -26,7 +26,7 @@ if start_date > end_date:
     st.stop()
 
 # ----------------------------------------------------
-# 2️⃣ Load FULL Historical Data
+# 2️⃣ Load Historical Workflow Data
 # ----------------------------------------------------
 
 df_events, _, df_pharm, _, _ = load_data(
@@ -42,7 +42,7 @@ df_pharm = df_pharm.copy()
 df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
 
 # ----------------------------------------------------
-# 3️⃣ Identify Cycle Count Events
+# 3️⃣ Cycle Count Events
 # ----------------------------------------------------
 
 cycle_counts = df_pharm[
@@ -67,7 +67,7 @@ latest_cycle = (
 )
 
 # ----------------------------------------------------
-# 4️⃣ Identify Return Activity
+# 4️⃣ Return / Restock Activity
 # ----------------------------------------------------
 
 returns = df_pharm[
@@ -111,24 +111,29 @@ tracker["days_since_cycle"] = (
 tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
 
 # ----------------------------------------------------
-# 6️⃣ Pull Master Carousel Mapping
+# 6️⃣ Pull Master Carousel Mapping (FIXED METHOD)
 # ----------------------------------------------------
 
 with engine.connect() as conn:
-    df_master = pd.read_sql(
-        """
-        SELECT med_id, carousel_location
-        FROM carousel_master_mapping
-        WHERE carousel_location LIKE 'CAR%'
-        """,
-        conn
+    result = conn.execute(
+        text("""
+            SELECT med_id, carousel_location
+            FROM carousel_master_mapping
+            WHERE carousel_location LIKE 'CAR%'
+        """)
     )
+    rows = result.fetchall()
+    df_master = pd.DataFrame(rows, columns=result.keys())
 
-tracker = tracker.merge(
-    df_master,
-    on="med_id",
-    how="left"
-)
+# Safe merge
+if not df_master.empty:
+    tracker = tracker.merge(
+        df_master,
+        on="med_id",
+        how="left"
+    )
+else:
+    tracker["carousel_location"] = np.nan
 
 # ----------------------------------------------------
 # 7️⃣ Executive Metrics
@@ -163,17 +168,21 @@ st.divider()
 
 st.subheader("🔍 Post-Cycle Return Activity")
 
+display_cols = [
+    "med_id",
+    "med_desc",
+    "carousel_location",
+    "return_date",
+    "cycle_date",
+    "days_since_cycle",
+    "user_name",
+    "qty"
+]
+
+existing_cols = [col for col in display_cols if col in tracker.columns]
+
 st.dataframe(
-    tracker[[
-        "med_id",
-        "med_desc",
-        "carousel_location",
-        "return_date",
-        "cycle_date",
-        "days_since_cycle",
-        "user_name",
-        "qty"
-    ]]
+    tracker[existing_cols]
     .sort_values("days_since_cycle", ascending=False),
     use_container_width=True
 )
