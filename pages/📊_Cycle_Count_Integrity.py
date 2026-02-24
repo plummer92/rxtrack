@@ -72,34 +72,36 @@ df_pharm[datetime_col] = pd.to_datetime(
 
 
 # ----------------------------------------------------
-# 4️⃣ Identify Cycle Counts (transaction_type)
+# 4️⃣ Identify Cycle Counts (priority OR transaction_type)
 # ----------------------------------------------------
 
-if "transaction_type" not in df_pharm.columns:
-    st.error("transaction_type column not found in Pharmacy Workflow data.")
-    st.stop()
+cycle_counts = pd.DataFrame()
 
-cycle_counts = df_pharm[
-    df_pharm["transaction_type"].astype(str).str.contains(
-        "cycle",
-        case=False,
-        na=False
-    )
-].copy()
+if "transaction_type" in df_pharm.columns:
+    cycle_counts = df_pharm[
+        df_pharm["transaction_type"].astype(str).str.contains(
+            "cycle",
+            case=False,
+            na=False
+        )
+    ].copy()
+
+elif "priority" in df_pharm.columns:
+    cycle_counts = df_pharm[
+        df_pharm["priority"].astype(str).str.contains(
+            "cycle",
+            case=False,
+            na=False
+        )
+    ].copy()
+
+else:
+    st.error("No transaction_type or priority column found.")
+    st.stop()
 
 if cycle_counts.empty:
     st.warning("No cycle count transactions found.")
     st.stop()
-
-cycle_counts["cycle_date"] = cycle_counts[datetime_col].dt.date
-
-# Latest cycle count per med_id
-latest_cycle = (
-    cycle_counts
-    .groupby("med_id")["cycle_date"]
-    .max()
-    .reset_index()
-)
 
 
 # ----------------------------------------------------
