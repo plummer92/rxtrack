@@ -10,8 +10,27 @@ st.set_page_config(
     layout="wide"
 )
 
-st.header("📊 Cycle Count Day Tracker")
-st.caption("Tracking days since last cycle count and identifying risk exposure.")
+st.header("📊 Cycle Count Integrity Dashboard")
+st.caption("Tracking days since last cycle count and mapping carousel locations.")
+
+# ----------------------------------------------------
+# 🔧 Normalization Function
+# ----------------------------------------------------
+
+def normalize(text):
+    if pd.isna(text):
+        return ""
+    return (
+        str(text)
+        .upper()
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("/", "")
+        .replace("(", "")
+        .replace(")", "")
+        .replace(".", "")
+        .strip()
+    )
 
 # ----------------------------------------------------
 # 1️⃣ Date Filter
@@ -26,7 +45,7 @@ if start_date > end_date:
     st.stop()
 
 # ----------------------------------------------------
-# 2️⃣ Load Workflow Data
+# 2️⃣ Load Pharmacy Workflow Data
 # ----------------------------------------------------
 
 df_events, _, df_pharm, _, _ = load_data(
@@ -42,7 +61,7 @@ df_pharm = df_pharm.copy()
 df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
 
 # ----------------------------------------------------
-# 3️⃣ Cycle Count Events
+# 3️⃣ Identify Cycle Counts
 # ----------------------------------------------------
 
 cycle_counts = df_pharm[
@@ -67,7 +86,7 @@ latest_cycle = (
 )
 
 # ----------------------------------------------------
-# 4️⃣ Return Activity
+# 4️⃣ Identify Return Activity
 # ----------------------------------------------------
 
 returns = df_pharm[
@@ -111,74 +130,30 @@ tracker["days_since_cycle"] = (
 tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
 
 # ----------------------------------------------------
-# 6️⃣ Pull Master Mapping (STRUCTURE SAFE)
+# 6️⃣ Load Master Carousel Mapping
 # ----------------------------------------------------
 
 with engine.connect() as conn:
     result = conn.execute(
-        text("""
-            SELECT *
-            FROM carousel_master_mapping
-            LIMIT 10
-        """)
+        text("SELECT * FROM carousel_master_mapping")
     )
     rows = result.fetchall()
     df_master = pd.DataFrame(rows, columns=result.keys())
 
-# ----------------------------------------------------
-# 🔎 SHOW STRUCTURE (NO ASSUMPTIONS)
-# ----------------------------------------------------
-
-st.divider()
-st.subheader("🔎 MASTER TABLE STRUCTURE")
-
-st.write("Columns in carousel_master_mapping:")
-st.write(df_master.columns.tolist())
-
-st.write("Sample rows from master mapping:")
-st.dataframe(df_master)
+if df_master.empty:
+    st.warning("Master carousel mapping table is empty.")
+    st.stop()
 
 # ----------------------------------------------------
-# 🔎 DEBUG BLOCK
+# 7️⃣ Description-Based Join (Harmonized)
 # ----------------------------------------------------
 
-st.divider()
-st.subheader("🔎 DEBUG: Key Alignment Check")
-
-st.write("Workflow med_id sample:")
-st.write(tracker["med_id"].unique()[:10])
-
-st.write("Master med_id sample:")
-st.write(df_master["med_id"].unique()[:10])
-
-if "drug_name" in df_master.columns:
-    st.write("Master drug_name sample:")
-    st.write(df_master["drug_name"].unique()[:10])
-
-if "med_desc" in df_master.columns:
-    st.write("Master med_desc sample:")
-    st.write(df_master["med_desc"].unique()[:10])
-
-workflow_ids = set(tracker["med_id"].unique())
-master_ids = set(df_master["med_id"].unique())
-
-st.write("Matches on med_id:", len(workflow_ids.intersection(master_ids)))
-
-if "drug_name" in df_master.columns:
-    drug_names = set(df_master["drug_name"].unique())
-    st.write("Matches on drug_name:", len(workflow_ids.intersection(drug_names)))
-
-if "med_desc" in df_master.columns:
-    desc_names = set(df_master["med_desc"].unique())
-    st.write("Matches on med_desc:", len(workflow_ids.intersection(desc_names)))
-
-# ----------------------------------------------------
-# 7️⃣ TEMPORARY MERGE (TRY med_id FIRST)
-# ----------------------------------------------------
+tracker["join_key"] = tracker["med_desc"].apply(normalize)
+df_master["join_key"] = df_master["med_desc"].apply(normalize)
 
 tracker = tracker.merge(
-    df_master[["med_id", "carousel_location"]],
-    on="med_id",
+    df_master[["join_key", "carousel_location"]],
+    on="join_key",
     how="left"
 )
 
@@ -189,8 +164,10 @@ tracker = tracker.merge(
 avg_days = tracker["days_since_cycle"].mean()
 max_days = tracker["days_since_cycle"].max()
 never_counted = tracker["never_cycle_counted"].sum()
+matched = tracker["carousel_location"].notna().sum()
+total = len(tracker)
 
-m1, m2, m3 = st.columns(3)
+m1, m2, m3, m4 = st.columns(4)
 
 m1.metric(
     "Average Days Since Cycle Count",
@@ -205,6 +182,11 @@ m2.metric(
 m3.metric(
     "Meds Never Cycle Counted",
     int(never_counted)
+)
+
+m4.metric(
+    "Carousel Match Rate",
+    f"{(matched/total*100):.1f}%" if total > 0 else "0%"
 )
 
 st.divider()
