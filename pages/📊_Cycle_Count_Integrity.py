@@ -42,9 +42,6 @@ if df_pharm.empty:
 df_pharm = df_pharm.copy()
 df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
 
-with st.expander("🔍 Unique Destinations In Returns"):
-    st.write(returns["destination"].unique())
-
 
 # ----------------------------------------------------
 # 3️⃣ Identify Cycle Counts (priority)
@@ -83,6 +80,9 @@ returns = df_pharm[
         na=False
     )
 ].copy()
+
+with st.expander("🔍 Unique Destinations In Returns"):
+    st.write(returns["destination"].unique())
 
 if returns.empty:
     st.warning("No return activity found.")
