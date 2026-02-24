@@ -10,16 +10,16 @@ st.set_page_config(
 )
 
 st.header("📊 Cycle Count Day Tracker")
-st.caption("Tracking days since last cycle count and post-cycle return activity.")
+st.caption("Tracking days since last cycle count, return activity, and current carousel location.")
 
 
 # ----------------------------------------------------
 # 1️⃣ Independent Date Filter
 # ----------------------------------------------------
 
-c1, c2 = st.columns(2)
-start_date = c1.date_input("Start Date")
-end_date = c2.date_input("End Date")
+col1, col2 = st.columns(2)
+start_date = col1.date_input("Start Date")
+end_date = col2.date_input("End Date")
 
 if start_date > end_date:
     st.error("Start date must be before end date.")
@@ -44,7 +44,7 @@ df_pharm["dt"] = pd.to_datetime(df_pharm["dt"], errors="coerce")
 
 
 # ----------------------------------------------------
-# 3️⃣ Identify Cycle Counts (priority)
+# 3️⃣ Identify Cycle Counts (priority column)
 # ----------------------------------------------------
 
 cycle_counts = df_pharm[
@@ -70,7 +70,7 @@ latest_cycle = (
 
 
 # ----------------------------------------------------
-# 4️⃣ Identify Returns / Restocks
+# 4️⃣ Identify Return / Restock Activity
 # ----------------------------------------------------
 
 returns = df_pharm[
@@ -80,9 +80,6 @@ returns = df_pharm[
         na=False
     )
 ].copy()
-
-with st.expander("🔍 Unique Destinations In Returns"):
-    st.write(returns["destination"].unique())
 
 if returns.empty:
     st.warning("No return activity found.")
@@ -101,7 +98,33 @@ if returns.empty:
 
 
 # ----------------------------------------------------
-# 5️⃣ Merge Cycle Baseline
+# 5️⃣ Get Latest Carousel Location Per Med
+# ----------------------------------------------------
+
+carousel_moves = df_pharm[
+    df_pharm["destination"].astype(str).str.startswith("CAR", na=False)
+].copy()
+
+carousel_moves = carousel_moves.sort_values("dt")
+
+latest_carousel = (
+    carousel_moves
+    .groupby("med_id")
+    .last()
+    .reset_index()[["med_id", "destination", "dt"]]
+)
+
+latest_carousel.rename(
+    columns={
+        "destination": "carousel_location",
+        "dt": "carousel_last_moved"
+    },
+    inplace=True
+)
+
+
+# ----------------------------------------------------
+# 6️⃣ Merge Everything Together
 # ----------------------------------------------------
 
 tracker = returns.merge(
@@ -110,18 +133,10 @@ tracker = returns.merge(
     how="left"
 )
 
-# ----------------------------------------------------
-# Extract Carousel Location
-# ----------------------------------------------------
-
-tracker["carousel_location"] = np.where(
-    tracker["destination"].astype(str).str.contains(
-        "CAR",
-        case=False,
-        na=False
-    ),
-    tracker["destination"],
-    None
+tracker = tracker.merge(
+    latest_carousel,
+    on="med_id",
+    how="left"
 )
 
 tracker["days_since_cycle"] = (
@@ -133,7 +148,7 @@ tracker["never_cycle_counted"] = tracker["cycle_date"].isna()
 
 
 # ----------------------------------------------------
-# 6️⃣ Executive Metrics
+# 7️⃣ Executive Metrics
 # ----------------------------------------------------
 
 avg_days = tracker["days_since_cycle"].mean()
@@ -141,16 +156,28 @@ max_days = tracker["days_since_cycle"].max()
 never_counted = tracker["never_cycle_counted"].sum()
 
 m1, m2, m3 = st.columns(3)
-m1.metric("Average Days Since Cycle Count",
-          f"{avg_days:.1f}" if not np.isnan(avg_days) else "N/A")
 
-m2.metric("Max Days Since Cycle Count",
-          int(max_days) if not np.isnan(max_days) else 0)
+m1.metric(
+    "Average Days Since Cycle Count",
+    f"{avg_days:.1f}" if not np.isnan(avg_days) else "N/A"
+)
 
-m3.metric("Meds Never Cycle Counted", int(never_counted))
+m2.metric(
+    "Max Days Since Cycle Count",
+    int(max_days) if not np.isnan(max_days) else 0
+)
+
+m3.metric(
+    "Meds Never Cycle Counted",
+    int(never_counted)
+)
 
 st.divider()
 
+
+# ----------------------------------------------------
+# 8️⃣ Detailed Table
+# ----------------------------------------------------
 
 st.subheader("🔍 Post-Cycle Return Activity")
 
@@ -159,12 +186,12 @@ st.dataframe(
         "med_id",
         "med_desc",
         "carousel_location",
+        "carousel_last_moved",
         "return_date",
         "cycle_date",
         "days_since_cycle",
         "user_name",
         "qty"
-    ]]
-    .sort_values("days_since_cycle", ascending=False),
+    ]].sort_values("days_since_cycle", ascending=False),
     width="stretch"
 )
