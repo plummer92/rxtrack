@@ -2,13 +2,15 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from sqlalchemy import text
-from App import load_data, engine
+from App import load_data, engine, render_sidebar
 
 st.set_page_config(
     page_title="Cycle Count Integrity",
     page_icon="📊",
     layout="wide"
 )
+
+start_date, end_date = render_sidebar()
 
 st.header("📊 Cycle Count Integrity Dashboard")
 st.caption("Tracking days since last cycle count, user accountability, and carousel location mapping.")
@@ -36,14 +38,8 @@ def normalize(text):
 # 1️⃣ Date Filter (from sidebar)
 # ----------------------------------------------------
 
-if 'start_date' not in st.session_state or 'end_date' not in st.session_state:
-    st.info("👈 Select a date range on the sidebar first.")
-    st.stop()
 
-start_date = st.session_state.start_date
-end_date = st.session_state.end_date
 
-st.caption(f"📅 Showing data from **{start_date}** to **{end_date}** — adjust range in the sidebar.")
 
 # ----------------------------------------------------
 # 2️⃣ Load Pharmacy Workflow Data
