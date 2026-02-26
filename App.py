@@ -597,6 +597,70 @@ def get_present_dates(min_dt, max_dt):
         return set(df[col_name].dt.date.dropna())
     return set()
 
+# --- SHARED SIDEBAR RENDERER ---
+def render_sidebar():
+    """Call this at the top of any page to always show the date range sidebar."""
+    n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
+
+    if 'start_date' not in st.session_state:
+        st.session_state.start_date = max_db - timedelta(days=14)
+    if 'end_date' not in st.session_state:
+        st.session_state.end_date = max_db
+
+    with st.sidebar:
+        st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
+        st.title("RxTrack v13.4")
+        st.caption("Pharmacy Workflow Intelligence")
+
+        st.markdown("### 📅 Analysis Window")
+        filter_mode = st.radio("Filter Mode", ["Range", "Week", "Day"], horizontal=True, label_visibility="collapsed", key="sidebar_filter")
+
+        if filter_mode == "Range":
+            date_range = st.slider(
+                "Select Range:",
+                min_value=min_db,
+                max_value=max_db,
+                value=(st.session_state.start_date, st.session_state.end_date),
+                format="MM/DD/YY"
+            )
+            st.session_state.start_date, st.session_state.end_date = date_range
+
+        elif filter_mode == "Week":
+            week_start = st.date_input("Select Week Start:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
+            st.session_state.start_date = week_start
+            st.session_state.end_date = week_start + timedelta(days=6)
+
+        else:
+            single_day = st.date_input("Select Day:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
+            st.session_state.start_date = single_day
+            st.session_state.end_date = single_day
+
+        st.divider()
+
+        with st.expander("💾 Database Status", expanded=False):
+            c1, c2 = st.columns(2)
+            c1.metric("Pyxis Events", f"{n_events:,}")
+            c2.metric("Pharm Orders", f"{n_pharm:,}")
+            c3, c4 = st.columns(2)
+            c3.metric("Sched. Shifts", f"{n_sched:,}")
+            c4.metric("Time Punches", f"{n_att:,}")
+
+            present_dates = get_present_dates(min_db, max_db)
+            if min_db and max_db and min_db <= max_db:
+                delta = (max_db - min_db).days
+                cal_start = max_db - timedelta(days=90) if delta > 90 else min_db
+                cal_html = '<div class="cal-grid">'
+                curr = cal_start
+                while curr <= max_db:
+                    color = "cal-present" if curr in present_dates else "cal-missing"
+                    cal_html += f'<div class="cal-day {color}" title="{curr}"></div>'
+                    curr += timedelta(days=1)
+                cal_html += '</div>'
+                st.markdown(cal_html, unsafe_allow_html=True)
+
+    return st.session_state.start_date, st.session_state.end_date
+
+
 # --- MAIN APP LOGIC ---
 init_db()
 
@@ -766,7 +830,6 @@ with st.sidebar:
 
  
 # --- EXECUTE DATA LOADER ---
-# Load data once for use across all App.py logic
 try:
     df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
 except Exception as e:
