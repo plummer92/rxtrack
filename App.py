@@ -183,7 +183,7 @@ def init_db():
 def run_query(query, params=None):
     """Executes a SELECT query and returns a pandas DataFrame."""
     try:
-        with db_cursor() as (conn, cur):
+        with engine.connect() as conn:
             return pd.read_sql(query, conn, params=params)
     except Exception:
         return pd.DataFrame()
