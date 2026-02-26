@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from App import load_data, render_sidebar
+from App import load_data, engine, render_sidebar
 
 st.set_page_config(page_title="RxBrain", page_icon="🧠", layout="wide")
 
@@ -30,14 +30,29 @@ recent_24h = df_events[df_events["dt"] > (last_time - pd.Timedelta(hours=24))]
 if recent_24h.empty:
     st.info("No activity in the last 24 hours to calculate burn rate.")
 else:
+    # Pull ending_qty separately since load_data doesn't include it
+    with engine.connect() as conn:
+        current_inv = pd.read_sql("""
+            SELECT device, med_desc, ending_qty
+            FROM events
+            WHERE dt = (
+                SELECT MAX(dt) FROM events e2
+                WHERE e2.device = events.device AND e2.med_desc = events.med_desc
+            )
+        """, conn)
+
     burn = (
         recent_24h.groupby(["device", "med_desc"])
-        .agg(pulled=("qty", "sum"), current_inv=("ending_qty", "last"))
+        .agg(pulled=("qty", "sum"))
         .reset_index()
     )
-    burn["hrs_left"] = burn["current_inv"] / (
+
+    burn = burn.merge(current_inv, on=["device", "med_desc"], how="left")
+
+    burn["hrs_left"] = burn["ending_qty"] / (
         (burn["pulled"] / 24).replace(0, np.nan)
     )
+
     critical = burn[burn["hrs_left"] < 12].sort_values("hrs_left")
 
     if not critical.empty:
@@ -45,7 +60,7 @@ else:
         st.dataframe(critical, use_container_width=True, column_config={
             "hrs_left": st.column_config.NumberColumn("Hours Left", format="%.1f"),
             "pulled": st.column_config.NumberColumn("Units Pulled (24h)", format="%.0f"),
-            "current_inv": st.column_config.NumberColumn("Current Inventory", format="%.0f"),
+            "ending_qty": st.column_config.NumberColumn("Current Inventory", format="%.0f"),
         })
     else:
         st.success("✅ No immediate stockout risks detected.")
