@@ -1,13 +1,15 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data
+from App import load_data, render_sidebar
 
 st.set_page_config(
     page_title="Return Reconciliation",
     page_icon="🔄",
     layout="wide"
 )
+
+start_date, end_date = render_sidebar()
 
 st.header("🔄 Closed-Loop Return Integrity Engine")
 st.caption("Validating Pyxis unload workflow against Pharmacy return/restock activity.")
