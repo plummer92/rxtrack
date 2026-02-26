@@ -25,91 +25,13 @@ from sqlalchemy import create_engine
 import os
 
 
-DATABASE_URL = st.secrets["neon"]["db_url"]
+DATABASE_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?"
 
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=300
 )
-# --- CONFIGURATION ---
-st.set_page_config(
-    page_title="RxTrack: Workforce & Efficiency", 
-    page_icon="🏥",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Suppress DB/Pandas warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
-
-# --- INITIALIZE VARIABLES (Prevents NameError) ---
-df_events = pd.DataFrame()
-df_config = pd.DataFrame()
-df_pharm = pd.DataFrame()
-df_sched = pd.DataFrame()
-df_att = pd.DataFrame()
-
-# --- CONSTANTS ---
-NARC_TERMS = [
-    "OXYCODONE", "MORPHINE", "FENTANYL", "HYDROMORPHONE", "HYDROCODONE", 
-    "LORAZEPAM", "MIDAZOLAM", "DIAZEPAM", "ALPRAZOLAM", "CODEINE", 
-    "METHADONE", "KETAMINE", "TRAMADOL", "ZOLPIDEM", "PHENOBARBITAL", 
-    "BUPRENORPHINE", "LACOSAMIDE", "VIMPAT", "PREGABALIN", "LYRICA", 
-    "CHLORDIAZEPOXIDE", "LIBRIUM", "CLONAZEPAM", "KLONOPIN"
-]
-
-ADMIN_USERS = ['emily', 'joe', 'krista']
-
-# Nickname Mappings
-NAME_MAPPINGS = {
-    "phi": "ali", "ho": "ali", "rebekah": "bekah",
-    "nugent": "kathy", "kathleen": "kathy",
-    "spain": "dee", "deloris": "dee",
-    "jabusch": "dan", "daniel": "dan",
-    "nicholas": "nick"     
-}
-
-AMBIGUOUS_NAMES = [
-    "melissa", "emily", "sarah", "megan", "erin", "kyle", 
-    "jessica", "andy", "heather", "michelle", "taylor"
-]
-
-# --- CUSTOM CSS ---
-st.markdown("""
-    <style>
-    .metric-card { 
-        background-color: #ffffff; 
-        padding: 20px; 
-        border-radius: 10px; 
-        border-left: 5px solid #4CAF50; 
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1); 
-        margin-bottom: 10px;
-    }
-    .metric-card h3 { 
-        color: #1f2937; 
-        margin: 0; 
-        font-size: 26px; 
-        font-weight: 700; 
-    }
-    .metric-card p { 
-        color: #6b7280; 
-        margin: 0; 
-        font-size: 14px; 
-        font-weight: 500; 
-        text-transform: uppercase; 
-        letter-spacing: 0.5px;
-    }
-    .cal-grid { display: flex; flex-wrap: wrap; gap: 3px; max-width: 100%; margin-top: 10px; }
-    .cal-day { 
-        width: 12px; height: 12px; 
-        border-radius: 2px; 
-        background-color: #e5e7eb;
-    }
-    .cal-present { background-color: #4CAF50; } /* Green */
-    .cal-missing { background-color: #F87171; } /* Red */
-    </style>
-    """, unsafe_allow_html=True)
 
 # --- DATABASE HELPERS ---
 @contextlib.contextmanager
@@ -183,7 +105,7 @@ def init_db():
 def run_query(query, params=None):
     """Executes a SELECT query and returns a pandas DataFrame."""
     try:
-        with engine.connect() as conn:
+        with db_cursor() as (conn, cur):
             return pd.read_sql(query, conn, params=params)
     except Exception:
         return pd.DataFrame()
@@ -490,32 +412,31 @@ def load_data(start_date, end_date):
             SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, 
                    e.discrepancy_qty, e.discrepancy_reason, c.cost_per_unit, e.pk 
             FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
-            WHERE e.dt::date BETWEEN :start AND :end
+            WHERE e.dt::date BETWEEN %s AND %s
         """,
         "config": """
             SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, 
                    min_qty, max_qty, is_standard 
-            FROM config_events WHERE dt::date BETWEEN :start AND :end
+            FROM config_events WHERE dt::date BETWEEN %s AND %s
         """,
         "pharm": """
             SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
-            FROM pharmacy_orders WHERE dt::date BETWEEN :start AND :end
+            FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s
         """,
         "schedule": """
             SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note
-            FROM staff_schedule WHERE dt BETWEEN :start AND :end
+            FROM staff_schedule WHERE dt BETWEEN %s AND %s
         """,
         "attendance": """
             SELECT pk, raw_name, dt_date, start_dt, end_dt
-            FROM attendance_punches WHERE dt_date BETWEEN :start AND :end
+            FROM attendance_punches WHERE dt_date BETWEEN %s AND %s
         """
     }
     
     results = {}
-    params = {"start": start_date, "end": end_date}
-    param_queries = {k: v.replace("%s", ":start", 1).replace("%s", ":end", 1) for k, v in queries.items()}
-    with engine.connect() as conn:
-        for key, sql in param_queries.items():
+    params = (start_date, end_date)
+    with db_cursor() as (conn, cur):
+        for key, sql in queries.items():
             try:
                 results[key] = pd.read_sql(sql, conn, params=params)
                 if not results[key].empty and 'dt' in results[key].columns:
@@ -598,6 +519,7 @@ def get_present_dates(min_dt, max_dt):
         return set(df[col_name].dt.date.dropna())
     return set()
 
+
 # --- SHARED SIDEBAR RENDERER ---
 def render_sidebar():
     """Call this at the top of any page to always show the date range sidebar."""
@@ -662,14 +584,96 @@ def render_sidebar():
     return st.session_state.start_date, st.session_state.end_date
 
 
+
 # --- MAIN APP LOGIC ---
-# init_db and all page rendering only runs when App.py is the active page.
-# When other pages import App.py, they only get the functions above.
+# Only runs when App.py is the active Streamlit page.
+# When other pages import App.py, they only get the functions above (including render_sidebar).
 import sys as _sys
-_running_scripts = [arg for arg in _sys.argv if arg.endswith('.py')]
-_is_main = any('App.py' in s for s in _running_scripts)
+_is_main = any(s.endswith('App.py') for s in _sys.argv)
 
 if _is_main:
+    # Apply page config and CSS only when running as main page
+
+    # --- CONFIGURATION ---
+    st.set_page_config(
+        page_title="RxTrack: Workforce & Efficiency", 
+        page_icon="🏥",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+
+    # Suppress DB/Pandas warnings
+    warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
+
+    # --- INITIALIZE VARIABLES (Prevents NameError) ---
+    df_events = pd.DataFrame()
+    df_config = pd.DataFrame()
+    df_pharm = pd.DataFrame()
+    df_sched = pd.DataFrame()
+    df_att = pd.DataFrame()
+
+    # --- CONSTANTS ---
+    NARC_TERMS = [
+        "OXYCODONE", "MORPHINE", "FENTANYL", "HYDROMORPHONE", "HYDROCODONE", 
+        "LORAZEPAM", "MIDAZOLAM", "DIAZEPAM", "ALPRAZOLAM", "CODEINE", 
+        "METHADONE", "KETAMINE", "TRAMADOL", "ZOLPIDEM", "PHENOBARBITAL", 
+        "BUPRENORPHINE", "LACOSAMIDE", "VIMPAT", "PREGABALIN", "LYRICA", 
+        "CHLORDIAZEPOXIDE", "LIBRIUM", "CLONAZEPAM", "KLONOPIN"
+    ]
+
+    ADMIN_USERS = ['emily', 'joe', 'krista']
+
+    # Nickname Mappings
+    NAME_MAPPINGS = {
+        "phi": "ali", "ho": "ali", "rebekah": "bekah",
+        "nugent": "kathy", "kathleen": "kathy",
+        "spain": "dee", "deloris": "dee",
+        "jabusch": "dan", "daniel": "dan",
+        "nicholas": "nick"     
+    }
+
+    AMBIGUOUS_NAMES = [
+        "melissa", "emily", "sarah", "megan", "erin", "kyle", 
+        "jessica", "andy", "heather", "michelle", "taylor"
+    ]
+
+    # --- CUSTOM CSS ---
+    st.markdown("""
+        <style>
+        .metric-card { 
+            background-color: #ffffff; 
+            padding: 20px; 
+            border-radius: 10px; 
+            border-left: 5px solid #4CAF50; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1); 
+            margin-bottom: 10px;
+        }
+        .metric-card h3 { 
+            color: #1f2937; 
+            margin: 0; 
+            font-size: 26px; 
+            font-weight: 700; 
+        }
+        .metric-card p { 
+            color: #6b7280; 
+            margin: 0; 
+            font-size: 14px; 
+            font-weight: 500; 
+            text-transform: uppercase; 
+            letter-spacing: 0.5px;
+        }
+        .cal-grid { display: flex; flex-wrap: wrap; gap: 3px; max-width: 100%; margin-top: 10px; }
+        .cal-day { 
+            width: 12px; height: 12px; 
+            border-radius: 2px; 
+            background-color: #e5e7eb;
+        }
+        .cal-present { background-color: #4CAF50; } /* Green */
+        .cal-missing { background-color: #F87171; } /* Red */
+        </style>
+        """, unsafe_allow_html=True)
+
+    # --- MAIN APP LOGIC ---
     init_db()
 
     # 1. Define your internal pages (those not yet moved to the /pages folder)
