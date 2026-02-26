@@ -1,24 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data, seconds_to_mmss 
+from App import load_data, seconds_to_mmss, render_sidebar
 
 st.set_page_config(page_title="Session Explorer", page_icon="🔍", layout="wide")
+
+start_date, end_date = render_sidebar()
+
 st.header("🔍 Unified Session Explorer")
 st.caption("Analyzing chronological work blocks across Pyxis and Pharmacy systems.")
 
 # ----------------------------------------------------
 # Date Selection (from sidebar)
 # ----------------------------------------------------
-
-if 'start_date' not in st.session_state or 'end_date' not in st.session_state:
-    st.info("👈 Select a date range on the sidebar first.")
-    st.stop()
-
-start_date = st.session_state.start_date
-end_date = st.session_state.end_date
-
-st.caption(f"📅 Showing data from **{start_date}** to **{end_date}** — adjust range in the sidebar.")
 
 df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
