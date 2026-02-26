@@ -490,31 +490,32 @@ def load_data(start_date, end_date):
             SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, 
                    e.discrepancy_qty, e.discrepancy_reason, c.cost_per_unit, e.pk 
             FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
-            WHERE e.dt::date BETWEEN %s AND %s
+            WHERE e.dt::date BETWEEN :start AND :end
         """,
         "config": """
             SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, 
                    min_qty, max_qty, is_standard 
-            FROM config_events WHERE dt::date BETWEEN %s AND %s
+            FROM config_events WHERE dt::date BETWEEN :start AND :end
         """,
         "pharm": """
             SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
-            FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s
+            FROM pharmacy_orders WHERE dt::date BETWEEN :start AND :end
         """,
         "schedule": """
             SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note
-            FROM staff_schedule WHERE dt BETWEEN %s AND %s
+            FROM staff_schedule WHERE dt BETWEEN :start AND :end
         """,
         "attendance": """
             SELECT pk, raw_name, dt_date, start_dt, end_dt
-            FROM attendance_punches WHERE dt_date BETWEEN %s AND %s
+            FROM attendance_punches WHERE dt_date BETWEEN :start AND :end
         """
     }
     
     results = {}
-    params = (start_date, end_date)
-    with db_cursor() as (conn, cur):
-        for key, sql in queries.items():
+    params = {"start": start_date, "end": end_date}
+    param_queries = {k: v.replace("%s", ":start", 1).replace("%s", ":end", 1) for k, v in queries.items()}
+    with engine.connect() as conn:
+        for key, sql in param_queries.items():
             try:
                 results[key] = pd.read_sql(sql, conn, params=params)
                 if not results[key].empty and 'dt' in results[key].columns:
