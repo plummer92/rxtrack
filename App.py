@@ -25,7 +25,7 @@ from sqlalchemy import create_engine
 import os
 
 
-DATABASE_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?"
+DATABASE_URL = st.secrets["neon"]["db_url"]
 
 engine = create_engine(
     DATABASE_URL,
@@ -771,14 +771,6 @@ try:
     df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
 except Exception as e:
     st.error(f"Failed to load data: {e}")
-    
-# --- EXECUTE DATA LOADER ---
-# This ensures variables are always populated with something (even if empty)
-if 'start_date' in locals() and 'end_date' in locals():
-    try:
-        df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
-    except Exception as e:
-        st.error(f"Failed to load data: {e}")
 
 # 1. OVERVIEW
 if selected_page == "📊 Overview":
