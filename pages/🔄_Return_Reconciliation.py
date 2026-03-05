@@ -95,12 +95,12 @@ def remove_dummy(df):
 def get_control_ids():
     """Query CW vault med_ids directly — no import cache dependency."""
     try:
+        from sqlalchemy import text
         with engine.connect() as conn:
-            df = pd.read_sql(
-                "SELECT DISTINCT med_id FROM carousel_master_mapping WHERE carousel_location LIKE 'CW%'",
-                conn
-            )
-        ids = set(df["med_id"].dropna().str.strip().str.upper())
+            result = conn.execute(text(
+                "SELECT DISTINCT med_id FROM carousel_master_mapping WHERE carousel_location LIKE 'CW%'"
+            ))
+            ids = set(row[0].strip().upper() for row in result if row[0])
         if not ids:
             st.warning("⚠️ No controlled meds found in carousel mapping. Is the master mapping uploaded?")
         return ids
