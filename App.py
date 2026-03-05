@@ -524,16 +524,18 @@ def get_present_dates(min_dt, max_dt):
 # --- CONTROLS LOOKUP (DB-DRIVEN) ---
 @st.cache_data(ttl=3600)
 def load_control_med_ids():
-    """Returns a set of med_ids stored in CW (controlled) carousel locations.
+    """Returns a set of med_ids stored in CW2263 (controlled substance vault).
     Automatically stays current as the master mapping is updated."""
     try:
         with engine.connect() as conn:
             df = pd.read_sql(
-                "SELECT DISTINCT med_id FROM carousel_master_mapping WHERE carousel_location ILIKE 'CW%'",
+                "SELECT DISTINCT med_id FROM carousel_master_mapping WHERE carousel_location LIKE 'CW%'",
                 conn
             )
-        return set(df["med_id"].dropna().str.strip().str.upper())
-    except Exception:
+        ids = set(df["med_id"].dropna().str.strip().str.upper())
+        return ids
+    except Exception as e:
+        st.warning(f"⚠️ Could not load controlled med list: {e}. Falling back to name-based filter.")
         return set()
 
 
@@ -695,7 +697,7 @@ if _is_main:
 
     # 1. Define your internal pages (those not yet moved to the /pages folder)
     PAGES = [
-        "📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🏥 Pharmacy Workflow", "🔄 Return Reconciliation", "⚖️ Tech Comparison", 
+        "📊 Overview", "🎓 Student Project", "🏆 Shift Leaderboard", "🚀 Process Mining", "🛡️ Compliance", "📥 Pends Analyzer", "🚚 Load/Unload", "⚡ Efficiency", "🏥 Pharmacy Workflow", "⚖️ Tech Comparison", 
         "📈 Tech Progression", "📅 Attendance"
     ]
 
@@ -1078,90 +1080,6 @@ if _is_main:
             inefficient = effic[(effic['Trips'] >= 3) & (effic['Avg_Qty'] < 3)].sort_values('Trips', ascending=False).head(20)
             fig = px.bar(inefficient, x='Trips', y='med_desc', orientation='h', title="High Frequency, Low Yield Refills", color='Trips')
             st.plotly_chart(fig, use_container_width=True)
-
-    # 10. RETURN RECONCILIATION
-    elif selected_page == "🔄 Return Reconciliation":
-        st.markdown("### 🔄 Unload vs. Return Reconciliation")
-        filter_narc = st.checkbox("Exclude Controlled Substances", value=True)
-        if not df_events.empty and not df_pharm.empty:
-            raw_unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
-            raw_returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
-            if filter_narc:
-                control_ids = load_control_med_ids()
-                if control_ids:
-                    raw_unloads = raw_unloads[~raw_unloads['med_id'].str.strip().str.upper().isin(control_ids)]
-                    raw_returns = raw_returns[~raw_returns['med_id'].str.strip().str.upper().isin(control_ids)]
-                else:
-                    pat = '|'.join(NARC_TERMS)
-                    raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
-                    raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
-            raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
-            raw_unloads['Date'] = raw_unloads['dt'].dt.date
-            raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
-            raw_returns['Date'] = raw_returns['dt'].dt.date
-            grp_unload = raw_unloads.groupby(['Date', 'norm_med_id']).agg({'qty': 'sum', 'med_desc': 'first', 'event_type': lambda x: ", ".join(sorted(x.astype(str).unique()))}).reset_index()
-            grp_return = raw_returns.groupby(['Date', 'norm_med_id']).agg({'qty': 'sum', 'med_desc': 'first'}).reset_index()
-            merged = pd.merge(grp_unload, grp_return, on=['Date', 'norm_med_id'], how='outer', suffixes=('_floor', '_pharm'))
-            merged['med_desc'] = merged['med_desc_floor'].fillna(merged['med_desc_pharm']).fillna("Unknown Med")
-            merged['qty_floor'] = merged['qty_floor'].fillna(0)
-            merged['qty_pharm'] = merged['qty_pharm'].fillna(0)
-            merged['event_type'] = merged['event_type'].fillna("Manual Pharm Return")
-            merged['Variance'] = merged['qty_pharm'] - merged['qty_floor']
-            merged['Status'] = np.where(merged['Variance'] == 0, "✅ Matched", "❌ Variance")
-            merged.rename(columns={'event_type': 'Floor Action', 'qty_floor': 'Qty Unloaded', 'qty_pharm': 'Qty Returned'}, inplace=True)
-
-            total_items = len(merged)
-            matched_items = len(merged[merged['Variance'] == 0])
-            match_rate = (matched_items / total_items * 100) if total_items > 0 else 0
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Match Rate", f"{match_rate:.1f}%")
-            c2.metric("Total Items", total_items)
-            c3.metric("Discrepancies", total_items - matched_items, delta_color="inverse")
-            c4.metric("Net Variance", f"{merged['Variance'].sum():.0f}")
-
-            daily = merged.groupby(['Date', 'Status']).size().unstack(fill_value=0)
-            for col in ["✅ Matched", "❌ Variance"]:
-                if col not in daily.columns: daily[col] = 0
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=daily.index, y=daily['✅ Matched'], name='Matched', marker_color='#4CAF50'))
-            fig.add_trace(go.Bar(x=daily.index, y=daily['❌ Variance'], name='Variance', marker_color='#F44336'))
-            fig.update_layout(barmode='stack', title="Daily Reconciliation Performance", height=300, margin=dict(l=0, r=0, t=30, b=0))
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.divider()
-            show_all = st.checkbox("Show Matched Rows (Variance = 0)", value=False)
-            display_df = merged.copy()
-            if not show_all:
-                display_df = display_df[display_df['Variance'] != 0]
-            cols_display = ['Status', 'Date', 'med_desc', 'Floor Action', 'Qty Unloaded', 'Qty Returned', 'Variance']
-            st.caption("👆 Click a row to drill down into specific timestamps.")
-            event = st.dataframe(display_df[cols_display].sort_values(['Date', 'Variance']), use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True, column_config={"Date": st.column_config.DateColumn("Date"), "Variance": st.column_config.NumberColumn("Variance", format="%.0f")})
-
-            if len(event.selection.rows) > 0:
-                selected_index = event.selection.rows[0]
-                row = display_df.iloc[selected_index]
-                sel_date = row['Date']
-                sel_med_id = row['norm_med_id'] 
-                sel_med_desc = row['med_desc']
-                st.divider()
-                st.subheader(f"🔎 Audit Trail: {sel_med_desc}")
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown("#### 🏥 Floor (Pyxis)")
-                    floor_details = raw_unloads[(raw_unloads['Date'] == sel_date) & (raw_unloads['norm_med_id'] == sel_med_id)].sort_values('dt')
-                    if not floor_details.empty:
-                        st.dataframe(floor_details[['dt', 'device', 'user_name', 'qty', 'event_type']], use_container_width=True, column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"), "qty": st.column_config.NumberColumn("Qty", format="%.0f")}, hide_index=True)
-                    else:
-                        st.info("No Pyxis records found.")
-                with c2:
-                    st.markdown("#### 💊 Pharmacy (Carousel/Packager)")
-                    pharm_details = raw_returns[(raw_returns['Date'] == sel_date) & (raw_returns['norm_med_id'] == sel_med_id)].sort_values('dt')
-                    if not pharm_details.empty:
-                        st.dataframe(pharm_details[['dt', 'destination', 'user_name', 'qty']], use_container_width=True, column_config={"dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"), "qty": st.column_config.NumberColumn("Qty", format="%.0f"), "destination": "Location"}, hide_index=True)
-                    else:
-                        st.info("No Pharmacy scan records found.")
-        else:
-            st.info("Need both Pyxis Transaction Reports and Pharmacy Workflow Reports to perform reconciliation.")
 
     # 11. TECH COMPARISON
     elif selected_page == "⚖️ Tech Comparison":
