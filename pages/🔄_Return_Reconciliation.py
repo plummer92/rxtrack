@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data, render_sidebar
+from App import load_data, render_sidebar, load_control_med_ids
 
 st.set_page_config(page_title="Return Reconciliation", page_icon="🔄", layout="wide")
 
@@ -92,10 +92,9 @@ def remove_dummy(df):
     return df[~df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)]
 
 def remove_controls(df):
-    if df.empty or "med_desc" not in df.columns: return df
-    return df[~df["med_desc"].astype(str).str.contains(
-        "morphine|hydromorphone|oxycodone|fentanyl|amphetamine|methylphenidate|CII|CIII|CIV|CV",
-        case=False, na=False)]
+    if df.empty or "med_id" not in df.columns: return df
+    control_ids = load_control_med_ids()
+    return df[~df["med_id"].astype(str).str.strip().str.upper().isin(control_ids)]
 
 if exclude_dummy:
     pyxis_unload = remove_dummy(pyxis_unload)
