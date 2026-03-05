@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data, render_sidebar, load_control_med_ids
+from App import load_data, render_sidebar, engine
 
 st.set_page_config(page_title="Return Reconciliation", page_icon="🔄", layout="wide")
 
@@ -91,9 +91,28 @@ def remove_dummy(df):
     if df.empty or "med_desc" not in df.columns: return df
     return df[~df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)]
 
+@st.cache_data(ttl=3600)
+def get_control_ids():
+    """Query CW vault med_ids directly — no import cache dependency."""
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                "SELECT DISTINCT med_id FROM carousel_master_mapping WHERE carousel_location LIKE 'CW%'",
+                conn
+            )
+        ids = set(df["med_id"].dropna().str.strip().str.upper())
+        if not ids:
+            st.warning("⚠️ No controlled meds found in carousel mapping. Is the master mapping uploaded?")
+        return ids
+    except Exception as e:
+        st.warning(f"⚠️ Could not load controlled med list: {e}")
+        return set()
+
 def remove_controls(df):
     if df.empty or "med_id" not in df.columns: return df
-    control_ids = load_control_med_ids()
+    control_ids = get_control_ids()
+    if not control_ids:
+        return df  # nothing to filter, return as-is
     return df[~df["med_id"].astype(str).str.strip().str.upper().isin(control_ids)]
 
 if exclude_dummy:
