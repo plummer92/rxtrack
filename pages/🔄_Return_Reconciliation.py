@@ -35,13 +35,24 @@ pyxis_unload = pd.DataFrame()
 pharm_all = pd.DataFrame()
 
 if not df_events.empty and "event_type" in df_events.columns:
-    pyxis_unload = df_events[
-        df_events["event_type"].astype(str).str.contains("empty|unload|return bin", case=False, na=False)
+    pyxis_all_raw = df_events[
+        df_events["event_type"].astype(str).str.contains("empty|unload|return bin", case=False, na=False) &
+        ~df_events["event_type"].astype(str).str.contains("cancelled", case=False, na=False)
+    ].copy()
+
+    # Unload Eject = broken cassette, not a real medication removal — split out for reference
+    unload_eject = pyxis_all_raw[
+        pyxis_all_raw["event_type"].astype(str).str.contains("eject", case=False, na=False)
+    ].copy()
+    pyxis_unload = pyxis_all_raw[
+        ~pyxis_all_raw["event_type"].astype(str).str.contains("eject", case=False, na=False)
     ].copy()
     if "device" in pyxis_unload.columns:
         pyxis_unload = pyxis_unload[
             ~pyxis_unload["device"].astype(str).str.contains("cass|patient", case=False, na=False)
         ]
+else:
+    unload_eject = pd.DataFrame()
 
 if not df_pharm.empty:
     pharm_df = df_pharm.copy()
@@ -132,8 +143,9 @@ def ensure_date_column(df):
 
 pyxis_unload = ensure_date_column(pyxis_unload)
 pharm_return = ensure_date_column(pharm_return)
-inv_moves = ensure_date_column(inv_moves)
-restocks  = ensure_date_column(restocks)
+inv_moves    = ensure_date_column(inv_moves)
+restocks     = ensure_date_column(restocks)
+unload_eject = ensure_date_column(unload_eject)
 
 # --- Aggregate ---
 
@@ -166,16 +178,18 @@ total_unload = recon["qty_pyxis"].sum()
 total_return = recon["qty_pharm"].sum()
 recon_pct = (min(total_unload, total_return) / total_unload * 100) if total_unload > 0 else 100
 unmatched = recon[recon["difference"] != 0]
-inv_move_qty = inv_moves["qty"].sum() if not inv_moves.empty and "qty" in inv_moves.columns else 0
-restock_qty  = restocks["qty"].sum() if not restocks.empty and "qty" in restocks.columns else 0
+inv_move_qty  = inv_moves["qty"].sum() if not inv_moves.empty and "qty" in inv_moves.columns else 0
+restock_qty   = restocks["qty"].sum() if not restocks.empty and "qty" in restocks.columns else 0
+eject_qty     = unload_eject["qty"].sum() if not unload_eject.empty and "qty" in unload_eject.columns else 0
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 m1.metric("Total Pyxis Unload Qty", int(total_unload))
 m2.metric("Total Pharmacy Return Qty", int(total_return))
 m3.metric("Reconciliation %", f"{recon_pct:.2f}%")
 m4.metric("Unmatched Med-Days", len(unmatched))
 m5.metric("Inv Moves (excl.)", int(inv_move_qty))
 m6.metric("Restocks (excl.)", int(restock_qty))
+m7.metric("Eject Events (excl.)", int(eject_qty))
 
 st.divider()
 
@@ -232,3 +246,11 @@ with st.expander(f"🔁 Restocks — Excluded from Reconciliation ({int(restock_
     else:
         cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in restocks.columns]
         st.dataframe(restocks[cols].sort_values("dt") if "dt" in cols else restocks[cols], use_container_width=True)
+
+with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation ({int(eject_qty)} units)", expanded=False):
+    st.caption("These are broken cassette eject events, not real medication removals. Shown here for reference only.")
+    if unload_eject.empty:
+        st.info("No unload eject events found for this date range.")
+    else:
+        cols = [c for c in ["dt", "date", "user_name", "device", "med_desc", "qty", "event_type"] if c in unload_eject.columns]
+        st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], use_container_width=True)
