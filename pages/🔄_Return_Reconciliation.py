@@ -65,13 +65,17 @@ def classify_workflow(row):
 if not pharm_all.empty:
     pharm_all["workflow_type"] = pharm_all.apply(classify_workflow, axis=1)
 
-# --- Split: Inventory Moves are NOT returns ---
-# Inventory moves = surplus stock transferred to working inventory.
-# They should NOT count toward return reconciliation.
-# We keep them visible below for reference only.
+# --- Split: Excluded from reconciliation math ---
+# Inventory Move = surplus-to-working-stock transfer (not a Pyxis return)
+# Restock = pharmacy proactively refilling (not triggered by a Pyxis unload)
+# Instant Restock = KEPT in reconciliation — ambiguous, may be used as a return
+# Return + Instant Return + Instant Restock = count toward reconciliation
+
+EXCLUDED_TYPES = {"Inventory Move", "Restock"}
 
 inv_moves = pharm_all[pharm_all["workflow_type"] == "Inventory Move"].copy() if not pharm_all.empty else pd.DataFrame()
-pharm_return = pharm_all[pharm_all["workflow_type"] != "Inventory Move"].copy() if not pharm_all.empty else pd.DataFrame()
+restocks   = pharm_all[pharm_all["workflow_type"] == "Restock"].copy() if not pharm_all.empty else pd.DataFrame()
+pharm_return = pharm_all[~pharm_all["workflow_type"].isin(EXCLUDED_TYPES)].copy() if not pharm_all.empty else pd.DataFrame()
 
 # --- Apply User Filter ---
 
@@ -79,6 +83,7 @@ if selected_users:
     if not pyxis_unload.empty: pyxis_unload = pyxis_unload[pyxis_unload["user_name"].isin(selected_users)]
     if not pharm_return.empty: pharm_return = pharm_return[pharm_return["user_name"].isin(selected_users)]
     if not inv_moves.empty: inv_moves = inv_moves[inv_moves["user_name"].isin(selected_users)]
+    if not restocks.empty: restocks = restocks[restocks["user_name"].isin(selected_users)]
 
 # --- Apply Med Filters ---
 
@@ -110,6 +115,7 @@ def ensure_date_column(df):
 pyxis_unload = ensure_date_column(pyxis_unload)
 pharm_return = ensure_date_column(pharm_return)
 inv_moves = ensure_date_column(inv_moves)
+restocks  = ensure_date_column(restocks)
 
 # --- Aggregate ---
 
@@ -143,13 +149,15 @@ total_return = recon["qty_pharm"].sum()
 recon_pct = (min(total_unload, total_return) / total_unload * 100) if total_unload > 0 else 100
 unmatched = recon[recon["difference"] != 0]
 inv_move_qty = inv_moves["qty"].sum() if not inv_moves.empty and "qty" in inv_moves.columns else 0
+restock_qty  = restocks["qty"].sum() if not restocks.empty and "qty" in restocks.columns else 0
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Total Pyxis Unload Qty", int(total_unload))
 m2.metric("Total Pharmacy Return Qty", int(total_return))
 m3.metric("Reconciliation %", f"{recon_pct:.2f}%")
 m4.metric("Unmatched Med-Days", len(unmatched))
-m5.metric("Inventory Moves (excl.)", int(inv_move_qty))
+m5.metric("Inv Moves (excl.)", int(inv_move_qty))
+m6.metric("Restocks (excl.)", int(restock_qty))
 
 st.divider()
 
@@ -198,3 +206,11 @@ with st.expander(f"📦 Inventory Moves — Excluded from Reconciliation ({int(i
     else:
         cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in inv_moves.columns]
         st.dataframe(inv_moves[cols].sort_values("dt") if "dt" in cols else inv_moves[cols], use_container_width=True)
+
+with st.expander(f"🔁 Restocks — Excluded from Reconciliation ({int(restock_qty)} units)", expanded=False):
+    st.caption("These are proactive pharmacy refills, not returns triggered by a Pyxis unload. Shown here for reference only.")
+    if restocks.empty:
+        st.info("No restocks found for this date range.")
+    else:
+        cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in restocks.columns]
+        st.dataframe(restocks[cols].sort_values("dt") if "dt" in cols else restocks[cols], use_container_width=True)
