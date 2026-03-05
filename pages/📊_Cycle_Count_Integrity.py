@@ -15,8 +15,10 @@ st.set_page_config(
 
 start_date, end_date = render_sidebar()
 
+COMPLIANCE_DAYS = 84  # Every med must be cycle counted within this window
+
 st.header("📊 Cycle Count Integrity Dashboard")
-st.caption("Risk-scored cycle count compliance with technician accountability and carousel coverage.")
+st.caption(f"Risk-scored cycle count compliance · {COMPLIANCE_DAYS}-day compliance window · with technician accountability and carousel coverage.")
 
 # ─────────────────────────────────────────────────────
 # DATA LOADERS
@@ -50,8 +52,94 @@ def load_all_pharm():
         st.warning(f"⚠️ Could not load pharmacy data: {e}")
         return pd.DataFrame()
 
-df_all_pharm = load_all_pharm()
-df_master    = load_master_mapping()
+@st.cache_data(ttl=300)
+def load_open_variances():
+    """Pull med_ids that have unmatched return events in the events + pharmacy_orders tables.
+    A variance = med was unloaded from Pyxis but qty_pyxis != qty_pharm for that med/date."""
+    try:
+        sql = text("""
+            WITH unloads AS (
+                SELECT
+                    med_id,
+                    dt::date AS tx_date,
+                    SUM(qty) AS qty_pyxis
+                FROM events
+                WHERE event_type ILIKE '%unload%' OR event_type ILIKE '%empty%'
+                AND event_type NOT ILIKE '%cancel%'
+                AND event_type NOT ILIKE '%eject%'
+                GROUP BY med_id, dt::date
+            ),
+            returns AS (
+                SELECT
+                    med_id,
+                    dt::date AS tx_date,
+                    SUM(qty) AS qty_pharm
+                FROM pharmacy_orders
+                WHERE priority = 'Returns'
+                GROUP BY med_id, dt::date
+            ),
+            reconciled AS (
+                SELECT
+                    COALESCE(u.med_id, r.med_id) AS med_id,
+                    COALESCE(u.qty_pyxis, 0)     AS qty_pyxis,
+                    COALESCE(r.qty_pharm, 0)      AS qty_pharm
+                FROM unloads u
+                FULL OUTER JOIN returns r
+                    ON u.med_id = r.med_id AND u.tx_date = r.tx_date
+            )
+            SELECT DISTINCT med_id
+            FROM reconciled
+            WHERE qty_pyxis != qty_pharm
+        """)
+        with engine.connect() as conn:
+            result = conn.execute(sql)
+            ids = set(row[0].strip().upper() for row in result if row[0])
+        return ids
+    except Exception as e:
+        st.warning(f"⚠️ Could not load return variance data: {e}")
+        return set()
+
+@st.cache_data(ttl=300)
+def load_open_variances():
+    """Med_ids that have unmatched qty between Pyxis unloads and pharmacy returns."""
+    try:
+        sql = text("""
+            WITH unloads AS (
+                SELECT med_id, dt::date AS tx_date, SUM(qty) AS qty_pyxis
+                FROM events
+                WHERE (event_type ILIKE '%unload%' OR event_type ILIKE '%empty%')
+                  AND event_type NOT ILIKE '%cancel%'
+                  AND event_type NOT ILIKE '%eject%'
+                GROUP BY med_id, dt::date
+            ),
+            returns AS (
+                SELECT med_id, dt::date AS tx_date, SUM(qty) AS qty_pharm
+                FROM pharmacy_orders
+                WHERE priority = 'Returns'
+                GROUP BY med_id, dt::date
+            ),
+            reconciled AS (
+                SELECT
+                    COALESCE(u.med_id, r.med_id) AS med_id,
+                    COALESCE(u.qty_pyxis, 0)     AS qty_pyxis,
+                    COALESCE(r.qty_pharm, 0)      AS qty_pharm
+                FROM unloads u
+                FULL OUTER JOIN returns r ON u.med_id = r.med_id AND u.tx_date = r.tx_date
+            )
+            SELECT DISTINCT med_id FROM reconciled WHERE qty_pyxis != qty_pharm
+        """)
+        with engine.connect() as conn:
+            result = conn.execute(sql)
+            ids = set(row[0].strip().upper() for row in result if row[0])
+        return ids
+    except Exception as e:
+        st.warning(f"⚠️ Could not load return variance data: {e}")
+        return set()
+
+df_all_pharm      = load_all_pharm()
+df_master         = load_master_mapping()
+open_variance_ids = load_open_variances()
+open_variance_ids = load_open_variances()
 
 if df_all_pharm.empty:
     st.warning("No pharmacy workflow data found.")
@@ -171,6 +259,21 @@ def risk_tier(score):
     return "🟢 Low"
 
 risk_df["risk_tier"] = risk_df["risk_score"].apply(risk_tier)
+
+# 84-day compliance status
+risk_df["compliance_status"] = np.where(
+    risk_df["never_cycle_counted"],
+    "⛔ Never Counted",
+    np.where(
+        risk_df["effective_days"] > COMPLIANCE_DAYS,
+        f"❌ Overdue (>{COMPLIANCE_DAYS}d)",
+        "✅ Compliant"
+    )
+)
+
+# Cross-reference with return reconciliation
+risk_df["open_return_variance"] = risk_df["med_id"].isin(open_variance_ids)
+
 risk_df = risk_df.sort_values("risk_score", ascending=False).reset_index(drop=True)
 
 # ─────────────────────────────────────────────────────
@@ -200,7 +303,7 @@ tech_overdue["days_since"] = (
 ).dt.days
 
 tech_overdue_counts = (
-    tech_overdue[tech_overdue["days_since"] > 30]
+    tech_overdue[tech_overdue["days_since"] > COMPLIANCE_DAYS]
     .groupby("cycle_count_user")
     .size()
     .reset_index(name="overdue_locations")
@@ -251,18 +354,22 @@ else:
 # EXECUTIVE METRICS
 # ─────────────────────────────────────────────────────
 
-avg_days    = tracker["days_since_cycle"].mean()
-max_days    = tracker["days_since_cycle"].max()
-never_count = risk_df["never_cycle_counted"].sum()
-critical    = len(risk_df[risk_df["risk_tier"] == "🔴 Critical"])
-high        = len(risk_df[risk_df["risk_tier"] == "🟠 High"])
+avg_days     = tracker["days_since_cycle"].mean()
+max_days     = tracker["days_since_cycle"].max()
+never_count  = risk_df["never_cycle_counted"].sum()
+overdue      = len(risk_df[risk_df["compliance_status"].str.startswith("❌")])
+compliant    = len(risk_df[risk_df["compliance_status"] == "✅ Compliant"])
+total_meds   = len(risk_df)
+comply_pct   = (compliant / total_meds * 100) if total_meds > 0 else 0
+open_var_ct  = risk_df["open_return_variance"].sum()
 
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Avg Days Since Count",      f"{avg_days:.1f}" if pd.notna(avg_days) else "N/A")
-m2.metric("Max Days Since Count",      int(max_days) if pd.notna(max_days) else 0)
-m3.metric("Never Counted",             int(never_count))
-m4.metric("🔴 Critical Risk Meds",     critical)
-m5.metric("🟠 High Risk Meds",         high)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1.metric("Avg Days Since Count",       f"{avg_days:.1f}" if pd.notna(avg_days) else "N/A")
+m2.metric("Max Days Since Count",       int(max_days) if pd.notna(max_days) else 0)
+m3.metric(f"Overdue (>{COMPLIANCE_DAYS}d)",  int(overdue))
+m4.metric("Never Counted",              int(never_count))
+m5.metric(f"Compliance Rate",           f"{comply_pct:.1f}%")
+m6.metric("⚠️ Open Return Variances",   int(open_var_ct))
 
 st.divider()
 
@@ -329,22 +436,24 @@ with tab1:
         st.plotly_chart(fig, use_container_width=True)
 
     display_cols = [c for c in [
-        "risk_tier", "risk_score", "med_id", "med_desc", "carousel_location",
+        "risk_tier", "compliance_status", "open_return_variance",
+        "risk_score", "med_id", "med_desc", "carousel_location",
         "is_controlled", "days_since_cycle", "return_frequency",
-        "total_qty_returned", "cycle_date", "cycle_count_user", "never_cycle_counted"
+        "total_qty_returned", "cycle_date", "cycle_count_user"
     ] if c in filtered.columns]
 
     st.dataframe(
         filtered[display_cols],
         use_container_width=True,
         column_config={
-            "risk_score":        st.column_config.NumberColumn("Risk Score", format="%.0f"),
-            "days_since_cycle":  st.column_config.NumberColumn("Days Since Count", format="%d"),
-            "return_frequency":  st.column_config.NumberColumn("Return Events", format="%d"),
-            "total_qty_returned":st.column_config.NumberColumn("Total Qty", format="%.0f"),
-            "cycle_date":        st.column_config.DateColumn("Last Count"),
-            "is_controlled":     st.column_config.CheckboxColumn("Controlled"),
-            "never_cycle_counted": st.column_config.CheckboxColumn("Never Counted"),
+            "risk_score":           st.column_config.NumberColumn("Risk Score", format="%.0f"),
+            "compliance_status":    st.column_config.TextColumn("84-Day Status"),
+            "open_return_variance": st.column_config.CheckboxColumn("⚠️ Open Variance"),
+            "days_since_cycle":     st.column_config.NumberColumn("Days Since Count", format="%d"),
+            "return_frequency":     st.column_config.NumberColumn("Return Events", format="%d"),
+            "total_qty_returned":   st.column_config.NumberColumn("Total Qty", format="%.0f"),
+            "cycle_date":           st.column_config.DateColumn("Last Count"),
+            "is_controlled":        st.column_config.CheckboxColumn("Controlled"),
         },
         hide_index=True
     )
@@ -392,7 +501,7 @@ with tab2:
 # ── TAB 3: TECH ACCOUNTABILITY ────────────────────────
 with tab3:
     st.subheader("Technician Cycle Count Accountability")
-    st.caption("Based on all-time cycle count history. 'Overdue' = locations last counted by this tech that are now >30 days old.")
+    st.caption(f"Based on all-time cycle count history. 'Overdue' = locations last counted by this tech that are now >{COMPLIANCE_DAYS} days old.")
 
     if tech_stats.empty:
         st.info("No technician data available.")
