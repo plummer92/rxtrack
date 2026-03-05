@@ -25,7 +25,7 @@ from sqlalchemy import create_engine
 import os
 
 
-DATABASE_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?"
+DATABASE_URL = st.secrets["neon"]["db_url"]
 
 engine = create_engine(
     DATABASE_URL,
@@ -105,7 +105,7 @@ def init_db():
 def run_query(query, params=None):
     """Executes a SELECT query and returns a pandas DataFrame."""
     try:
-        with db_cursor() as (conn, cur):
+        with engine.connect() as conn:
             return pd.read_sql(query, conn, params=params)
     except Exception:
         return pd.DataFrame()
@@ -804,13 +804,7 @@ if _is_main:
     except Exception as e:
         st.error(f"Failed to load data: {e}")
 
-    # --- EXECUTE DATA LOADER ---
-    # This ensures variables are always populated with something (even if empty)
-    if 'start_date' in locals() and 'end_date' in locals():
-        try:
-            df_events, df_config, df_pharm, df_sched, df_att = load_data(start_date, end_date)
-        except Exception as e:
-            st.error(f"Failed to load data: {e}")
+
 
     # 1. OVERVIEW
     if selected_page == "📊 Overview":
@@ -1098,7 +1092,6 @@ if _is_main:
                     raw_unloads = raw_unloads[~raw_unloads['med_id'].str.strip().str.upper().isin(control_ids)]
                     raw_returns = raw_returns[~raw_returns['med_id'].str.strip().str.upper().isin(control_ids)]
                 else:
-                    # Fallback to name-based filter if carousel mapping not yet loaded
                     pat = '|'.join(NARC_TERMS)
                     raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
                     raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
