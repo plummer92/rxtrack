@@ -520,6 +520,23 @@ def get_present_dates(min_dt, max_dt):
     return set()
 
 
+
+# --- CONTROLS LOOKUP (DB-DRIVEN) ---
+@st.cache_data(ttl=3600)
+def load_control_med_ids():
+    """Returns a set of med_ids stored in CW (controlled) carousel locations.
+    Automatically stays current as the master mapping is updated."""
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                "SELECT DISTINCT med_id FROM carousel_master_mapping WHERE carousel_location ILIKE 'CW%'",
+                conn
+            )
+        return set(df["med_id"].dropna().str.strip().str.upper())
+    except Exception:
+        return set()
+
+
 # --- SHARED SIDEBAR RENDERER ---
 def render_sidebar():
     """Call this at the top of any page to always show the date range sidebar."""
@@ -1076,9 +1093,15 @@ if _is_main:
             raw_unloads = df_events[df_events['event_type'].str.contains(r'unload|empty\s*return', case=False, na=False)].copy()
             raw_returns = df_pharm[df_pharm['priority'] == 'Returns'].copy()
             if filter_narc:
-                pat = '|'.join(NARC_TERMS)
-                raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
-                raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
+                control_ids = load_control_med_ids()
+                if control_ids:
+                    raw_unloads = raw_unloads[~raw_unloads['med_id'].str.strip().str.upper().isin(control_ids)]
+                    raw_returns = raw_returns[~raw_returns['med_id'].str.strip().str.upper().isin(control_ids)]
+                else:
+                    # Fallback to name-based filter if carousel mapping not yet loaded
+                    pat = '|'.join(NARC_TERMS)
+                    raw_unloads = raw_unloads[~raw_unloads['med_desc'].str.contains(pat, case=False, na=False)]
+                    raw_returns = raw_returns[~raw_returns['med_desc'].str.contains(pat, case=False, na=False)]
             raw_unloads['norm_med_id'] = raw_unloads['med_id'].str.strip().str.upper()
             raw_unloads['Date'] = raw_unloads['dt'].dt.date
             raw_returns['norm_med_id'] = raw_returns['med_id'].str.strip().str.upper()
