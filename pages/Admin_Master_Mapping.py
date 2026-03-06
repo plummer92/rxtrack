@@ -117,3 +117,144 @@ if uploaded_file:
         )
 
         st.success("✅ Master mapping uploaded successfully.")
+
+st.divider()
+
+# =============================================================
+# 📊 CYCLE COUNT VARIANCE UPLOAD
+# =============================================================
+
+st.header("📊 Cycle Count Variance Upload")
+st.caption("Upload the Cycle Count Variance Report CSV to track inventory shrinkage and gain events.")
+
+variance_file = st.file_uploader(
+    "Upload Cycle Count Variance Report CSV",
+    type=["csv"],
+    key="variance_upload"
+)
+
+if variance_file:
+
+    # -------------------------------------------------
+    # 1️⃣ Load CSV (skip first header row)
+    # -------------------------------------------------
+
+    df_var = pd.read_csv(variance_file, header=1)
+
+    # -------------------------------------------------
+    # 2️⃣ Standardize Column Names
+    # -------------------------------------------------
+
+    df_var.columns = (
+        df_var.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("/", "_")
+    )
+
+    df_var = df_var.rename(columns={
+        "grptype":           "variance_type",
+        "date_time":         "dt",
+        "item_id":           "med_id",
+        "description":       "med_desc",
+        "starting_qoh":      "starting_qty",
+        "new_qoh":           "new_qty",
+        "quantity_variance": "qty_variance",
+        "cost":              "unit_cost",
+        "extended_cost":     "extended_cost",
+        "user":              "user_name",
+    })
+
+    required_cols = [
+        "variance_type", "dt", "med_id", "med_desc",
+        "starting_qty", "new_qty", "qty_variance",
+        "unit_cost", "extended_cost", "user_name"
+    ]
+
+    for col in required_cols:
+        if col not in df_var.columns:
+            df_var[col] = None
+
+    # -------------------------------------------------
+    # 3️⃣ Clean & Normalize
+    # -------------------------------------------------
+
+    df_var = df_var.dropna(subset=["med_id", "dt"])
+
+    df_var["med_id"] = (
+        df_var["med_id"].astype(str).str.strip().str.upper()
+    )
+    df_var["med_desc"] = (
+        df_var["med_desc"].astype(str).str.strip()
+    )
+    df_var["user_name"] = (
+        df_var["user_name"].astype(str).str.strip()
+    )
+    df_var["dt"] = pd.to_datetime(df_var["dt"], errors="coerce")
+    df_var = df_var.dropna(subset=["dt"])
+
+    for col in ["starting_qty", "new_qty", "qty_variance", "unit_cost", "extended_cost"]:
+        df_var[col] = pd.to_numeric(df_var[col], errors="coerce").fillna(0)
+
+    df_var["dt"] = df_var["dt"].astype(str)
+
+    # -------------------------------------------------
+    # 4️⃣ Generate PK
+    # -------------------------------------------------
+
+    import hashlib
+    def gen_pk(row):
+        s = "|".join([str(row["dt"]), str(row["med_id"]), str(row["qty_variance"]), str(row["user_name"])])
+        return hashlib.sha256(s.encode()).hexdigest()
+
+    df_var["pk"] = df_var.apply(gen_pk, axis=1)
+
+    # -------------------------------------------------
+    # 5️⃣ Preview
+    # -------------------------------------------------
+
+    st.subheader("Preview")
+    st.dataframe(df_var[required_cols].head(10), use_container_width=True)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Records", len(df_var))
+    col2.metric("Shrinkage Events", int((df_var["qty_variance"] < 0).sum()))
+    col3.metric("Gain Events",      int((df_var["qty_variance"] > 0).sum()))
+
+    # -------------------------------------------------
+    # 6️⃣ Upload to Neon
+    # -------------------------------------------------
+
+    if st.button("🚀 Upload Variance Data"):
+        from sqlalchemy import text as sqla_text
+        from App import engine
+
+        with engine.begin() as conn:
+            conn.execute(sqla_text("""
+                CREATE TABLE IF NOT EXISTS cycle_count_variances (
+                    pk              TEXT PRIMARY KEY,
+                    variance_type   TEXT,
+                    dt              TIMESTAMP,
+                    med_id          TEXT,
+                    med_desc        TEXT,
+                    starting_qty    FLOAT,
+                    new_qty         FLOAT,
+                    qty_variance    FLOAT,
+                    unit_cost       FLOAT,
+                    extended_cost   FLOAT,
+                    user_name       TEXT
+                )
+            """))
+
+        df_upload = df_var[["pk"] + required_cols].copy()
+        df_upload.to_sql(
+            "cycle_count_variances",
+            engine,
+            if_exists="append",
+            index=False,
+            method="multi"
+        )
+
+        st.success(f"✅ Successfully uploaded {len(df_upload)} variance records.")
+        st.cache_data.clear()
