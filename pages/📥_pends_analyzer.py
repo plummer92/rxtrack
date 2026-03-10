@@ -161,15 +161,150 @@ m6.metric("Non-Standard",       nonstd_ct)
 
 st.divider()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 4B — OUTLIER DETECTION
+# Runs against FULL df (all-time history) so comparisons are meaningful,
+# then flags events that fall within the filtered date range.
+# Three detectors, all med-history-relative:
+#   A. Par outlier  — min or max > 2 SD from that med's historical mean
+#   B. Churning     — same med+device pended 3+ times within 24 hours
+#   C. New device   — med pended on a device with no prior history for that med
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=300)
+def load_all_pends_history():
+    """Full all-time config_events — needed for historical baselines."""
+    try:
+        sql = text("SELECT pk, dt, user_name, device, med_id, min_qty, max_qty, is_standard FROM config_events")
+        with engine.connect() as conn:
+            df_hist = pd.read_sql(sql, conn)
+        df_hist["dt"]     = pd.to_datetime(df_hist["dt"], errors="coerce")
+        df_hist["med_id"] = df_hist["med_id"].astype(str).str.strip().str.upper()
+        df_hist["device"] = df_hist["device"].fillna("Unknown").astype(str).str.strip()
+        return df_hist
+    except Exception as e:
+        st.warning(f"[load_all_pends_history] {e}")
+        return pd.DataFrame()
+
+df_hist = load_all_pends_history()
+
+outlier_flags = []  # list of dicts, one per flagged event
+
+if not df_hist.empty and not filtered.empty:
+
+    # ── A. Par Outlier: min/max > 2 SD from that med's own historical mean ──
+    par_stats = (
+        df_hist[df_hist["min_qty"].notna() | df_hist["max_qty"].notna()]
+        .groupby("med_id")
+        .agg(
+            mean_min=("min_qty", "mean"),  std_min=("min_qty", "std"),
+            mean_max=("max_qty", "mean"),  std_max=("max_qty", "std"),
+            hist_count=("pk", "count")
+        )
+        .reset_index()
+    )
+    # Need at least 3 historical pends to have a meaningful baseline
+    par_stats = par_stats[par_stats["hist_count"] >= 3]
+
+    par_check = filtered[filtered["min_qty"].notna() | filtered["max_qty"].notna()].merge(
+        par_stats, on="med_id", how="inner"
+    )
+
+    def is_par_outlier(row):
+        reasons = []
+        if pd.notna(row.get("min_qty")) and pd.notna(row.get("std_min")) and row["std_min"] > 0:
+            if abs(row["min_qty"] - row["mean_min"]) > 2 * row["std_min"]:
+                reasons.append(f"Min {row['min_qty']:.0f} vs avg {row['mean_min']:.1f} (±{row['std_min']:.1f})")
+        if pd.notna(row.get("max_qty")) and pd.notna(row.get("std_max")) and row["std_max"] > 0:
+            if abs(row["max_qty"] - row["mean_max"]) > 2 * row["std_max"]:
+                reasons.append(f"Max {row['max_qty']:.0f} vs avg {row['mean_max']:.1f} (±{row['std_max']:.1f})")
+        return "; ".join(reasons) if reasons else None
+
+    for _, row in par_check.iterrows():
+        reason = is_par_outlier(row)
+        if reason:
+            outlier_flags.append({
+                "pk":           row["pk"],
+                "dt":           row["dt"],
+                "user_name":    row["user_name"],
+                "device":       row["device"],
+                "med_id":       row["med_id"],
+                "display_name": row.get("display_name", row["med_id"]),
+                "min_qty":      row.get("min_qty"),
+                "max_qty":      row.get("max_qty"),
+                "is_standard":  row.get("is_standard"),
+                "flag_type":    "⚠️ Par Outlier",
+                "flag_detail":  reason,
+            })
+
+    # ── B. Churning: same med+device pended 3+ times within any 24-hour window ──
+    churn_check = filtered.sort_values("dt").copy()
+    churn_check["dt"] = pd.to_datetime(churn_check["dt"])
+
+    for (med_id, device), grp in churn_check.groupby(["med_id", "device"]):
+        if len(grp) < 3:
+            continue
+        times = grp["dt"].sort_values().reset_index(drop=True)
+        for i in range(len(times)):
+            window = times[(times >= times[i]) & (times <= times[i] + pd.Timedelta(hours=24))]
+            if len(window) >= 3:
+                # Flag the first event in the window
+                first_row = grp[grp["dt"] == times[i]].iloc[0]
+                outlier_flags.append({
+                    "pk":           first_row["pk"],
+                    "dt":           first_row["dt"],
+                    "user_name":    first_row["user_name"],
+                    "device":       device,
+                    "med_id":       med_id,
+                    "display_name": first_row.get("display_name", med_id),
+                    "min_qty":      first_row.get("min_qty"),
+                    "max_qty":      first_row.get("max_qty"),
+                    "is_standard":  first_row.get("is_standard"),
+                    "flag_type":    "🔄 Churning",
+                    "flag_detail":  f"{len(window)} pends within 24h on {device}",
+                })
+                break  # only flag once per med+device group
+
+    # ── C. New Device: med pended on a device with no prior history ──
+    # "Prior" = before the current filter window start date
+    prior_hist = df_hist[df_hist["dt"].dt.date < start_date]
+    prior_device_pairs = set(
+        zip(
+            prior_hist["med_id"].astype(str).str.strip().str.upper(),
+            prior_hist["device"].astype(str).str.strip()
+        )
+    )
+
+    for _, row in filtered.iterrows():
+        pair = (str(row["med_id"]).strip().upper(), str(row["device"]).strip())
+        if pair not in prior_device_pairs:
+            outlier_flags.append({
+                "pk":           row["pk"],
+                "dt":           row["dt"],
+                "user_name":    row["user_name"],
+                "device":       row["device"],
+                "med_id":       row["med_id"],
+                "display_name": row.get("display_name", row["med_id"]),
+                "min_qty":      row.get("min_qty"),
+                "max_qty":      row.get("max_qty"),
+                "is_standard":  row.get("is_standard"),
+                "flag_type":    "🆕 New Device",
+                "flag_detail":  f"First time {row['med_id']} seen on {row['device']}",
+            })
+
+df_outliers = pd.DataFrame(outlier_flags).drop_duplicates(subset=["pk", "flag_type"]) if outlier_flags else pd.DataFrame()
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 5 — TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 Par Audit",
     "👤 By User",
     "🖥️ By Device",
     "🔍 Raw Detail",
+    "🚨 Outlier Detector",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,3 +592,101 @@ with tab4:
         },
         hide_index=True
     )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 5 — OUTLIER DETECTOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab5:
+    st.subheader("🚨 Outlier Detector")
+    st.caption(
+        "Flags pend events that look suspicious compared to that medication's own history. "
+        "Three detectors: par values outside normal range, churning (3+ pends in 24h), "
+        "and first-time appearance on a device."
+    )
+
+    if df_outliers.empty:
+        st.success("✅ No outliers detected in the selected date range.")
+    else:
+        # Summary metrics
+        par_ct   = int((df_outliers["flag_type"] == "⚠️ Par Outlier").sum())
+        churn_ct = int((df_outliers["flag_type"] == "🔄 Churning").sum())
+        new_ct   = int((df_outliers["flag_type"] == "🆕 New Device").sum())
+        total_ct = len(df_outliers)
+
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("Total Flags",     total_ct)
+        o2.metric("⚠️ Par Outliers", par_ct)
+        o3.metric("🔄 Churning",     churn_ct)
+        o4.metric("🆕 New Device",   new_ct)
+
+        # Flag type breakdown chart
+        if not df_outliers.empty:
+            flag_counts = df_outliers.groupby("flag_type").size().reset_index(name="count")
+            fig_flags = px.bar(
+                flag_counts,
+                x="flag_type", y="count",
+                color="flag_type",
+                color_discrete_map={
+                    "⚠️ Par Outlier": "#f97316",
+                    "🔄 Churning":    "#8b5cf6",
+                    "🆕 New Device":  "#3b82f6",
+                },
+                title="Outlier Flags by Type",
+                labels={"count": "Flags", "flag_type": ""}
+            )
+            fig_flags.update_layout(showlegend=False)
+            st.plotly_chart(fig_flags, use_container_width=True)
+
+        # Top flagged meds
+        top_flagged = (
+            df_outliers.groupby(["display_name", "flag_type"])
+            .size()
+            .reset_index(name="flag_count")
+            .sort_values("flag_count", ascending=False)
+            .head(20)
+        )
+        if not top_flagged.empty:
+            fig_top = px.bar(
+                top_flagged,
+                x="flag_count", y="display_name",
+                orientation="h",
+                color="flag_type",
+                color_discrete_map={
+                    "⚠️ Par Outlier": "#f97316",
+                    "🔄 Churning":    "#8b5cf6",
+                    "🆕 New Device":  "#3b82f6",
+                },
+                title="Most Flagged Medications",
+                labels={"flag_count": "Flags", "display_name": ""}
+            )
+            fig_top.update_layout(yaxis={"categoryorder": "total ascending"}, height=450)
+            st.plotly_chart(fig_top, use_container_width=True)
+
+        # Filter by flag type
+        st.divider()
+        flag_filter = st.multiselect(
+            "Filter by Flag Type",
+            ["⚠️ Par Outlier", "🔄 Churning", "🆕 New Device"],
+            default=["⚠️ Par Outlier", "🔄 Churning", "🆕 New Device"],
+            key="pends_outlier_flag_filter"
+        )
+        outlier_view = df_outliers[df_outliers["flag_type"].isin(flag_filter)] if flag_filter else df_outliers
+
+        st.dataframe(
+            outlier_view[[c for c in [
+                "flag_type", "flag_detail", "dt", "user_name", "device",
+                "display_name", "min_qty", "max_qty", "is_standard"
+            ] if c in outlier_view.columns]].sort_values("dt", ascending=False),
+            use_container_width=True,
+            column_config={
+                "flag_type":   st.column_config.TextColumn("Flag"),
+                "flag_detail": st.column_config.TextColumn("Detail"),
+                "dt":          st.column_config.DatetimeColumn("Date/Time",  format="MM/DD/YY HH:mm"),
+                "display_name":st.column_config.TextColumn("Medication"),
+                "min_qty":     st.column_config.NumberColumn("Min",          format="%.0f"),
+                "max_qty":     st.column_config.NumberColumn("Max",          format="%.0f"),
+                "is_standard": st.column_config.CheckboxColumn("Standard"),
+            },
+            hide_index=True
+        )
