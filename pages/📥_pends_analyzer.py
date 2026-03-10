@@ -109,22 +109,26 @@ with st.sidebar:
     med_filter = st.multiselect(
         "Medication",
         sorted(df["display_name"].dropna().unique()),
-        placeholder="All medications"
+        placeholder="All medications",
+        key="pends_med_filter"
     )
     user_filter = st.multiselect(
         "User",
         sorted(df["user_name"].dropna().unique()),
-        placeholder="All users"
+        placeholder="All users",
+        key="pends_user_filter"
     )
     device_filter = st.multiselect(
         "Device",
         sorted(df["device"].dropna().unique()),
-        placeholder="All devices"
+        placeholder="All devices",
+        key="pends_device_filter"
     )
     standard_filter = st.radio(
         "Standard Stock",
         ["All", "Standard Only", "Non-Standard Only"],
-        index=0
+        index=0,
+        key="pends_standard_filter"
     )
 
 filtered = df.copy()
