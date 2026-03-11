@@ -194,12 +194,14 @@ def load_all_unloads():
     """All unload events (Unload + Empty return bin) across all time for lifecycle analysis."""
     try:
         sql = text("""
-            SELECT pk, dt, user_name, device, med_id, med_desc,
-                   event_type, qty, cost_per_unit
-            FROM events
-            WHERE (event_type ILIKE '%unload%' OR event_type ILIKE '%empty%')
-              AND event_type NOT ILIKE '%cancel%'
-              AND event_type NOT ILIKE '%eject%'
+            SELECT e.pk, e.dt, e.user_name, e.device, e.med_id, e.med_desc,
+                   e.event_type, e.qty,
+                   COALESCE(c.cost_per_unit, 0) AS cost_per_unit
+            FROM events e
+            LEFT JOIN med_costs c ON e.med_id = c.med_id
+            WHERE (e.event_type ILIKE '%unload%' OR e.event_type ILIKE '%empty%')
+              AND e.event_type NOT ILIKE '%cancel%'
+              AND e.event_type NOT ILIKE '%eject%'
         """)
         with engine.connect() as conn:
             df_ul = pd.read_sql(sql, conn)
