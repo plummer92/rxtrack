@@ -1006,45 +1006,6 @@ if _is_main:
                 else:
                     st.info("No outdate or unload events in this range.")
 
-            st.divider()
-
-            # ── Slowest Meds + Transaction Type Pie ──────────────────────────
-            col_main, col_side = st.columns([2, 1])
-            with col_main:
-                st.subheader("🐢 Slowest Medications (Avg Machine Time)")
-                med_speed = (
-                    ev[ev["machine_time_sec"] > 0]
-                    .groupby("med_desc")["machine_time_sec"]
-                    .mean()
-                    .reset_index()
-                )
-                top_slow = med_speed.sort_values("machine_time_sec", ascending=False).head(10)
-                fig_slow = px.bar(
-                    top_slow, x="machine_time_sec", y="med_desc",
-                    orientation="h", text_auto=".0f",
-                    color="machine_time_sec", color_continuous_scale="Reds",
-                    labels={"machine_time_sec": "Avg Seconds", "med_desc": ""}
-                )
-                fig_slow.update_layout(
-                    yaxis={"categoryorder": "total ascending"},
-                    coloraxis_showscale=False
-                )
-                st.plotly_chart(fig_slow, use_container_width=True)
-            with col_side:
-                st.subheader("Transaction Mix")
-                type_counts = (
-                    ev[~ev["_etype"].str.contains("cancel", na=False)]
-                    ["event_type"].value_counts().reset_index()
-                )
-                fig_pie = px.pie(
-                    type_counts, names="event_type", values="count", hole=0.45
-                )
-                fig_pie.update_layout(
-                    showlegend=True,
-                    legend=dict(font=dict(size=10), orientation="v")
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
-
         else:
             st.info("No Pyxis event data found for the selected date range. Upload a Daily Transaction Report to get started.")
 
