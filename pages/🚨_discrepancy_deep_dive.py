@@ -122,7 +122,7 @@ if not df_prior.empty:
     likely_causes = []
     for _, row in df_disc.iterrows():
         likely_causes.append(find_prior_user(row, prior_grouped))
-    df_disc["likely_cause"] = likely_causes
+    df_disc["likely_cause"] = [str(x) if x else "Unknown" for x in likely_causes]
 else:
     df_disc["likely_cause"] = "Unknown"
 
@@ -503,7 +503,10 @@ with tab3:
 
     # Drill-down: pick a user and see their events
     st.subheader("User Drill-Down")
-    known_users = sorted(filtered[filtered["likely_cause"] != "Unknown"]["likely_cause"].unique())
+    known_users = sorted(filtered[
+        (filtered["likely_cause"] != "Unknown") &
+        (filtered["likely_cause"].notna())
+    ]["likely_cause"].astype(str).unique())
     if known_users:
         sel_user = st.selectbox(
             "Select likely cause user to review their events",
