@@ -798,65 +798,112 @@ if _is_main:
     if selected_page == "📊 Overview":
         if not df_events.empty:
             st.markdown("## 🏥 Executive Summary")
+            st.caption(f"Date range: {start_date.strftime('%b %d, %Y')} → {end_date.strftime('%b %d, %Y')}")
 
-            # ── Classify event types ─────────────────────────────────────────
+            # ── Classify event types ──────────────────────────────────────────
             ev = df_events.copy()
             ev["_etype"] = ev["event_type"].astype(str).str.lower().str.strip()
 
-            refills   = ev[ev["_etype"].str.contains(r"restock|refill|load\b|replenish", regex=True, na=False) &
-                           ~ev["_etype"].str.contains("cancel|unload|empty", na=False)]
-            outdates  = ev[ev["_etype"].str.contains(r"outdat|expir|override", regex=True, na=False) &
-                           ~ev["_etype"].str.contains("cancel", na=False)]
-            unloads   = ev[(ev["_etype"].str.contains(r"unload|empty.?return", regex=True, na=False)) &
-                           ~ev["_etype"].str.contains("cancel|eject", na=False)]
-            real_tx   = ev[~ev["_etype"].str.contains("verify", na=False)]
+            # Refills: Restock, Refill, Load (not unload/cancel)
+            refills  = ev[
+                ev["_etype"].str.contains(r"restock|refill|\bload\b|replenish", regex=True, na=False) &
+                ~ev["_etype"].str.contains("cancel|unload|empty", na=False)
+            ]
+            # Outdates: Outdate, Expired, Override
+            outdates = ev[
+                ev["_etype"].str.contains(r"outdat|expir|override", regex=True, na=False) &
+                ~ev["_etype"].str.contains("cancel", na=False)
+            ]
+            # Unloads: Unload, Empty return bin (not cancelled/eject)
+            unloads  = ev[
+                ev["_etype"].str.contains(r"unload|empty", regex=True, na=False) &
+                ~ev["_etype"].str.contains("cancel|eject", na=False)
+            ]
+            # Everything except verify (for total tx count)
+            real_tx  = ev[~ev["_etype"].str.contains("verify", na=False)]
 
             session_stats = ev.groupby("session_id").agg(total_time=("machine_time_sec", "sum"))
             avg_time      = session_stats["total_time"].mean()
 
-            # ── Row 1 — Top-line metrics ──────────────────────────────────────
+            # ── Row 1 — Top-line KPIs ─────────────────────────────────────────
             m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-            m1.metric("Total Transactions",  f"{len(real_tx):,}")
-            m2.metric("Refills / Restocks",  f"{len(refills):,}")
-            m3.metric("Unloads",             f"{len(unloads):,}")
-            m4.metric("Outdates",            f"{len(outdates):,}")
-            m5.metric("Active Technicians",  df_events["user_name"].nunique())
-            m6.metric("Avg Session",         seconds_to_mmss(avg_time))
-            m7.metric("Discrepancies",       int(df_events["discrepancy_qty"].ne(0).sum()))
+            m1.metric("Total Transactions", f"{len(real_tx):,}")
+            m2.metric("Refills / Restocks", f"{len(refills):,}")
+            m3.metric("Unloads",            f"{len(unloads):,}")
+            m4.metric("Outdates",           f"{len(outdates):,}")
+            m5.metric("Active Techs",       df_events["user_name"].nunique())
+            m6.metric("Avg Session",        seconds_to_mmss(avg_time))
+            m7.metric("Discrepancies",      int(df_events["discrepancy_qty"].ne(0).sum()))
 
             st.divider()
 
-            # ── Daily Refill Transaction Bar Chart ───────────────────────────
-            st.subheader("📅 Daily Refill Transactions")
-            st.caption("Count of restock/refill events per day across the selected date range.")
+            # ── Daily Activity Bar Chart (Refills + Unloads + Outdates stacked) ──
+            st.subheader("📅 Daily Transaction Activity")
+            st.caption("Day-by-day breakdown of refills, unloads, and outdates across the selected range.")
 
-            if not refills.empty:
-                refills["_date"] = refills["dt"].dt.date
-                daily_refills = (
-                    refills.groupby("_date")
+            daily_rows = []
+            for label, subset in [("Refill / Restock", refills), ("Unload", unloads), ("Outdate", outdates)]:
+                if not subset.empty:
+                    d = subset.copy()
+                    d["_date"] = d["dt"].dt.date
+                    counts = d.groupby("_date").size().reset_index(name="count")
+                    counts["type"] = label
+                    daily_rows.append(counts)
+
+            if daily_rows:
+                daily_df = pd.concat(daily_rows).sort_values("_date")
+                fig_daily = px.bar(
+                    daily_df,
+                    x="_date", y="count",
+                    color="type",
+                    color_discrete_map={
+                        "Refill / Restock": "#3b82f6",
+                        "Unload":           "#8b5cf6",
+                        "Outdate":          "#f97316",
+                    },
+                    barmode="group",
+                    labels={"_date": "", "count": "Transactions", "type": ""},
+                    text="count"
+                )
+                fig_daily.update_traces(textposition="outside", textfont_size=10)
+                fig_daily.update_layout(
+                    bargap=0.2,
+                    bargroupgap=0.05,
+                    height=400,
+                    xaxis=dict(tickformat="%b %d", tickangle=-30),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                )
+                st.plotly_chart(fig_daily, use_container_width=True)
+            else:
+                # Only unload-type events in DB — show those as the daily chart
+                ev["_date"] = ev["dt"].dt.date
+                daily_all = (
+                    ev[~ev["_etype"].str.contains("cancel|verify", na=False)]
+                    .groupby(["_date", "event_type"])
                     .size()
                     .reset_index(name="count")
                     .sort_values("_date")
                 )
-                fig_daily = px.bar(
-                    daily_refills,
-                    x="_date", y="count",
-                    title="Daily Refill / Restock Count",
-                    labels={"_date": "", "count": "Transactions"},
-                    color="count",
-                    color_continuous_scale="Blues",
-                    text="count"
-                )
-                fig_daily.update_traces(textposition="outside", textfont_size=11)
-                fig_daily.update_layout(
-                    coloraxis_showscale=False,
-                    bargap=0.25,
-                    height=380,
-                    xaxis=dict(tickformat="%b %d", tickangle=-30)
-                )
-                st.plotly_chart(fig_daily, use_container_width=True)
-            else:
-                st.info("No refill/restock events found in the selected date range. Event types in your data may use different names — check the Raw Detail in Load/Unload.")
+                if not daily_all.empty:
+                    fig_daily = px.bar(
+                        daily_all,
+                        x="_date", y="count",
+                        color="event_type",
+                        barmode="group",
+                        labels={"_date": "", "count": "Transactions", "event_type": ""},
+                        text="count"
+                    )
+                    fig_daily.update_traces(textposition="outside", textfont_size=10)
+                    fig_daily.update_layout(
+                        height=400,
+                        xaxis=dict(tickformat="%b %d", tickangle=-30),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+                    )
+                    st.plotly_chart(fig_daily, use_container_width=True)
+                    st.caption(
+                        "💡 Only unload-type events found in this range. "
+                        "Upload a Daily Transaction Report to see refills and outdates."
+                    )
 
             st.divider()
 
@@ -864,35 +911,34 @@ if _is_main:
             st.subheader("🏋️ Heavy Hitter Stats")
             col_a, col_b, col_c = st.columns(3)
 
-            # Column A — Top techs by refill volume
+            # Column A — Top techs by refill volume (fallback to all tx if no refills)
             with col_a:
                 st.markdown("**🔝 Top Techs by Refill Volume**")
-                if not refills.empty:
-                    top_tech = (
-                        refills.groupby("user_name")
-                        .size()
-                        .reset_index(name="refills")
-                        .sort_values("refills", ascending=False)
-                        .head(10)
-                    )
-                    fig_tech = px.bar(
-                        top_tech, x="refills", y="user_name",
-                        orientation="h",
-                        labels={"refills": "Refills", "user_name": ""},
-                        color="refills", color_continuous_scale="Blues",
-                        text="refills"
-                    )
-                    fig_tech.update_traces(textposition="outside")
-                    fig_tech.update_layout(
-                        yaxis={"categoryorder": "total ascending"},
-                        coloraxis_showscale=False,
-                        height=380, margin=dict(l=0, r=10, t=10, b=0)
-                    )
-                    st.plotly_chart(fig_tech, use_container_width=True)
-                else:
-                    st.info("No refill data.")
+                source = refills if not refills.empty else real_tx
+                label  = "Refills" if not refills.empty else "Transactions"
+                top_tech = (
+                    source.groupby("user_name")
+                    .size()
+                    .reset_index(name=label)
+                    .sort_values(label, ascending=False)
+                    .head(10)
+                )
+                fig_tech = px.bar(
+                    top_tech, x=label, y="user_name",
+                    orientation="h",
+                    labels={label: label, "user_name": ""},
+                    color=label, color_continuous_scale="Blues",
+                    text=label
+                )
+                fig_tech.update_traces(textposition="outside")
+                fig_tech.update_layout(
+                    yaxis={"categoryorder": "total ascending"},
+                    coloraxis_showscale=False,
+                    height=380, margin=dict(l=0, r=30, t=10, b=0)
+                )
+                st.plotly_chart(fig_tech, use_container_width=True)
 
-            # Column B — Top devices by total transactions
+            # Column B — Busiest devices
             with col_b:
                 st.markdown("**🖥️ Busiest Devices**")
                 top_dev = (
@@ -913,11 +959,11 @@ if _is_main:
                 fig_dev.update_layout(
                     yaxis={"categoryorder": "total ascending"},
                     coloraxis_showscale=False,
-                    height=380, margin=dict(l=0, r=10, t=10, b=0)
+                    height=380, margin=dict(l=0, r=30, t=10, b=0)
                 )
                 st.plotly_chart(fig_dev, use_container_width=True)
 
-            # Column C — Outdates & Unloads breakdown
+            # Column C — Outdates & Unloads by tech (stacked)
             with col_c:
                 st.markdown("**📦 Outdates & Unloads by Tech**")
                 combined = []
@@ -932,6 +978,14 @@ if _is_main:
 
                 if combined:
                     combo_df = pd.concat(combined)
+                    # Keep only top 10 techs by total
+                    top_techs = (
+                        combo_df.groupby("user_name")["count"]
+                        .sum()
+                        .nlargest(10)
+                        .index
+                    )
+                    combo_df = combo_df[combo_df["user_name"].isin(top_techs)]
                     fig_ou = px.bar(
                         combo_df,
                         x="count", y="user_name",
@@ -939,46 +993,61 @@ if _is_main:
                         orientation="h",
                         barmode="stack",
                         labels={"count": "Events", "user_name": "", "type": ""},
-                        color_discrete_map={"Outdate": "#f97316", "Unload": "#3b82f6"},
+                        color_discrete_map={"Outdate": "#f97316", "Unload": "#8b5cf6"},
                         text="count"
                     )
                     fig_ou.update_traces(textposition="inside")
                     fig_ou.update_layout(
                         yaxis={"categoryorder": "total ascending"},
-                        height=380, margin=dict(l=0, r=10, t=10, b=0)
+                        height=380, margin=dict(l=0, r=10, t=10, b=0),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
                     )
                     st.plotly_chart(fig_ou, use_container_width=True)
                 else:
-                    st.info("No outdate or unload events found.")
+                    st.info("No outdate or unload events in this range.")
 
             st.divider()
 
-            # ── Slowest Meds + Tx Type breakdown (existing, preserved) ───────
+            # ── Slowest Meds + Transaction Type Pie ──────────────────────────
             col_main, col_side = st.columns([2, 1])
             with col_main:
-                st.subheader("🐢 Slowest Medications (Machine Time)")
-                med_speed = ev[ev["machine_time_sec"] > 0].groupby("med_desc")["machine_time_sec"].mean().reset_index()
-                top_slow  = med_speed.sort_values("machine_time_sec", ascending=False).head(10)
-                fig_slow  = px.bar(
+                st.subheader("🐢 Slowest Medications (Avg Machine Time)")
+                med_speed = (
+                    ev[ev["machine_time_sec"] > 0]
+                    .groupby("med_desc")["machine_time_sec"]
+                    .mean()
+                    .reset_index()
+                )
+                top_slow = med_speed.sort_values("machine_time_sec", ascending=False).head(10)
+                fig_slow = px.bar(
                     top_slow, x="machine_time_sec", y="med_desc",
                     orientation="h", text_auto=".0f",
-                    color="machine_time_sec", color_continuous_scale="Reds"
+                    color="machine_time_sec", color_continuous_scale="Reds",
+                    labels={"machine_time_sec": "Avg Seconds", "med_desc": ""}
                 )
                 fig_slow.update_layout(
-                    yaxis={"categoryorder": "total ascending", "title": ""},
-                    xaxis_title="Seconds", coloraxis_showscale=False
+                    yaxis={"categoryorder": "total ascending"},
+                    coloraxis_showscale=False
                 )
                 st.plotly_chart(fig_slow, use_container_width=True)
             with col_side:
-                st.subheader("Transaction Types")
-                type_counts = ev["event_type"].value_counts().reset_index()
-                fig_pie = px.pie(
-                    type_counts, names="event_type", values="count", hole=0.4
+                st.subheader("Transaction Mix")
+                type_counts = (
+                    ev[~ev["_etype"].str.contains("cancel", na=False)]
+                    ["event_type"].value_counts().reset_index()
                 )
-                fig_pie.update_layout(showlegend=True, legend=dict(font=dict(size=10)))
+                fig_pie = px.pie(
+                    type_counts, names="event_type", values="count", hole=0.45
+                )
+                fig_pie.update_layout(
+                    showlegend=True,
+                    legend=dict(font=dict(size=10), orientation="v")
+                )
                 st.plotly_chart(fig_pie, use_container_width=True)
 
-    # 4. COMPLIANCE
+        else:
+            st.info("No Pyxis event data found for the selected date range. Upload a Daily Transaction Report to get started.")
+
     elif selected_page == "🛡️ Compliance":
         if not df_events.empty:
             disc_df = df_events[df_events['discrepancy_qty'] != 0].copy()
