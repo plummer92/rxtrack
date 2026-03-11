@@ -189,6 +189,30 @@ def load_all_pends_history():
 
 df_hist = load_all_pends_history()
 
+@st.cache_data(ttl=300)
+def load_all_unloads():
+    """All unload events (Unload + Empty return bin) across all time for lifecycle analysis."""
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, device, med_id, med_desc,
+                   event_type, qty, cost_per_unit
+            FROM events
+            WHERE (event_type ILIKE '%unload%' OR event_type ILIKE '%empty%')
+              AND event_type NOT ILIKE '%cancel%'
+              AND event_type NOT ILIKE '%eject%'
+        """)
+        with engine.connect() as conn:
+            df_ul = pd.read_sql(sql, conn)
+        df_ul["dt"]     = pd.to_datetime(df_ul["dt"], errors="coerce")
+        df_ul["med_id"] = df_ul["med_id"].astype(str).str.strip().str.upper()
+        df_ul["device"] = df_ul["device"].fillna("Unknown").astype(str).str.strip()
+        return df_ul
+    except Exception as e:
+        st.warning(f"[load_all_unloads] {e}")
+        return pd.DataFrame()
+
+df_unloads = load_all_unloads()
+
 outlier_flags = []  # list of dicts, one per flagged event
 
 if not df_hist.empty and not filtered.empty:
@@ -295,16 +319,119 @@ if not df_hist.empty and not filtered.empty:
 
 df_outliers = pd.DataFrame(outlier_flags).drop_duplicates(subset=["pk", "flag_type"]) if outlier_flags else pd.DataFrame()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LAYER 4C — MED LIFECYCLE BUILDER
+# Unit: med_id + device pair
+# Start:  first pend event on that device (from config_events, all-time)
+# Unloads: all unload events for same med+device AFTER the first pend
+# Metrics: days to first unload, total unload qty, unload qty vs max par,
+#          total unload value, active/never used classification
+# ═══════════════════════════════════════════════════════════════════════════════
+
+df_lifecycle = pd.DataFrame()
+
+if not df_hist.empty and not df_unloads.empty:
+
+    # First pend per med+device (all-time baseline)
+    first_pend = (
+        df_hist
+        .groupby(["med_id", "device"])
+        .agg(
+            first_pend_dt = ("dt",         "min"),
+            pend_count    = ("pk",         "count"),
+            last_min_qty  = ("min_qty",    "last"),
+            last_max_qty  = ("max_qty",    "last"),
+            pend_user     = ("user_name",  "first"),
+            made_standard = ("is_standard",lambda x: (x == True).any()),
+        )
+        .reset_index()
+    )
+
+    # Only keep pairs where the first pend falls within the sidebar date range
+    first_pend["first_pend_date"] = first_pend["first_pend_dt"].dt.date
+    first_pend_filtered = first_pend[
+        (first_pend["first_pend_date"] >= start_date) &
+        (first_pend["first_pend_date"] <= end_date)
+    ].copy()
+
+    if not first_pend_filtered.empty:
+        # Join unloads that occurred AFTER the first pend on the same med+device
+        lifecycle_rows = []
+        for _, pend_row in first_pend_filtered.iterrows():
+            mid     = pend_row["med_id"]
+            dev     = pend_row["device"]
+            pend_dt = pend_row["first_pend_dt"]
+
+            ul = df_unloads[
+                (df_unloads["med_id"] == mid) &
+                (df_unloads["device"] == dev) &
+                (df_unloads["dt"]     >= pend_dt)
+            ]
+
+            if not ul.empty:
+                first_unload_dt  = ul["dt"].min()
+                days_to_first    = (first_unload_dt - pend_dt).days
+                total_unload_qty = ul["qty"].sum()
+                total_unload_val = (ul["qty"] * ul["cost_per_unit"].fillna(0)).sum()
+                unload_events    = len(ul)
+                last_unload_dt   = ul["dt"].max()
+                # Par utilisation: how much was unloaded vs the max par set
+                par_util_pct     = (
+                    (total_unload_qty / pend_row["last_max_qty"] * 100)
+                    if pd.notna(pend_row["last_max_qty"]) and pend_row["last_max_qty"] > 0
+                    else None
+                )
+                status = "✅ Active"
+            else:
+                first_unload_dt  = None
+                days_to_first    = None
+                total_unload_qty = 0
+                total_unload_val = 0
+                unload_events    = 0
+                last_unload_dt   = None
+                par_util_pct     = 0
+                status           = "💤 Never Unloaded"
+
+            # Drug name lookup
+            drug_info = df_drugs[df_drugs["med_id"] == mid]
+            display_name = drug_info["display_name"].iloc[0] if not drug_info.empty else mid
+
+            lifecycle_rows.append({
+                "med_id":          mid,
+                "device":          dev,
+                "display_name":    display_name,
+                "first_pend_dt":   pend_dt,
+                "pend_user":       pend_row["pend_user"],
+                "pend_count":      pend_row["pend_count"],
+                "last_min_qty":    pend_row["last_min_qty"],
+                "last_max_qty":    pend_row["last_max_qty"],
+                "made_standard":   pend_row["made_standard"],
+                "status":          status,
+                "days_to_first_unload": days_to_first,
+                "first_unload_dt": first_unload_dt,
+                "last_unload_dt":  last_unload_dt,
+                "unload_events":   unload_events,
+                "total_unload_qty":total_unload_qty,
+                "total_unload_val":total_unload_val,
+                "par_util_pct":    par_util_pct,
+            })
+
+        df_lifecycle = pd.DataFrame(lifecycle_rows).sort_values(
+            "days_to_first_unload", ascending=True, na_position="last"
+        )
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 5 — TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📋 Par Audit",
     "👤 By User",
     "🖥️ By Device",
     "🔍 Raw Detail",
     "🚨 Outlier Detector",
+    "🔬 Med Lifecycle",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -687,6 +814,153 @@ with tab5:
                 "min_qty":     st.column_config.NumberColumn("Min",          format="%.0f"),
                 "max_qty":     st.column_config.NumberColumn("Max",          format="%.0f"),
                 "is_standard": st.column_config.CheckboxColumn("Standard"),
+            },
+            hide_index=True
+        )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 6 — MED LIFECYCLE
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab6:
+    st.subheader("🔬 Med Lifecycle — Pend to Unload")
+    st.caption(
+        "Tracks each med+device pair from its first pend event through all subsequent unloads. "
+        "Shows how fast pended meds get used, whether par levels are appropriate, "
+        "and which meds were pended but never touched."
+    )
+
+    if df_lifecycle.empty:
+        st.info("No lifecycle data available. Make sure both pend (config_events) and unload (events) data are uploaded, and that some pend events fall within your selected date range.")
+    else:
+        # ── Summary metrics ──────────────────────────────────────────────────
+        active_ct     = int((df_lifecycle["status"] == "✅ Active").sum())
+        never_ct      = int((df_lifecycle["status"] == "💤 Never Unloaded").sum())
+        total_pairs   = len(df_lifecycle)
+        avg_days      = df_lifecycle["days_to_first_unload"].mean()
+        total_val     = df_lifecycle["total_unload_val"].sum()
+        fast_movers   = int((df_lifecycle["days_to_first_unload"] <= 3).sum())
+
+        lc1, lc2, lc3, lc4, lc5, lc6 = st.columns(6)
+        lc1.metric("Med+Device Pairs",      total_pairs)
+        lc2.metric("✅ Active",              active_ct)
+        lc3.metric("💤 Never Unloaded",      never_ct)
+        lc4.metric("Avg Days to First Use",  f"{avg_days:.1f}" if pd.notna(avg_days) else "N/A")
+        lc5.metric("Fast Movers (≤3 days)",  fast_movers)
+        lc6.metric("Total Unload Value",     f"${total_val:,.2f}")
+
+        st.divider()
+
+        # ── Days to first unload distribution ────────────────────────────────
+        active_df = df_lifecycle[df_lifecycle["days_to_first_unload"].notna()].copy()
+        if not active_df.empty:
+            fig_dist = px.histogram(
+                active_df,
+                x="days_to_first_unload",
+                nbins=30,
+                title="Distribution — Days from First Pend to First Unload",
+                labels={"days_to_first_unload": "Days to First Unload", "count": "Meds"},
+                color_discrete_sequence=["#3b82f6"]
+            )
+            fig_dist.add_vline(
+                x=active_df["days_to_first_unload"].median(),
+                line_dash="dash", line_color="#ef4444",
+                annotation_text=f"Median: {active_df['days_to_first_unload'].median():.0f}d",
+                annotation_position="top right"
+            )
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+        col_a, col_b = st.columns(2)
+
+        # ── Par utilisation scatter ───────────────────────────────────────────
+        with col_a:
+            par_df = df_lifecycle[
+                df_lifecycle["par_util_pct"].notna() &
+                (df_lifecycle["par_util_pct"] > 0)
+            ].copy()
+            if not par_df.empty:
+                fig_par = px.scatter(
+                    par_df,
+                    x="last_max_qty", y="total_unload_qty",
+                    color="status",
+                    hover_name="display_name",
+                    hover_data=["device", "days_to_first_unload", "par_util_pct"],
+                    title="Par Max Set vs Total Qty Unloaded",
+                    labels={
+                        "last_max_qty":    "Max Par Set",
+                        "total_unload_qty":"Total Unloaded",
+                    },
+                    color_discrete_map={"✅ Active": "#22c55e", "💤 Never Unloaded": "#94a3b8"}
+                )
+                # 1:1 reference line — unloaded exactly = max par
+                max_val = max(par_df["last_max_qty"].max(), par_df["total_unload_qty"].max())
+                fig_par.add_shape(
+                    type="line", x0=0, y0=0, x1=max_val, y1=max_val,
+                    line=dict(color="#ef4444", dash="dot", width=1)
+                )
+                fig_par.add_annotation(
+                    x=max_val * 0.8, y=max_val * 0.85,
+                    text="Unloaded = Par Max", showarrow=False,
+                    font=dict(color="#ef4444", size=11)
+                )
+                st.plotly_chart(fig_par, use_container_width=True)
+
+        # ── Never unloaded breakdown ──────────────────────────────────────────
+        with col_b:
+            never_df = df_lifecycle[df_lifecycle["status"] == "💤 Never Unloaded"].copy()
+            if not never_df.empty:
+                fig_never = px.bar(
+                    never_df.head(15),
+                    x="pend_count", y="display_name",
+                    orientation="h",
+                    color="made_standard",
+                    color_discrete_map={True: "#f97316", False: "#94a3b8"},
+                    title="Never-Unloaded Meds (# Pend Events)",
+                    labels={
+                        "pend_count":    "Times Pended",
+                        "display_name":  "",
+                        "made_standard": "Made Standard"
+                    }
+                )
+                fig_never.update_layout(yaxis={"categoryorder": "total ascending"})
+                st.plotly_chart(fig_never, use_container_width=True)
+
+        st.divider()
+
+        # ── Full lifecycle table ──────────────────────────────────────────────
+        status_filter = st.multiselect(
+            "Filter by Status",
+            ["✅ Active", "💤 Never Unloaded"],
+            default=["✅ Active", "💤 Never Unloaded"],
+            key="pends_lifecycle_status_filter"
+        )
+        lc_view = df_lifecycle[df_lifecycle["status"].isin(status_filter)] if status_filter else df_lifecycle
+
+        display_cols = [c for c in [
+            "status", "display_name", "device", "pend_user",
+            "first_pend_dt", "last_min_qty", "last_max_qty", "made_standard",
+            "days_to_first_unload", "first_unload_dt", "last_unload_dt",
+            "unload_events", "total_unload_qty", "par_util_pct", "total_unload_val",
+        ] if c in lc_view.columns]
+
+        st.dataframe(
+            lc_view[display_cols],
+            use_container_width=True,
+            column_config={
+                "status":               st.column_config.TextColumn("Status"),
+                "display_name":         st.column_config.TextColumn("Medication"),
+                "pend_user":            st.column_config.TextColumn("Pended By"),
+                "first_pend_dt":        st.column_config.DatetimeColumn("First Pended",      format="MM/DD/YY HH:mm"),
+                "last_min_qty":         st.column_config.NumberColumn("Min Par",             format="%.0f"),
+                "last_max_qty":         st.column_config.NumberColumn("Max Par",             format="%.0f"),
+                "made_standard":        st.column_config.CheckboxColumn("Standard Stock"),
+                "days_to_first_unload": st.column_config.NumberColumn("Days to First Use",   format="%d"),
+                "first_unload_dt":      st.column_config.DatetimeColumn("First Unloaded",    format="MM/DD/YY HH:mm"),
+                "last_unload_dt":       st.column_config.DatetimeColumn("Last Unloaded",     format="MM/DD/YY HH:mm"),
+                "unload_events":        st.column_config.NumberColumn("Unload Events",       format="%d"),
+                "total_unload_qty":     st.column_config.NumberColumn("Total Qty Unloaded",  format="%.0f"),
+                "par_util_pct":         st.column_config.NumberColumn("Par Utilisation %",   format="%.1f%%"),
+                "total_unload_val":     st.column_config.NumberColumn("Total Unload Value",  format="$%.2f"),
             },
             hide_index=True
         )
