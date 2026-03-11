@@ -152,6 +152,14 @@ def build_flags(row):
 df_disc["flags"] = df_disc.apply(build_flags, axis=1)
 flagged_ct = (df_disc["flags"] != "").sum()
 
+# ── Med Category Split ───────────────────────────────────────────────────────
+# Inhalers/Insulin are flagged separately — they drive disproportionate counts
+INHALER_INSULIN_PATTERN = r"hfa|inhaler|puff|actuat|insulin|lispro|glargine|detemir|aspart|glulisine|nph"
+
+df_disc["med_category"] = df_disc["med_desc"].str.lower().str.contains(
+    INHALER_INSULIN_PATTERN, regex=True, na=False
+).map({True: "💨 Inhaler / Insulin", False: "💊 All Other Meds"})
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 — SIDEBAR FILTERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -179,12 +187,19 @@ with st.sidebar:
         key="disc_cause_filter"
     )
     flagged_only = st.checkbox("Flagged only (high-value / repeat)", key="disc_flagged_only")
+    cat_filter = st.radio(
+        "Med Category",
+        ["All", "💨 Inhaler / Insulin", "💊 All Other Meds"],
+        index=0,
+        key="disc_cat_filter"
+    )
 
 filtered = df_disc.copy()
 if dev_filter:    filtered = filtered[filtered["device"].isin(dev_filter)]
 if med_filter:    filtered = filtered[filtered["med_desc"].isin(med_filter)]
 if cause_filter:  filtered = filtered[filtered["likely_cause"].isin(cause_filter)]
 if flagged_only:  filtered = filtered[filtered["flags"] != ""]
+if cat_filter != "All": filtered = filtered[filtered["med_category"] == cat_filter]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 5 — EXECUTIVE METRICS
@@ -203,6 +218,61 @@ m3.metric("Avg Risk per Event",   f"${avg_risk:,.2f}")
 m4.metric("Medications Affected", unique_meds)
 m5.metric("Devices Affected",     unique_devs)
 m6.metric("⚠️ Flagged Events",    flagged_ct)
+
+st.divider()
+
+# ── Inhaler / Insulin vs All Other Meds split ────────────────────────────────
+st.subheader("💨 Inhaler & Insulin vs 💊 All Other Meds")
+st.caption("These meds typically drive a disproportionate share of count errors due to unit-of-measure complexity.")
+
+inh_df  = filtered[filtered["med_category"] == "💨 Inhaler / Insulin"]
+other_df = filtered[filtered["med_category"] == "💊 All Other Meds"]
+
+sp1, sp2, sp3, sp4, sp5, sp6 = st.columns(6)
+sp1.metric("💨 Inhaler/Insulin Count",    f"{len(inh_df):,}")
+sp2.metric("💨 Inhaler/Insulin Risk",     f"${inh_df['dollar_risk'].sum():,.2f}")
+sp3.metric("💨 % of Total Count",
+           f"{len(inh_df)/len(filtered)*100:.1f}%" if len(filtered) > 0 else "0%")
+sp4.metric("💊 Other Meds Count",         f"{len(other_df):,}")
+sp5.metric("💊 Other Meds Risk",          f"${other_df['dollar_risk'].sum():,.2f}")
+sp6.metric("💊 % of Total Count",
+           f"{len(other_df)/len(filtered)*100:.1f}%" if len(filtered) > 0 else "0%")
+
+# Side-by-side donut: count split and dollar risk split
+if len(filtered) > 0:
+    sc1, sc2 = st.columns(2)
+    with sc1:
+        cat_counts = filtered["med_category"].value_counts().reset_index()
+        cat_counts.columns = ["category", "count"]
+        fig_cat_ct = px.pie(
+            cat_counts, names="category", values="count",
+            hole=0.5,
+            title="Share of Discrepancy Count",
+            color="category",
+            color_discrete_map={
+                "💨 Inhaler / Insulin": "#f97316",
+                "💊 All Other Meds":    "#3b82f6"
+            }
+        )
+        fig_cat_ct.update_layout(height=300, margin=dict(t=40, b=0))
+        st.plotly_chart(fig_cat_ct, use_container_width=True)
+    with sc2:
+        cat_risk = filtered.groupby("med_category")["dollar_risk"].sum().reset_index()
+        cat_risk.columns = ["category", "dollar_risk"]
+        fig_cat_risk = px.pie(
+            cat_risk, names="category", values="dollar_risk",
+            hole=0.5,
+            title="Share of Dollar Risk",
+            color="category",
+            color_discrete_map={
+                "💨 Inhaler / Insulin": "#f97316",
+                "💊 All Other Meds":    "#3b82f6"
+            }
+        )
+        fig_cat_risk.update_layout(height=300, margin=dict(t=40, b=0))
+        st.plotly_chart(fig_cat_risk, use_container_width=True)
+
+st.caption("Use the **Med Category** filter in the sidebar to drill into just one group across all tabs.")
 
 st.divider()
 
