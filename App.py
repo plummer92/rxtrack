@@ -31,6 +31,20 @@ engine = create_engine(
     pool_recycle=300
 )
 
+_DEFAULT_ADMIN_USERS = {"emily", "joe", "krista"}
+
+@st.cache_data(ttl=300)
+def load_admin_users():
+    """Load admin usernames from DB. Falls back to defaults if table is empty or unavailable."""
+    try:
+        from sqlalchemy import text as _t
+        with engine.connect() as conn:
+            result = conn.execute(_t("SELECT username FROM admin_users"))
+            users = {row[0].strip().lower() for row in result if row[0]}
+        return users if users else _DEFAULT_ADMIN_USERS
+    except Exception:
+        return _DEFAULT_ADMIN_USERS
+
 # --- DATABASE HELPERS ---
 @contextlib.contextmanager
 def db_cursor():
@@ -91,8 +105,13 @@ def init_db():
             unit_cost FLOAT, qty_on_hand FLOAT, min_lvl FLOAT, max_lvl FLOAT
         );""",
         """CREATE TABLE IF NOT EXISTS inventory_detailed (
-            pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT, 
+            pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT,
             unit_cost FLOAT, current_count FLOAT, pocket_location TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS admin_users (
+            username TEXT PRIMARY KEY,
+            display_name TEXT,
+            added_at TIMESTAMP DEFAULT NOW()
         );"""
     ]
     with db_cursor() as (conn, cur):
@@ -619,7 +638,7 @@ if _is_main:
         "CHLORDIAZEPOXIDE", "LIBRIUM", "CLONAZEPAM", "KLONOPIN"
     ]
 
-    ADMIN_USERS = ['emily', 'joe', 'krista']
+    ADMIN_USERS = load_admin_users()
 
     # Nickname Mappings
     NAME_MAPPINGS = {

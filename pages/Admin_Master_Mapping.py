@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from App import engine
+from App import engine, load_admin_users, _DEFAULT_ADMIN_USERS
 
 st.header("📥 Master Carousel Mapping Upload")
 st.caption("Upload Item Location Report to update master carousel assignments.")
@@ -275,3 +275,61 @@ if variance_file:
 
         st.success(f"✅ Successfully uploaded {len(df_upload)} variance records.")
         st.cache_data.clear()
+
+st.divider()
+
+# =============================================================
+# 👤 ADMIN USER MANAGEMENT
+# =============================================================
+
+st.header("👤 Admin User Management")
+st.caption("Admin users are excluded from tardiness and workforce analytics.")
+
+current_admins = load_admin_users()
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.subheader("Current Admin Users")
+    if current_admins:
+        for u in sorted(current_admins):
+            c1, c2 = st.columns([3, 1])
+            c1.write(u)
+            if c2.button("Remove", key=f"remove_{u}"):
+                if u in _DEFAULT_ADMIN_USERS:
+                    st.warning(f"⚠️ Cannot remove built-in admin '{u}'.")
+                else:
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(text("DELETE FROM admin_users WHERE username = :u"), {"u": u})
+                        st.success(f"Removed '{u}'.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Failed to remove user: {e}")
+    else:
+        st.info("No admin users configured.")
+
+with col_right:
+    st.subheader("Add Admin User")
+    new_admin = st.text_input("Username (lowercase)", placeholder="e.g. johndoe")
+    display_name = st.text_input("Display Name (optional)", placeholder="e.g. John Doe")
+    if st.button("➕ Add Admin User"):
+        username = new_admin.strip().lower()
+        if not username:
+            st.warning("Enter a username.")
+        elif username in current_admins:
+            st.warning(f"'{username}' is already an admin.")
+        else:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        INSERT INTO admin_users (username, display_name)
+                        VALUES (:u, :d)
+                        ON CONFLICT (username) DO NOTHING
+                    """), {"u": username, "d": display_name.strip() or None})
+                st.success(f"✅ Added '{username}' as admin.")
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to add user: {e}")

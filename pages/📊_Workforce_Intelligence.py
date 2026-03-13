@@ -84,14 +84,14 @@ else:
 
     # Tardy logic (wrap in safety check)
     if not df_sched.empty and not df_att.empty:
-        from App import parse_shift_start, normalize_name, ADMIN_USERS
+        from App import parse_shift_start, normalize_name, load_admin_users
 
         df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
         df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
         df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
         df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
 
-        df_sched = df_sched[~df_sched['match_key'].isin(ADMIN_USERS)]
+        df_sched = df_sched[~df_sched['match_key'].isin(load_admin_users())]
 
         merged = pd.merge(df_sched, df_att, on=['match_key', 'date_obj'], how='inner')
 
