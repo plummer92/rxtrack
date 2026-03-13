@@ -54,53 +54,6 @@ def load_all_pharm():
 
 @st.cache_data(ttl=300)
 def load_open_variances():
-    """Pull med_ids that have unmatched return events in the events + pharmacy_orders tables.
-    A variance = med was unloaded from Pyxis but qty_pyxis != qty_pharm for that med/date."""
-    try:
-        sql = text("""
-            WITH unloads AS (
-                SELECT
-                    med_id,
-                    dt::date AS tx_date,
-                    SUM(qty) AS qty_pyxis
-                FROM events
-                WHERE event_type ILIKE '%unload%' OR event_type ILIKE '%empty%'
-                AND event_type NOT ILIKE '%cancel%'
-                AND event_type NOT ILIKE '%eject%'
-                GROUP BY med_id, dt::date
-            ),
-            returns AS (
-                SELECT
-                    med_id,
-                    dt::date AS tx_date,
-                    SUM(qty) AS qty_pharm
-                FROM pharmacy_orders
-                WHERE priority = 'Returns'
-                GROUP BY med_id, dt::date
-            ),
-            reconciled AS (
-                SELECT
-                    COALESCE(u.med_id, r.med_id) AS med_id,
-                    COALESCE(u.qty_pyxis, 0)     AS qty_pyxis,
-                    COALESCE(r.qty_pharm, 0)      AS qty_pharm
-                FROM unloads u
-                FULL OUTER JOIN returns r
-                    ON u.med_id = r.med_id AND u.tx_date = r.tx_date
-            )
-            SELECT DISTINCT med_id
-            FROM reconciled
-            WHERE qty_pyxis != qty_pharm
-        """)
-        with engine.connect() as conn:
-            result = conn.execute(sql)
-            ids = set(row[0].strip().upper() for row in result if row[0])
-        return ids
-    except Exception as e:
-        st.warning(f"⚠️ Could not load return variance data: {e}")
-        return set()
-
-@st.cache_data(ttl=300)
-def load_open_variances():
     """Med_ids that have unmatched qty between Pyxis unloads and pharmacy returns."""
     try:
         sql = text("""
@@ -138,7 +91,6 @@ def load_open_variances():
 
 df_all_pharm      = load_all_pharm()
 df_master         = load_master_mapping()
-open_variance_ids = load_open_variances()
 open_variance_ids = load_open_variances()
 
 if df_all_pharm.empty:
