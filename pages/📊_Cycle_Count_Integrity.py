@@ -3,9 +3,17 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import io
 from datetime import date
 from sqlalchemy import text
 from App import load_data, engine, render_sidebar
+
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
 
 st.set_page_config(
     page_title="Cycle Count Integrity",
@@ -409,6 +417,12 @@ with tab1:
             "is_controlled":        st.column_config.CheckboxColumn("Controlled"),
         },
         hide_index=True
+    )
+    st.download_button(
+        "⬇️ Export Worklist to Excel",
+        data=to_excel_bytes(filtered[display_cols]),
+        file_name="cycle_count_worklist.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 # ── TAB 2: NEVER COUNTED ─────────────────────────────

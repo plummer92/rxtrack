@@ -2,6 +2,14 @@ from App import load_data, seconds_to_mmss
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io
+
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
 
 st.set_page_config(page_title="Workforce Intelligence", layout="wide")
 st.header("📊 Workforce Intelligence Scorecard")
@@ -153,8 +161,15 @@ else:
 
     summary['Active Time'] = summary['total_active'].apply(seconds_to_mmss)
 
+    export_cols = ['user_name', 'Active Time', 'tx_per_hour', 'walk_pct',
+                   'tardies', 'efficiency_score', 'Tier', 'Alert']
     st.dataframe(
-        summary[['user_name', 'Active Time', 'tx_per_hour', 'walk_pct',
-                 'tardies', 'efficiency_score', 'Tier', 'Alert']],
+        summary[export_cols],
         use_container_width=True
+    )
+    st.download_button(
+        "⬇️ Export Scorecard to Excel",
+        data=to_excel_bytes(summary[export_cols]),
+        file_name="workforce_scorecard.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )

@@ -854,6 +854,69 @@ if _is_main:
 
             st.divider()
 
+            # ── Proactive Alerts Panel ────────────────────────────────────────
+            with st.expander("🔔 Proactive Alerts", expanded=True):
+                alerts = []
+
+                # Stockout risk: meds with ending_qty == 0 in the window
+                if "ending_qty" in df_events.columns and "med_desc" in df_events.columns:
+                    last_inv = (
+                        df_events.sort_values("dt")
+                        .groupby(["device", "med_desc"])["ending_qty"]
+                        .last()
+                        .reset_index()
+                    )
+                    stockouts = last_inv[last_inv["ending_qty"] == 0]
+                    if not stockouts.empty:
+                        alerts.append(("🚨", f"**{len(stockouts)} medication(s) at zero inventory** — potential stockout.", "error"))
+
+                # High discrepancy rate: > 2% of transactions
+                disc_count = int(df_events["discrepancy_qty"].ne(0).sum())
+                total_count = len(real_tx)
+                if total_count > 0 and disc_count / total_count > 0.02:
+                    pct = disc_count / total_count * 100
+                    alerts.append(("⚠️", f"**Discrepancy rate is {pct:.1f}%** ({disc_count}/{total_count} transactions) — above 2% threshold.", "warning"))
+
+                # Tardy alert: load from DB if sched/att data present
+                if not df_sched.empty and not df_att.empty:
+                    try:
+                        _sched = df_sched.copy()
+                        _att   = df_att.copy()
+                        _sched["match_key"] = _sched["staff_name"].apply(normalize_name)
+                        _att["match_key"]   = _att["raw_name"].apply(normalize_name)
+                        _sched["date_obj"]  = pd.to_datetime(_sched["dt"]).dt.date
+                        _att["date_obj"]    = pd.to_datetime(_att["dt_date"]).dt.date
+                        _sched = _sched[~_sched["match_key"].isin(load_admin_users())]
+                        _merged = pd.merge(_sched, _att, on=["match_key", "date_obj"], how="inner")
+                        _merged["actual"]    = pd.to_datetime(_merged["start_dt"], errors="coerce")
+                        _merged["scheduled"] = _merged.apply(lambda x: parse_shift_start(x["date_obj"], x["shift_type"]), axis=1)
+                        _merged = _merged.dropna(subset=["actual", "scheduled"])
+                        _merged["delay_min"] = (_merged["actual"] - _merged["scheduled"]).dt.total_seconds() / 60
+                        tardy_count = int((_merged["delay_min"] > 5).sum())
+                        repeat_offenders = (
+                            _merged[_merged["delay_min"] > 5]
+                            .groupby("staff_name").size()
+                        )
+                        repeat_count = int((repeat_offenders >= 3).sum())
+                        if tardy_count > 0:
+                            msg = f"**{tardy_count} tardy clock-in(s)** in this window."
+                            if repeat_count > 0:
+                                msg += f" {repeat_count} technician(s) with 3+ tardies."
+                            alerts.append(("⏰", msg, "warning"))
+                    except Exception:
+                        pass
+
+                if alerts:
+                    for icon, msg, level in alerts:
+                        if level == "error":
+                            st.error(f"{icon} {msg}")
+                        else:
+                            st.warning(f"{icon} {msg}")
+                else:
+                    st.success("✅ No active alerts for this date range.")
+
+            st.divider()
+
             # ── Daily Activity Bar Chart (Refills + Unloads + Outdates stacked) ──
             st.subheader("📅 Daily Transaction Activity")
             st.caption("Day-by-day breakdown of refills, unloads, and outdates across the selected range.")
