@@ -89,9 +89,10 @@ def load_open_variances():
         st.warning(f"⚠️ Could not load return variance data: {e}")
         return set()
 
-df_all_pharm      = load_all_pharm()
-df_master         = load_master_mapping()
-open_variance_ids = load_open_variances()
+with st.spinner("Loading cycle count data..."):
+    df_all_pharm      = load_all_pharm()
+    df_master         = load_master_mapping()
+    open_variance_ids = load_open_variances()
 
 if df_all_pharm.empty:
     st.warning("No pharmacy workflow data found.")

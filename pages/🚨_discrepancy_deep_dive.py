@@ -86,8 +86,9 @@ def load_prior_transactions(start, end):
 
 # ── Execute loaders ───────────────────────────────────────────────────────────
 
-df_disc  = load_discrepancies(start_date, end_date)
-df_prior = load_prior_transactions(start_date, end_date)
+with st.spinner("Loading discrepancy data..."):
+    df_disc  = load_discrepancies(start_date, end_date)
+    df_prior = load_prior_transactions(start_date, end_date)
 
 if df_disc.empty:
     st.success("✅ No discrepancies found in the selected date range.")

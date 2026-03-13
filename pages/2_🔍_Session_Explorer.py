@@ -14,7 +14,8 @@ st.caption("Analyzing chronological work blocks across Pyxis and Pharmacy system
 # Date Selection (from sidebar)
 # ----------------------------------------------------
 
-df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
+with st.spinner("Loading session data..."):
+    df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
 # ----------------------------
 # Data Unification

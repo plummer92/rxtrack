@@ -20,10 +20,11 @@ if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")
 else:
     # 1. Load data using anchored sidebar dates
-    _, _, _, df_sched, df_att = load_data(
-        st.session_state.start_date, 
-        st.session_state.end_date
-    )
+    with st.spinner("Loading attendance data..."):
+        _, _, _, df_sched, df_att = load_data(
+            st.session_state.start_date,
+            st.session_state.end_date
+        )
     
     if not df_sched.empty and not df_att.empty:
         # 2. Data Preparation and Admin Exclusion

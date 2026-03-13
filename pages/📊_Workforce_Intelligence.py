@@ -11,10 +11,11 @@ if 'start_date' not in st.session_state:
     st.info("👈 Select a date range on Overview first.")
 
 else:
-    df_events, _, df_pharm, df_sched, df_att = load_data(
-        st.session_state.start_date,
-        st.session_state.end_date
-    )
+    with st.spinner("Loading workforce data..."):
+        df_events, _, df_pharm, df_sched, df_att = load_data(
+            st.session_state.start_date,
+            st.session_state.end_date
+        )
 
     if df_events.empty and df_pharm.empty:
         st.warning("No activity found for selected window.")

@@ -2,33 +2,33 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from App import engine
+from sqlalchemy import text
+from App import engine, render_sidebar
 
 st.set_page_config(page_title="RxBrain", page_icon="🧠", layout="wide")
 
-st.header("🧠 RxTrack Intelligence Engine")
-st.caption("Learning from all accumulated data to surface trends and risks.")
+start_date, end_date = render_sidebar()
 
-# ----------------------------------------------------
-# Load all historical data (this is intentional —
-# RxBrain learns from everything, not a date window)
-# ----------------------------------------------------
+st.header("🧠 RxTrack Intelligence Engine")
+st.caption("Surfaces trends and risks for the selected date window.")
 
 @st.cache_data(ttl=600)
-def load_all_data():
+def load_all_data(start, end):
     with engine.connect() as conn:
-        df_e = pd.read_sql("""
+        df_e = pd.read_sql(text("""
             SELECT user_name, device, med_id, med_desc, event_type,
                    dt, qty, beginning_qty, ending_qty, discrepancy_qty
             FROM events
+            WHERE dt::date BETWEEN :start AND :end
             ORDER BY dt DESC
-        """, conn)
+        """), conn, params={"start": start, "end": end})
 
-        df_p = pd.read_sql("""
+        df_p = pd.read_sql(text("""
             SELECT user_name, med_id, med_desc, destination, priority, dt, qty
             FROM pharmacy_orders
+            WHERE dt::date BETWEEN :start AND :end
             ORDER BY dt DESC
-        """, conn)
+        """), conn, params={"start": start, "end": end})
 
     if not df_e.empty:
         df_e["dt"] = pd.to_datetime(df_e["dt"], errors="coerce")
@@ -39,11 +39,11 @@ def load_all_data():
 
     return df_e, df_p
 
-with st.spinner("Loading all historical data..."):
-    df_events, df_pharm = load_all_data()
+with st.spinner("Loading data..."):
+    df_events, df_pharm = load_all_data(start_date, end_date)
 
 if df_events.empty:
-    st.warning("No historical data found.")
+    st.warning("No data found for the selected date range.")
     st.stop()
 
 date_min = df_events["dt"].min().date()

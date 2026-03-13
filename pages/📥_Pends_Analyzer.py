@@ -75,8 +75,9 @@ def load_drug_names():
         return pd.DataFrame()
 
 
-df_raw   = load_pends(start_date, end_date)
-df_drugs = load_drug_names()
+with st.spinner("Loading pends data..."):
+    df_raw   = load_pends(start_date, end_date)
+    df_drugs = load_drug_names()
 
 if df_raw.empty:
     st.warning("No pend activity found for the selected date range.")
@@ -187,7 +188,8 @@ def load_all_pends_history():
         st.warning(f"[load_all_pends_history] {e}")
         return pd.DataFrame()
 
-df_hist = load_all_pends_history()
+with st.spinner("Loading historical pends..."):
+    df_hist = load_all_pends_history()
 
 @st.cache_data(ttl=300)
 def load_all_unloads():
@@ -213,7 +215,8 @@ def load_all_unloads():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-_unloads_result = load_all_unloads()
+with st.spinner("Loading unload history..."):
+    _unloads_result = load_all_unloads()
 df_unloads, _unloads_error = _unloads_result
 if _unloads_error:
     st.warning(f"⚠️ Could not load unload history for lifecycle analysis: {_unloads_error}")
