@@ -191,7 +191,8 @@ df_hist = load_all_pends_history()
 
 @st.cache_data(ttl=300)
 def load_all_unloads():
-    """All unload events (Unload + Empty return bin) across all time for lifecycle analysis."""
+    """All unload events (Unload + Empty return bin) across all time for lifecycle analysis.
+    Returns (DataFrame, error_str). error_str is None on success."""
     try:
         sql = text("""
             SELECT e.pk, e.dt, e.user_name, e.device, e.med_id, e.med_desc,
@@ -208,12 +209,14 @@ def load_all_unloads():
         df_ul["dt"]     = pd.to_datetime(df_ul["dt"], errors="coerce")
         df_ul["med_id"] = df_ul["med_id"].astype(str).str.strip().str.upper()
         df_ul["device"] = df_ul["device"].fillna("Unknown").astype(str).str.strip()
-        return df_ul
+        return df_ul, None
     except Exception as e:
-        st.warning(f"[load_all_unloads] {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), str(e)
 
-df_unloads = load_all_unloads()
+_unloads_result = load_all_unloads()
+df_unloads, _unloads_error = _unloads_result
+if _unloads_error:
+    st.warning(f"⚠️ Could not load unload history for lifecycle analysis: {_unloads_error}")
 
 outlier_flags = []  # list of dicts, one per flagged event
 

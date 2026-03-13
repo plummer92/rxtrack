@@ -17,7 +17,11 @@ if uploaded_file:
     # 1️⃣ Load CSV (skip first header row)
     # -------------------------------------------------
 
-    df_master = pd.read_csv(uploaded_file, header=1)
+    try:
+        df_master = pd.read_csv(uploaded_file, header=1)
+    except Exception as e:
+        st.error(f"❌ Could not read CSV: {e}")
+        st.stop()
 
     # -------------------------------------------------
     # 2️⃣ Standardize Column Names
@@ -45,6 +49,19 @@ if uploaded_file:
         "trade_name",
         "carousel_location"
     ]
+
+    # -------------------------------------------------
+    # 2b️⃣ Schema Validation — stop before any DB write
+    # -------------------------------------------------
+
+    missing_cols = [c for c in required_cols if c not in df_master.columns]
+    if missing_cols:
+        st.error(
+            f"❌ Uploaded file is missing required columns: **{', '.join(missing_cols)}**\n\n"
+            f"Found columns: `{', '.join(df_master.columns.tolist())}`\n\n"
+            "The table was **not** modified. Fix the file and re-upload."
+        )
+        st.stop()
 
     df_master = df_master[required_cols]
 
@@ -94,29 +111,29 @@ if uploaded_file:
 
     if st.button("🚀 Replace Master Mapping Table"):
 
-        with engine.begin() as conn:
-
-            conn.execute(text("DROP TABLE IF EXISTS carousel_master_mapping"))
-
-            conn.execute(text("""
-                CREATE TABLE carousel_master_mapping (
-                    med_id TEXT PRIMARY KEY,
-                    med_desc TEXT,
-                    drug_name TEXT,
-                    trade_name TEXT,
-                    carousel_location TEXT
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS carousel_master_mapping"))
+                conn.execute(text("""
+                    CREATE TABLE carousel_master_mapping (
+                        med_id TEXT PRIMARY KEY,
+                        med_desc TEXT,
+                        drug_name TEXT,
+                        trade_name TEXT,
+                        carousel_location TEXT
+                    )
+                """))
+                df_master.to_sql(
+                    "carousel_master_mapping",
+                    conn,
+                    if_exists="append",
+                    index=False,
+                    method="multi"
                 )
-            """))
-
-        df_master.to_sql(
-            "carousel_master_mapping",
-            engine,
-            if_exists="append",
-            index=False,
-            method="multi"
-        )
-
-        st.success("✅ Master mapping uploaded successfully.")
+            st.success(f"✅ Master mapping uploaded successfully ({len(df_master):,} rows).")
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"❌ Upload failed: {e}\n\nThe table may be in an inconsistent state — re-upload to restore.")
 
 st.divider()
 
