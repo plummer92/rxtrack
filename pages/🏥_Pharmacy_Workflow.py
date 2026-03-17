@@ -14,10 +14,11 @@ if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")
 else:
     # 1. Load data
-    df_events, _, df_pharm, _, _ = load_data(
-        st.session_state.start_date, 
-        st.session_state.end_date
-    )
+    with st.spinner("Loading pharmacy data..."):
+        df_events, _, df_pharm, _, _ = load_data(
+            st.session_state.start_date,
+            st.session_state.end_date
+        )
 
     if df_pharm.empty:
         st.warning("No Pharmacy Workflow data found for this period.")

@@ -2,8 +2,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import io
 from sqlalchemy import text
 from App import engine, render_sidebar
+
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
 
 st.set_page_config(
     page_title="Pends Analyzer",
@@ -75,8 +83,9 @@ def load_drug_names():
         return pd.DataFrame()
 
 
-df_raw   = load_pends(start_date, end_date)
-df_drugs = load_drug_names()
+with st.spinner("Loading pends data..."):
+    df_raw   = load_pends(start_date, end_date)
+    df_drugs = load_drug_names()
 
 if df_raw.empty:
     st.warning("No pend activity found for the selected date range.")
@@ -187,11 +196,13 @@ def load_all_pends_history():
         st.warning(f"[load_all_pends_history] {e}")
         return pd.DataFrame()
 
-df_hist = load_all_pends_history()
+with st.spinner("Loading historical pends..."):
+    df_hist = load_all_pends_history()
 
 @st.cache_data(ttl=300)
 def load_all_unloads():
-    """All unload events (Unload + Empty return bin) across all time for lifecycle analysis."""
+    """All unload events (Unload + Empty return bin) across all time for lifecycle analysis.
+    Returns (DataFrame, error_str). error_str is None on success."""
     try:
         sql = text("""
             SELECT e.pk, e.dt, e.user_name, e.device, e.med_id, e.med_desc,
@@ -208,12 +219,15 @@ def load_all_unloads():
         df_ul["dt"]     = pd.to_datetime(df_ul["dt"], errors="coerce")
         df_ul["med_id"] = df_ul["med_id"].astype(str).str.strip().str.upper()
         df_ul["device"] = df_ul["device"].fillna("Unknown").astype(str).str.strip()
-        return df_ul
+        return df_ul, None
     except Exception as e:
-        st.warning(f"[load_all_unloads] {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), str(e)
 
-df_unloads = load_all_unloads()
+with st.spinner("Loading unload history..."):
+    _unloads_result = load_all_unloads()
+df_unloads, _unloads_error = _unloads_result
+if _unloads_error:
+    st.warning(f"⚠️ Could not load unload history for lifecycle analysis: {_unloads_error}")
 
 outlier_flags = []  # list of dicts, one per flagged event
 
@@ -427,13 +441,14 @@ if not df_hist.empty and not df_unloads.empty:
 # LAYER 5 — TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 Par Audit",
     "👤 By User",
     "🖥️ By Device",
     "🔍 Raw Detail",
     "🚨 Outlier Detector",
     "🔬 Med Lifecycle",
+    "📝 Par Change Audit Trail",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -721,6 +736,12 @@ with tab4:
         },
         hide_index=True
     )
+    st.download_button(
+        "⬇️ Export Raw Pends to Excel",
+        data=to_excel_bytes(filtered[display_cols].sort_values("dt", ascending=False)),
+        file_name="pends_raw_detail.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 5 — OUTLIER DETECTOR
@@ -966,3 +987,90 @@ with tab6:
             },
             hide_index=True
         )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 7 — PAR CHANGE AUDIT TRAIL
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab7:
+    st.subheader("Par Change Audit Trail")
+    st.caption(
+        "Chronological log of every par level change (min/max) for each med+device pair "
+        "within the selected date range. Highlights large swings and frequent changers."
+    )
+
+    if df_pends.empty:
+        st.info("No pend data available for this date range.")
+    else:
+        # Only rows where min_qty or max_qty is set (par events)
+        par_events = df_pends[
+            df_pends["action_type"].astype(str).str.contains("par|pend|config|add|modify|change", case=False, na=False) |
+            df_pends["min_qty"].notna() |
+            df_pends["max_qty"].notna()
+        ].copy()
+
+        if par_events.empty:
+            st.info("No par change events found in this window.")
+        else:
+            par_events = par_events.sort_values(["med_id", "device", "dt"])
+
+            # Compute deltas per med+device series
+            par_events["prev_min"] = par_events.groupby(["med_id", "device"])["min_qty"].shift(1)
+            par_events["prev_max"] = par_events.groupby(["med_id", "device"])["max_qty"].shift(1)
+            par_events["delta_min"] = par_events["min_qty"] - par_events["prev_min"]
+            par_events["delta_max"] = par_events["max_qty"] - par_events["prev_max"]
+
+            # Summary metrics
+            total_changes  = len(par_events)
+            large_swings   = int((par_events["delta_max"].abs() > 10).sum())
+            unique_meds    = par_events["med_id"].nunique()
+            top_changer    = par_events["user_name"].value_counts().idxmax() if not par_events.empty else "N/A"
+
+            pc1, pc2, pc3, pc4 = st.columns(4)
+            pc1.metric("Total Par Changes", total_changes)
+            pc2.metric("Large Swings (>10 units)", large_swings)
+            pc3.metric("Unique Meds Affected", unique_meds)
+            pc4.metric("Most Active User", top_changer)
+
+            st.divider()
+
+            # Filter controls
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                filter_user = st.multiselect(
+                    "Filter by User", options=sorted(par_events["user_name"].unique()),
+                    key="par_audit_user_filter"
+                )
+            with fc2:
+                filter_device = st.multiselect(
+                    "Filter by Device", options=sorted(par_events["device"].unique()),
+                    key="par_audit_device_filter"
+                )
+
+            view = par_events.copy()
+            if filter_user:
+                view = view[view["user_name"].isin(filter_user)]
+            if filter_device:
+                view = view[view["device"].isin(filter_device)]
+
+            show_cols = [c for c in [
+                "dt", "user_name", "device", "med_id", "location",
+                "action_type", "min_qty", "max_qty",
+                "prev_min", "prev_max", "delta_min", "delta_max", "is_standard"
+            ] if c in view.columns]
+
+            st.dataframe(
+                view[show_cols].sort_values("dt", ascending=False),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "dt":          st.column_config.DatetimeColumn("Timestamp", format="MM/DD/YY HH:mm"),
+                    "min_qty":     st.column_config.NumberColumn("Min Par",      format="%.0f"),
+                    "max_qty":     st.column_config.NumberColumn("Max Par",      format="%.0f"),
+                    "prev_min":    st.column_config.NumberColumn("Prev Min",     format="%.0f"),
+                    "prev_max":    st.column_config.NumberColumn("Prev Max",     format="%.0f"),
+                    "delta_min":   st.column_config.NumberColumn("Δ Min",        format="%+.0f"),
+                    "delta_max":   st.column_config.NumberColumn("Δ Max",        format="%+.0f"),
+                    "is_standard": st.column_config.CheckboxColumn("Standard"),
+                }
+            )

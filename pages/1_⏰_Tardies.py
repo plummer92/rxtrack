@@ -4,7 +4,7 @@ import numpy as np
 import plotly.express as px
 from datetime import timedelta
 # Importing shared logic and admin list from your Hub
-from App import load_data, normalize_name, parse_shift_start, ADMIN_USERS 
+from App import load_data, normalize_name, parse_shift_start, load_admin_users
 
 st.set_page_config(page_title="Tardy Analytics", page_icon="⏰", layout="wide")
 st.header("⏰ Tardiness & Attendance Analytics")
@@ -20,10 +20,11 @@ if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")
 else:
     # 1. Load data using anchored sidebar dates
-    _, _, _, df_sched, df_att = load_data(
-        st.session_state.start_date, 
-        st.session_state.end_date
-    )
+    with st.spinner("Loading attendance data..."):
+        _, _, _, df_sched, df_att = load_data(
+            st.session_state.start_date,
+            st.session_state.end_date
+        )
     
     if not df_sched.empty and not df_att.empty:
         # 2. Data Preparation and Admin Exclusion
@@ -33,7 +34,7 @@ else:
         df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
         
         # Filter out Joe, Krista, and Emily based on the App.py list
-        df_sched = df_sched[~df_sched['match_key'].isin(ADMIN_USERS)]
+        df_sched = df_sched[~df_sched['match_key'].isin(load_admin_users())]
         
         # 3. Smart Shift Matching (Handles 1000 weekend vs 1300 weekday)
         merged = pd.merge(df_sched, df_att, on=['match_key', 'date_obj'], how='inner')

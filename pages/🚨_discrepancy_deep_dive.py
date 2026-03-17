@@ -3,8 +3,16 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import io
 from sqlalchemy import text
 from App import engine, render_sidebar
+
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
 
 st.set_page_config(
     page_title="Discrepancy Deep Dive",
@@ -86,8 +94,9 @@ def load_prior_transactions(start, end):
 
 # ── Execute loaders ───────────────────────────────────────────────────────────
 
-df_disc  = load_discrepancies(start_date, end_date)
-df_prior = load_prior_transactions(start_date, end_date)
+with st.spinner("Loading discrepancy data..."):
+    df_disc  = load_discrepancies(start_date, end_date)
+    df_prior = load_prior_transactions(start_date, end_date)
 
 if df_disc.empty:
     st.success("✅ No discrepancies found in the selected date range.")
@@ -372,6 +381,12 @@ with tab1:
         },
         hide_index=True
     )
+    st.download_button(
+        "⬇️ Export Device Summary to Excel",
+        data=to_excel_bytes(dev_summary),
+        file_name="discrepancy_by_device.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -489,6 +504,12 @@ with tab2:
             "flagged":     st.column_config.NumberColumn("Flagged",     format="%d"),
         },
         hide_index=True
+    )
+    st.download_button(
+        "⬇️ Export Medication Summary to Excel",
+        data=to_excel_bytes(med_summary),
+        file_name="discrepancy_by_medication.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 

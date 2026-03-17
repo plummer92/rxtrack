@@ -2,6 +2,14 @@ from App import load_data, seconds_to_mmss
 import streamlit as st
 import pandas as pd
 import numpy as np
+import io
+
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
 
 st.set_page_config(page_title="Workforce Intelligence", layout="wide")
 st.header("📊 Workforce Intelligence Scorecard")
@@ -11,10 +19,11 @@ if 'start_date' not in st.session_state:
     st.info("👈 Select a date range on Overview first.")
 
 else:
-    df_events, _, df_pharm, df_sched, df_att = load_data(
-        st.session_state.start_date,
-        st.session_state.end_date
-    )
+    with st.spinner("Loading workforce data..."):
+        df_events, _, df_pharm, df_sched, df_att = load_data(
+            st.session_state.start_date,
+            st.session_state.end_date
+        )
 
     if df_events.empty and df_pharm.empty:
         st.warning("No activity found for selected window.")
@@ -83,14 +92,14 @@ else:
 
     # Tardy logic (wrap in safety check)
     if not df_sched.empty and not df_att.empty:
-        from App import parse_shift_start, normalize_name, ADMIN_USERS
+        from App import parse_shift_start, normalize_name, load_admin_users
 
         df_sched['match_key'] = df_sched['staff_name'].apply(normalize_name)
         df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
         df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
         df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
 
-        df_sched = df_sched[~df_sched['match_key'].isin(ADMIN_USERS)]
+        df_sched = df_sched[~df_sched['match_key'].isin(load_admin_users())]
 
         merged = pd.merge(df_sched, df_att, on=['match_key', 'date_obj'], how='inner')
 
@@ -152,8 +161,15 @@ else:
 
     summary['Active Time'] = summary['total_active'].apply(seconds_to_mmss)
 
+    export_cols = ['user_name', 'Active Time', 'tx_per_hour', 'walk_pct',
+                   'tardies', 'efficiency_score', 'Tier', 'Alert']
     st.dataframe(
-        summary[['user_name', 'Active Time', 'tx_per_hour', 'walk_pct',
-                 'tardies', 'efficiency_score', 'Tier', 'Alert']],
+        summary[export_cols],
         use_container_width=True
+    )
+    st.download_button(
+        "⬇️ Export Scorecard to Excel",
+        data=to_excel_bytes(summary[export_cols]),
+        file_name="workforce_scorecard.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )

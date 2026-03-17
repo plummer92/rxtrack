@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from App import engine
+from App import engine, load_admin_users, _DEFAULT_ADMIN_USERS
 
 st.header("📥 Master Carousel Mapping Upload")
 st.caption("Upload Item Location Report to update master carousel assignments.")
@@ -17,7 +17,11 @@ if uploaded_file:
     # 1️⃣ Load CSV (skip first header row)
     # -------------------------------------------------
 
-    df_master = pd.read_csv(uploaded_file, header=1)
+    try:
+        df_master = pd.read_csv(uploaded_file, header=1)
+    except Exception as e:
+        st.error(f"❌ Could not read CSV: {e}")
+        st.stop()
 
     # -------------------------------------------------
     # 2️⃣ Standardize Column Names
@@ -45,6 +49,19 @@ if uploaded_file:
         "trade_name",
         "carousel_location"
     ]
+
+    # -------------------------------------------------
+    # 2b️⃣ Schema Validation — stop before any DB write
+    # -------------------------------------------------
+
+    missing_cols = [c for c in required_cols if c not in df_master.columns]
+    if missing_cols:
+        st.error(
+            f"❌ Uploaded file is missing required columns: **{', '.join(missing_cols)}**\n\n"
+            f"Found columns: `{', '.join(df_master.columns.tolist())}`\n\n"
+            "The table was **not** modified. Fix the file and re-upload."
+        )
+        st.stop()
 
     df_master = df_master[required_cols]
 
@@ -94,29 +111,29 @@ if uploaded_file:
 
     if st.button("🚀 Replace Master Mapping Table"):
 
-        with engine.begin() as conn:
-
-            conn.execute(text("DROP TABLE IF EXISTS carousel_master_mapping"))
-
-            conn.execute(text("""
-                CREATE TABLE carousel_master_mapping (
-                    med_id TEXT PRIMARY KEY,
-                    med_desc TEXT,
-                    drug_name TEXT,
-                    trade_name TEXT,
-                    carousel_location TEXT
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("DROP TABLE IF EXISTS carousel_master_mapping"))
+                conn.execute(text("""
+                    CREATE TABLE carousel_master_mapping (
+                        med_id TEXT PRIMARY KEY,
+                        med_desc TEXT,
+                        drug_name TEXT,
+                        trade_name TEXT,
+                        carousel_location TEXT
+                    )
+                """))
+                df_master.to_sql(
+                    "carousel_master_mapping",
+                    conn,
+                    if_exists="append",
+                    index=False,
+                    method="multi"
                 )
-            """))
-
-        df_master.to_sql(
-            "carousel_master_mapping",
-            engine,
-            if_exists="append",
-            index=False,
-            method="multi"
-        )
-
-        st.success("✅ Master mapping uploaded successfully.")
+            st.success(f"✅ Master mapping uploaded successfully ({len(df_master):,} rows).")
+            st.cache_data.clear()
+        except Exception as e:
+            st.error(f"❌ Upload failed: {e}\n\nThe table may be in an inconsistent state — re-upload to restore.")
 
 st.divider()
 
@@ -258,3 +275,61 @@ if variance_file:
 
         st.success(f"✅ Successfully uploaded {len(df_upload)} variance records.")
         st.cache_data.clear()
+
+st.divider()
+
+# =============================================================
+# 👤 ADMIN USER MANAGEMENT
+# =============================================================
+
+st.header("👤 Admin User Management")
+st.caption("Admin users are excluded from tardiness and workforce analytics.")
+
+current_admins = load_admin_users()
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.subheader("Current Admin Users")
+    if current_admins:
+        for u in sorted(current_admins):
+            c1, c2 = st.columns([3, 1])
+            c1.write(u)
+            if c2.button("Remove", key=f"remove_{u}"):
+                if u in _DEFAULT_ADMIN_USERS:
+                    st.warning(f"⚠️ Cannot remove built-in admin '{u}'.")
+                else:
+                    try:
+                        with engine.begin() as conn:
+                            conn.execute(text("DELETE FROM admin_users WHERE username = :u"), {"u": u})
+                        st.success(f"Removed '{u}'.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Failed to remove user: {e}")
+    else:
+        st.info("No admin users configured.")
+
+with col_right:
+    st.subheader("Add Admin User")
+    new_admin = st.text_input("Username (lowercase)", placeholder="e.g. johndoe")
+    display_name = st.text_input("Display Name (optional)", placeholder="e.g. John Doe")
+    if st.button("➕ Add Admin User"):
+        username = new_admin.strip().lower()
+        if not username:
+            st.warning("Enter a username.")
+        elif username in current_admins:
+            st.warning(f"'{username}' is already an admin.")
+        else:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("""
+                        INSERT INTO admin_users (username, display_name)
+                        VALUES (:u, :d)
+                        ON CONFLICT (username) DO NOTHING
+                    """), {"u": username, "d": display_name.strip() or None})
+                st.success(f"✅ Added '{username}' as admin.")
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to add user: {e}")

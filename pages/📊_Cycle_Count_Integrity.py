@@ -3,9 +3,17 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import io
 from datetime import date
 from sqlalchemy import text
 from App import load_data, engine, render_sidebar
+
+
+def to_excel_bytes(df: pd.DataFrame) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    return buf.getvalue()
 
 st.set_page_config(
     page_title="Cycle Count Integrity",
@@ -54,53 +62,6 @@ def load_all_pharm():
 
 @st.cache_data(ttl=300)
 def load_open_variances():
-    """Pull med_ids that have unmatched return events in the events + pharmacy_orders tables.
-    A variance = med was unloaded from Pyxis but qty_pyxis != qty_pharm for that med/date."""
-    try:
-        sql = text("""
-            WITH unloads AS (
-                SELECT
-                    med_id,
-                    dt::date AS tx_date,
-                    SUM(qty) AS qty_pyxis
-                FROM events
-                WHERE event_type ILIKE '%unload%' OR event_type ILIKE '%empty%'
-                AND event_type NOT ILIKE '%cancel%'
-                AND event_type NOT ILIKE '%eject%'
-                GROUP BY med_id, dt::date
-            ),
-            returns AS (
-                SELECT
-                    med_id,
-                    dt::date AS tx_date,
-                    SUM(qty) AS qty_pharm
-                FROM pharmacy_orders
-                WHERE priority = 'Returns'
-                GROUP BY med_id, dt::date
-            ),
-            reconciled AS (
-                SELECT
-                    COALESCE(u.med_id, r.med_id) AS med_id,
-                    COALESCE(u.qty_pyxis, 0)     AS qty_pyxis,
-                    COALESCE(r.qty_pharm, 0)      AS qty_pharm
-                FROM unloads u
-                FULL OUTER JOIN returns r
-                    ON u.med_id = r.med_id AND u.tx_date = r.tx_date
-            )
-            SELECT DISTINCT med_id
-            FROM reconciled
-            WHERE qty_pyxis != qty_pharm
-        """)
-        with engine.connect() as conn:
-            result = conn.execute(sql)
-            ids = set(row[0].strip().upper() for row in result if row[0])
-        return ids
-    except Exception as e:
-        st.warning(f"⚠️ Could not load return variance data: {e}")
-        return set()
-
-@st.cache_data(ttl=300)
-def load_open_variances():
     """Med_ids that have unmatched qty between Pyxis unloads and pharmacy returns."""
     try:
         sql = text("""
@@ -136,10 +97,10 @@ def load_open_variances():
         st.warning(f"⚠️ Could not load return variance data: {e}")
         return set()
 
-df_all_pharm      = load_all_pharm()
-df_master         = load_master_mapping()
-open_variance_ids = load_open_variances()
-open_variance_ids = load_open_variances()
+with st.spinner("Loading cycle count data..."):
+    df_all_pharm      = load_all_pharm()
+    df_master         = load_master_mapping()
+    open_variance_ids = load_open_variances()
 
 if df_all_pharm.empty:
     st.warning("No pharmacy workflow data found.")
@@ -456,6 +417,12 @@ with tab1:
             "is_controlled":        st.column_config.CheckboxColumn("Controlled"),
         },
         hide_index=True
+    )
+    st.download_button(
+        "⬇️ Export Worklist to Excel",
+        data=to_excel_bytes(filtered[display_cols]),
+        file_name="cycle_count_worklist.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 # ── TAB 2: NEVER COUNTED ─────────────────────────────

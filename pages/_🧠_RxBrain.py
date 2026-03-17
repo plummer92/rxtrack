@@ -2,33 +2,33 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from App import engine
+from sqlalchemy import text
+from App import engine, render_sidebar
 
 st.set_page_config(page_title="RxBrain", page_icon="🧠", layout="wide")
 
-st.header("🧠 RxTrack Intelligence Engine")
-st.caption("Learning from all accumulated data to surface trends and risks.")
+start_date, end_date = render_sidebar()
 
-# ----------------------------------------------------
-# Load all historical data (this is intentional —
-# RxBrain learns from everything, not a date window)
-# ----------------------------------------------------
+st.header("🧠 RxTrack Intelligence Engine")
+st.caption("Surfaces trends and risks for the selected date window.")
 
 @st.cache_data(ttl=600)
-def load_all_data():
+def load_all_data(start, end):
     with engine.connect() as conn:
-        df_e = pd.read_sql("""
+        df_e = pd.read_sql(text("""
             SELECT user_name, device, med_id, med_desc, event_type,
                    dt, qty, beginning_qty, ending_qty, discrepancy_qty
             FROM events
+            WHERE dt::date BETWEEN :start AND :end
             ORDER BY dt DESC
-        """, conn)
+        """), conn, params={"start": start, "end": end})
 
-        df_p = pd.read_sql("""
+        df_p = pd.read_sql(text("""
             SELECT user_name, med_id, med_desc, destination, priority, dt, qty
             FROM pharmacy_orders
+            WHERE dt::date BETWEEN :start AND :end
             ORDER BY dt DESC
-        """, conn)
+        """), conn, params={"start": start, "end": end})
 
     if not df_e.empty:
         df_e["dt"] = pd.to_datetime(df_e["dt"], errors="coerce")
@@ -39,11 +39,11 @@ def load_all_data():
 
     return df_e, df_p
 
-with st.spinner("Loading all historical data..."):
-    df_events, df_pharm = load_all_data()
+with st.spinner("Loading data..."):
+    df_events, df_pharm = load_all_data(start_date, end_date)
 
 if df_events.empty:
-    st.warning("No historical data found.")
+    st.warning("No data found for the selected date range.")
     st.stop()
 
 date_min = df_events["dt"].min().date()
@@ -127,6 +127,40 @@ with tab1:
 
         if critical.empty and warning.empty:
             st.success("✅ No stockout risks detected.")
+
+        st.divider()
+        st.subheader("📆 Stockout Forecast")
+        st.caption("Projected days until stockout based on average daily burn rate over the selected window.")
+
+        days_in_window = max((date_max - date_min).days, 1)
+
+        forecast = (
+            df_events.groupby(["device", "med_desc"])
+            .agg(total_pulled=("qty", "sum"))
+            .reset_index()
+        )
+        forecast["daily_burn"] = forecast["total_pulled"] / days_in_window
+        forecast = forecast.merge(latest_inv, on=["device", "med_desc"], how="left")
+        forecast["days_left"] = forecast["current_inv"] / forecast["daily_burn"].replace(0, np.nan)
+        forecast = forecast.dropna(subset=["days_left"])
+        forecast = forecast[forecast["days_left"] > 0]
+
+        horizon = st.radio("Forecast Horizon", [7, 14, 30], horizontal=True, format_func=lambda x: f"{x} days")
+        at_risk = forecast[forecast["days_left"] <= horizon].sort_values("days_left")
+
+        if at_risk.empty:
+            st.success(f"✅ No medications projected to stock out within {horizon} days.")
+        else:
+            st.warning(f"⚠️ **{len(at_risk)}** medication(s) projected to stock out within {horizon} days.")
+            st.dataframe(
+                at_risk[["device", "med_desc", "current_inv", "daily_burn", "days_left"]],
+                use_container_width=True,
+                column_config={
+                    "days_left":   st.column_config.NumberColumn("Days Until Stockout", format="%.1f"),
+                    "daily_burn":  st.column_config.NumberColumn("Daily Burn", format="%.1f"),
+                    "current_inv": st.column_config.NumberColumn("Current Inv", format="%.0f"),
+                }
+            )
 
 # ----------------------------------------------------
 # TAB 2: Usage Trends

@@ -25,13 +25,25 @@ from sqlalchemy import create_engine
 import os
 
 
-DATABASE_URL = "postgresql://neondb_owner:npg_2ZRmDGgU9Vzb@ep-orange-frost-ad1fturl-pooler.c-2.us-east-1.aws.neon.tech/neondb?"
-
 engine = create_engine(
-    DATABASE_URL,
+    st.secrets["neon"]["db_url"],
     pool_pre_ping=True,
     pool_recycle=300
 )
+
+_DEFAULT_ADMIN_USERS = {"emily", "joe", "krista"}
+
+@st.cache_data(ttl=300)
+def load_admin_users():
+    """Load admin usernames from DB. Falls back to defaults if table is empty or unavailable."""
+    try:
+        from sqlalchemy import text as _t
+        with engine.connect() as conn:
+            result = conn.execute(_t("SELECT username FROM admin_users"))
+            users = {row[0].strip().lower() for row in result if row[0]}
+        return users if users else _DEFAULT_ADMIN_USERS
+    except Exception:
+        return _DEFAULT_ADMIN_USERS
 
 # --- DATABASE HELPERS ---
 @contextlib.contextmanager
@@ -93,8 +105,13 @@ def init_db():
             unit_cost FLOAT, qty_on_hand FLOAT, min_lvl FLOAT, max_lvl FLOAT
         );""",
         """CREATE TABLE IF NOT EXISTS inventory_detailed (
-            pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT, 
+            pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT,
             unit_cost FLOAT, current_count FLOAT, pocket_location TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS admin_users (
+            username TEXT PRIMARY KEY,
+            display_name TEXT,
+            added_at TIMESTAMP DEFAULT NOW()
         );"""
     ]
     with db_cursor() as (conn, cur):
@@ -621,7 +638,7 @@ if _is_main:
         "CHLORDIAZEPOXIDE", "LIBRIUM", "CLONAZEPAM", "KLONOPIN"
     ]
 
-    ADMIN_USERS = ['emily', 'joe', 'krista']
+    ADMIN_USERS = load_admin_users()
 
     # Nickname Mappings
     NAME_MAPPINGS = {
@@ -834,6 +851,69 @@ if _is_main:
             m5.metric("Active Techs",       df_events["user_name"].nunique())
             m6.metric("Avg Session",        seconds_to_mmss(avg_time))
             m7.metric("Discrepancies",      int(df_events["discrepancy_qty"].ne(0).sum()))
+
+            st.divider()
+
+            # ── Proactive Alerts Panel ────────────────────────────────────────
+            with st.expander("🔔 Proactive Alerts", expanded=True):
+                alerts = []
+
+                # Stockout risk: meds with ending_qty == 0 in the window
+                if "ending_qty" in df_events.columns and "med_desc" in df_events.columns:
+                    last_inv = (
+                        df_events.sort_values("dt")
+                        .groupby(["device", "med_desc"])["ending_qty"]
+                        .last()
+                        .reset_index()
+                    )
+                    stockouts = last_inv[last_inv["ending_qty"] == 0]
+                    if not stockouts.empty:
+                        alerts.append(("🚨", f"**{len(stockouts)} medication(s) at zero inventory** — potential stockout.", "error"))
+
+                # High discrepancy rate: > 2% of transactions
+                disc_count = int(df_events["discrepancy_qty"].ne(0).sum())
+                total_count = len(real_tx)
+                if total_count > 0 and disc_count / total_count > 0.02:
+                    pct = disc_count / total_count * 100
+                    alerts.append(("⚠️", f"**Discrepancy rate is {pct:.1f}%** ({disc_count}/{total_count} transactions) — above 2% threshold.", "warning"))
+
+                # Tardy alert: load from DB if sched/att data present
+                if not df_sched.empty and not df_att.empty:
+                    try:
+                        _sched = df_sched.copy()
+                        _att   = df_att.copy()
+                        _sched["match_key"] = _sched["staff_name"].apply(normalize_name)
+                        _att["match_key"]   = _att["raw_name"].apply(normalize_name)
+                        _sched["date_obj"]  = pd.to_datetime(_sched["dt"]).dt.date
+                        _att["date_obj"]    = pd.to_datetime(_att["dt_date"]).dt.date
+                        _sched = _sched[~_sched["match_key"].isin(load_admin_users())]
+                        _merged = pd.merge(_sched, _att, on=["match_key", "date_obj"], how="inner")
+                        _merged["actual"]    = pd.to_datetime(_merged["start_dt"], errors="coerce")
+                        _merged["scheduled"] = _merged.apply(lambda x: parse_shift_start(x["date_obj"], x["shift_type"]), axis=1)
+                        _merged = _merged.dropna(subset=["actual", "scheduled"])
+                        _merged["delay_min"] = (_merged["actual"] - _merged["scheduled"]).dt.total_seconds() / 60
+                        tardy_count = int((_merged["delay_min"] > 5).sum())
+                        repeat_offenders = (
+                            _merged[_merged["delay_min"] > 5]
+                            .groupby("staff_name").size()
+                        )
+                        repeat_count = int((repeat_offenders >= 3).sum())
+                        if tardy_count > 0:
+                            msg = f"**{tardy_count} tardy clock-in(s)** in this window."
+                            if repeat_count > 0:
+                                msg += f" {repeat_count} technician(s) with 3+ tardies."
+                            alerts.append(("⏰", msg, "warning"))
+                    except Exception:
+                        pass
+
+                if alerts:
+                    for icon, msg, level in alerts:
+                        if level == "error":
+                            st.error(f"{icon} {msg}")
+                        else:
+                            st.warning(f"{icon} {msg}")
+                else:
+                    st.success("✅ No active alerts for this date range.")
 
             st.divider()
 

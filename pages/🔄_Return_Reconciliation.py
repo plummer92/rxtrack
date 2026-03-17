@@ -10,7 +10,8 @@ start_date, end_date = render_sidebar()
 st.header("🔄 Closed-Loop Return Integrity Engine")
 st.caption("Validating Pyxis unload workflow against Pharmacy return/restock activity.")
 
-df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
+with st.spinner("Loading data..."):
+    df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
 if df_events.empty and df_pharm.empty:
     st.warning("No data found for selected dates.")
@@ -25,9 +26,12 @@ all_users = sorted(list(set(
     list(df_pharm["user_name"].dropna().unique() if not df_pharm.empty else [])
 )))
 
-selected_users = st.multiselect("Filter by User (Optional)", options=all_users)
-exclude_controls = st.checkbox("Exclude Controlled Substances")
-exclude_dummy = st.checkbox("Exclude Dummy Medications", value=True)
+with st.sidebar:
+    st.divider()
+    st.subheader("Filters")
+    selected_users   = st.multiselect("Filter by User", options=all_users)
+    exclude_controls = st.checkbox("Exclude Controlled Substances")
+    exclude_dummy    = st.checkbox("Exclude Dummy Medications", value=True)
 
 # --- Identify Workflow Events ---
 
@@ -185,7 +189,7 @@ eject_qty     = unload_eject["qty"].sum() if not unload_eject.empty and "qty" in
 m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 m1.metric("Total Pyxis Unload Qty", int(total_unload))
 m2.metric("Total Pharmacy Return Qty", int(total_return))
-m3.metric("Reconciliation %", f"{recon_pct:.2f}%")
+m3.metric("Reconciliation %", f"{recon_pct:.1f}%")
 m4.metric("Unmatched Med-Days", len(unmatched))
 m5.metric("Inv Moves (excl.)", int(inv_move_qty))
 m6.metric("Restocks (excl.)", int(restock_qty))
