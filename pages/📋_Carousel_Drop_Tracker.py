@@ -288,6 +288,24 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+@st.cache_data(ttl=300)
+def load_all_events_for_date(sel_date):
+    """Load every event for a date (no event_type filter) for diagnostics."""
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty
+            FROM events
+            WHERE dt::date = :d
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": sel_date})
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        return df
+    except Exception as e:
+        st.error(f"[load_all_events_for_date] {e}")
+        return pd.DataFrame()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATE SELECTOR
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -719,3 +737,77 @@ with tabs[len(schedule) + 2]:
             for d in no_print
         ])
         st.dataframe(no_df, use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTIC — Event Type Verification
+# ═══════════════════════════════════════════════════════════════════════════════
+
+st.divider()
+
+with st.expander("🛠️ Diagnostic: Verify Event Types Being Captured", expanded=False):
+    st.markdown(
+        "Use this to confirm the correct Pyxis transaction types are being counted. "
+        "The tracker currently includes events matching **refill / load / restock / replenish** "
+        "(excluding unload / cancel / empty). If your Pyxis uses a different label, the filters "
+        "can be updated to match."
+    )
+
+    df_all = load_all_events_for_date(sel_date)
+
+    # Build the set of all scheduled devices for this day
+    all_sched_devices = set()
+    for drop in schedule:
+        all_sched_devices.update(drop.get("full", []))
+        all_sched_devices.update(drop.get("stockouts", []))
+
+    if df_all.empty:
+        st.info("No events found for this date.")
+    else:
+        col_d1, col_d2 = st.columns(2)
+
+        with col_d1:
+            st.markdown("#### All event types on this date")
+            etype_all = (
+                df_all.groupby("event_type")
+                .agg(count=("pk", "count"))
+                .reset_index()
+                .sort_values("count", ascending=False)
+            )
+            # Flag which ones are currently captured by our filter
+            _capture = r"refill|load|restock|replenish"
+            _exclude = r"unload|cancel|empty"
+            etype_all["captured?"] = etype_all["event_type"].apply(
+                lambda e: "✅ Yes" if (
+                    pd.Series([e]).str.contains(_capture, case=False, na=False).iloc[0]
+                    and not pd.Series([e]).str.contains(_exclude, case=False, na=False).iloc[0]
+                ) else "—"
+            )
+            st.dataframe(etype_all, use_container_width=True, hide_index=True)
+
+        with col_d2:
+            st.markdown("#### Event types on **scheduled devices** only")
+            df_sched_only = df_all[df_all["device"].isin(all_sched_devices)]
+            if df_sched_only.empty:
+                st.info("No events on scheduled devices for this date.")
+            else:
+                etype_sched = (
+                    df_sched_only.groupby("event_type")
+                    .agg(count=("pk", "count"))
+                    .reset_index()
+                    .sort_values("count", ascending=False)
+                )
+                etype_sched["captured?"] = etype_sched["event_type"].apply(
+                    lambda e: "✅ Yes" if (
+                        pd.Series([e]).str.contains(_capture, case=False, na=False).iloc[0]
+                        and not pd.Series([e]).str.contains(_exclude, case=False, na=False).iloc[0]
+                    ) else "—"
+                )
+                st.dataframe(etype_sched, use_container_width=True, hide_index=True)
+
+        st.markdown(
+            f"**Currently captured:** {len(df_loads):,} transactions · "
+            f"{df_loads['qty'].sum():,.0f} units · "
+            f"{df_loads['device'].nunique()} devices  \n"
+            f"**Total events on date (all types):** {len(df_all):,}"
+        )
