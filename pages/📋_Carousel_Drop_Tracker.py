@@ -615,6 +615,89 @@ for i, drop in enumerate(schedule):
                 }
             )
 
+        # ── Device drill-down ──────────────────────────────────────────────
+        st.divider()
+        st.markdown("#### 🔬 Device Drill-Down")
+        all_devices_in_drop = sorted(drop_df["device"].unique().tolist())
+        drill_dev = st.selectbox(
+            "Select a device to see individual line items",
+            options=["— pick a device —"] + all_devices_in_drop,
+            key=f"drill_{i}",
+        )
+
+        if drill_dev != "— pick a device —":
+            # Time window for this drop
+            h0, m0 = drop["win_start"]
+            h1, m1 = drop["win_end"]
+            start_min = h0 * 60 + m0
+            end_min   = h1 * 60 + m1
+
+            col_pull, col_load = st.columns(2)
+
+            # ── Pharmacy Pull Lines ──────────────────────────────────────
+            with col_pull:
+                st.markdown(f"**🛒 Pharmacy Pull Lines — {drill_dev}**")
+                st.caption("From pharmacy_orders (Pyxis Pull priority) — what was pulled from the carousel")
+                if not df_pulls.empty:
+                    pu_min  = df_pulls["dt"].dt.hour * 60 + df_pulls["dt"].dt.minute
+                    pull_detail = df_pulls[
+                        (df_pulls["destination"] == drill_dev) &
+                        (pu_min >= start_min) & (pu_min <= end_min)
+                    ][["dt","user_name","med_id","med_desc","qty","priority"]].sort_values("dt").reset_index(drop=True)
+                else:
+                    pull_detail = pd.DataFrame()
+
+                if pull_detail.empty:
+                    st.info("No pharmacy pull lines for this device in this window.")
+                else:
+                    st.caption(f"{len(pull_detail):,} lines · {pull_detail['qty'].sum():,.0f} units")
+                    st.dataframe(
+                        pull_detail,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "dt":        st.column_config.DatetimeColumn("Time",       format="HH:mm:ss"),
+                            "user_name": st.column_config.TextColumn("User"),
+                            "med_id":    st.column_config.TextColumn("Med ID"),
+                            "med_desc":  st.column_config.TextColumn("Medication"),
+                            "qty":       st.column_config.NumberColumn("Qty",          format="%.0f"),
+                            "priority":  st.column_config.TextColumn("Priority"),
+                        }
+                    )
+
+            # ── Pyxis Load Events ────────────────────────────────────────
+            with col_load:
+                st.markdown(f"**📦 Pyxis Load Events — {drill_dev}**")
+                st.caption("From events table (refill/load) — what was actually loaded into the machine")
+                if not df_loads.empty:
+                    ev_min      = df_loads["dt"].dt.hour * 60 + df_loads["dt"].dt.minute
+                    load_detail = df_loads[
+                        (df_loads["device"] == drill_dev) &
+                        (ev_min >= start_min) & (ev_min <= end_min)
+                    ][["dt","user_name","med_id","med_desc","event_type","qty","beginning_qty","ending_qty"]].sort_values("dt").reset_index(drop=True)
+                else:
+                    load_detail = pd.DataFrame()
+
+                if load_detail.empty:
+                    st.info("No Pyxis load events for this device in this window.")
+                else:
+                    st.caption(f"{len(load_detail):,} transactions · {load_detail['qty'].sum():,.0f} units")
+                    st.dataframe(
+                        load_detail,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "dt":            st.column_config.DatetimeColumn("Time",       format="HH:mm:ss"),
+                            "user_name":     st.column_config.TextColumn("Tech"),
+                            "med_id":        st.column_config.TextColumn("Med ID"),
+                            "med_desc":      st.column_config.TextColumn("Medication"),
+                            "event_type":    st.column_config.TextColumn("Event"),
+                            "qty":           st.column_config.NumberColumn("Qty",          format="%.0f"),
+                            "beginning_qty": st.column_config.NumberColumn("Before",       format="%.0f"),
+                            "ending_qty":    st.column_config.NumberColumn("After",        format="%.0f"),
+                        }
+                    )
+
 
 # ── Day Summary Tab ───────────────────────────────────────────────────────────
 with tabs[len(schedule)]:
