@@ -289,6 +289,28 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 @st.cache_data(ttl=300)
+def load_pyxis_pulls(sel_date):
+    """Pyxis Pull lines from pharmacy_orders — represent carousel pull demand."""
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, destination, med_id, med_desc, priority, qty
+            FROM pharmacy_orders
+            WHERE dt::date = :d
+              AND priority ILIKE '%pyxis%pull%'
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
+        df["dt"]          = pd.to_datetime(df["dt"], errors="coerce")
+        df["destination"] = df["destination"].fillna("Unknown").astype(str).str.strip()
+        df["user_name"]   = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["qty"]         = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        return df
+    except Exception as e:
+        st.error(f"[load_pyxis_pulls] {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
 def load_all_events_for_date(sel_date):
     """Load every event for a date (no event_type filter) for diagnostics."""
     try:
@@ -318,8 +340,9 @@ with st.sidebar:
     st.info("Sa-Su schedule active." if is_weekend else "M-F schedule active." +
             (" (Wednesday — SM/SMOR included)" if sel_date.weekday() == 2 else ""))
 
-with st.spinner("Loading replenishment events..."):
+with st.spinner("Loading replenishment and pull data..."):
     df_loads = load_replenishment(sel_date)
+    df_pulls = load_pyxis_pulls(sel_date)
 
 schedule = get_schedule(sel_date)
 
@@ -328,20 +351,20 @@ schedule = get_schedule(sel_date)
 # HELPER — BUILD DROP TABLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_drop_df(drop, df_loads):
-    """Returns a DataFrame of all scheduled devices for a drop with actual qty/events."""
+def build_drop_df(drop, df_loads, df_pulls):
+    """Returns a DataFrame of all scheduled devices for a drop with actual qty/events and pull demand."""
     h0, m0 = drop["win_start"]
     h1, m1 = drop["win_end"]
     start_min = h0 * 60 + m0
     end_min   = h1 * 60 + m1
 
+    # ── Pyxis load events in window ──────────────────────────────────────────
     if not df_loads.empty:
         ev_min = df_loads["dt"].dt.hour * 60 + df_loads["dt"].dt.minute
         window = df_loads[(ev_min >= start_min) & (ev_min <= end_min)]
     else:
         window = pd.DataFrame()
 
-    # Aggregate by device
     if not window.empty:
         agg = (
             window.groupby("device")
@@ -357,14 +380,37 @@ def build_drop_df(drop, df_loads):
     else:
         agg = pd.DataFrame(columns=["device","items_loaded","total_qty","techs","first_time","last_time"])
 
+    # ── Pharmacy Pyxis Pull lines in window ──────────────────────────────────
+    if not df_pulls.empty:
+        pu_min = df_pulls["dt"].dt.hour * 60 + df_pulls["dt"].dt.minute
+        pull_win = df_pulls[(pu_min >= start_min) & (pu_min <= end_min)]
+    else:
+        pull_win = pd.DataFrame()
+
+    if not pull_win.empty:
+        pull_agg = (
+            pull_win.groupby("destination")
+            .agg(
+                pull_lines = ("pk",  "count"),
+                pull_qty   = ("qty", "sum"),
+            )
+            .reset_index()
+            .rename(columns={"destination": "device"})
+        )
+    else:
+        pull_agg = pd.DataFrame(columns=["device","pull_lines","pull_qty"])
+
     rows = []
     for dev in drop["full"]:
         m = agg[agg["device"] == dev]
+        p = pull_agg[pull_agg["device"] == dev]
         row = {
-            "device":        dev,
-            "area":          DEVICE_AREA.get(dev, "Other"),
-            "drop_type":     "Full Drop",
+            "device":         dev,
+            "area":           DEVICE_AREA.get(dev, "Other"),
+            "drop_type":      "Full Drop",
             "stockout_print": "✅ Auto-Print" if dev in STOCKOUTS_PRINT_AUTO_SET else "❌ No Print",
+            "pull_lines":     int(p["pull_lines"].iloc[0]) if not p.empty else 0,
+            "pull_qty":       float(p["pull_qty"].iloc[0]) if not p.empty else 0.0,
         }
         if not m.empty:
             row["items_loaded"] = int(m["items_loaded"].iloc[0])
@@ -384,11 +430,14 @@ def build_drop_df(drop, df_loads):
 
     for dev in drop["stockouts"]:
         m = agg[agg["device"] == dev]
+        p = pull_agg[pull_agg["device"] == dev]
         row = {
-            "device":        dev,
-            "area":          DEVICE_AREA.get(dev, "Other"),
-            "drop_type":     "Stockouts Only",
+            "device":         dev,
+            "area":           DEVICE_AREA.get(dev, "Other"),
+            "drop_type":      "Stockouts Only",
             "stockout_print": "✅ Auto-Print" if dev in STOCKOUTS_PRINT_AUTO_SET else "❌ No Print",
+            "pull_lines":     int(p["pull_lines"].iloc[0]) if not p.empty else 0,
+            "pull_qty":       float(p["pull_qty"].iloc[0]) if not p.empty else 0.0,
         }
         if not m.empty:
             row["items_loaded"] = int(m["items_loaded"].iloc[0])
@@ -413,7 +462,7 @@ def build_drop_df(drop, df_loads):
 # TOP-LINE KPIs (across all drops for the day)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-all_drop_dfs = {d["label"]: build_drop_df(d, df_loads) for d in schedule}
+all_drop_dfs = {d["label"]: build_drop_df(d, df_loads, df_pulls) for d in schedule}
 combined = pd.concat(all_drop_dfs.values(), ignore_index=True) if all_drop_dfs else pd.DataFrame()
 
 total_scheduled  = int((combined["drop_type"] == "Full Drop").sum()) if not combined.empty else 0
@@ -422,15 +471,17 @@ total_missed     = int((combined["status"] == "❌ Missed").sum())    if not com
 stockout_touched = int((combined["status"] == "✅ Touched (Stockout)").sum()) if not combined.empty else 0
 total_items      = int(df_loads["pk"].count()) if not df_loads.empty else 0
 total_qty        = float(df_loads["qty"].sum()) if not df_loads.empty else 0.0
+total_pull_lines = int(df_pulls["pk"].count()) if not df_pulls.empty else 0
 completion_pct   = round(total_touched / total_scheduled * 100, 1) if total_scheduled > 0 else 0.0
 
-k1, k2, k3, k4, k5, k6 = st.columns(6)
+k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
 k1.metric("Scheduled Full Drops", total_scheduled)
 k2.metric("✅ Completed", total_touched, delta=f"{completion_pct}%")
 k3.metric("❌ Missed", total_missed)
 k4.metric("🔵 Stockout Activations", stockout_touched)
-k5.metric("Total Med Transactions", f"{total_items:,}")
-k6.metric("Total Units Loaded", f"{total_qty:,.0f}")
+k5.metric("🛒 Carousel Pull Lines", f"{total_pull_lines:,}")
+k6.metric("Total Med Transactions", f"{total_items:,}")
+k7.metric("Total Units Loaded", f"{total_qty:,.0f}")
 
 if total_missed > 0:
     st.warning(f"⚠️ **{total_missed} device(s) scheduled for a full drop were not touched** — see per-drop tabs below.")
@@ -460,17 +511,19 @@ for i, drop in enumerate(schedule):
         total_full  = len(full_df)
         drop_items  = int(full_df["items_loaded"].sum())
         drop_qty    = float(full_df["total_qty"].sum())
+        drop_pulls  = int(full_df["pull_lines"].sum()) if "pull_lines" in full_df.columns else 0
 
         st.subheader(f"{drop['label']} — Scheduled {drop['time']}")
         if drop.get("wed_note"):
             st.info("📅 Wednesday: SM/SMOR devices included in this drop.")
 
-        d1, d2, d3, d4, d5 = st.columns(5)
+        d1, d2, d3, d4, d5, d6 = st.columns(6)
         d1.metric("Devices Scheduled", total_full)
         d2.metric("✅ Touched", touched_ct)
         d3.metric("❌ Missed", missed_ct)
-        d4.metric("Med Transactions", drop_items)
-        d5.metric("Units Loaded", f"{drop_qty:,.0f}")
+        d4.metric("🛒 Pull Lines", f"{drop_pulls:,}", help="Pyxis Pull lines from pharmacy workflow — carousel demand for this drop")
+        d5.metric("Med Transactions", drop_items)
+        d6.metric("Units Loaded", f"{drop_qty:,.0f}")
 
         # Progress bar
         pct = touched_ct / total_full if total_full > 0 else 0
@@ -511,11 +564,13 @@ for i, drop in enumerate(schedule):
             view = full_df[full_df["area"].isin(sel_areas)] if sel_areas else full_df
 
             st.dataframe(
-                view[["status","device","area","items_loaded","total_qty",
+                view[["status","device","area","pull_lines","items_loaded","total_qty",
                       "techs","first_time","last_time","stockout_print"]],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
+                    "pull_lines":    st.column_config.NumberColumn("🛒 Pull Lines", format="%d",
+                                        help="Pyxis Pull order lines from pharmacy workflow"),
                     "status":        st.column_config.TextColumn("Status"),
                     "device":        st.column_config.TextColumn("Device"),
                     "area":          st.column_config.TextColumn("Area"),
@@ -806,8 +861,39 @@ with st.expander("🛠️ Diagnostic: Verify Event Types Being Captured", expand
                 st.dataframe(etype_sched, use_container_width=True, hide_index=True)
 
         st.markdown(
-            f"**Currently captured:** {len(df_loads):,} transactions · "
+            f"**Load/Refill events captured:** {len(df_loads):,} transactions · "
             f"{df_loads['qty'].sum():,.0f} units · "
             f"{df_loads['device'].nunique()} devices  \n"
             f"**Total events on date (all types):** {len(df_all):,}"
         )
+
+        st.divider()
+        st.markdown("#### Pharmacy Pull Priorities on this date")
+        st.caption("Verifies 'Pyxis Pull' priority is present and being captured from pharmacy_orders.")
+        if df_pulls.empty:
+            st.warning("No Pyxis Pull records found in pharmacy_orders for this date. "
+                       "Check that pharmacy workflow data has been uploaded and the priority "
+                       "value matches 'Pyxis Pull' (case-insensitive).")
+        else:
+            # Show distinct priority values in pharmacy_orders for this date
+            sql_pri = text("""
+                SELECT priority, COUNT(*) AS count
+                FROM pharmacy_orders
+                WHERE dt::date = :d
+                GROUP BY priority ORDER BY count DESC
+            """)
+            try:
+                with engine.connect() as _conn:
+                    pri_df = pd.read_sql(sql_pri, _conn, params={"d": str(sel_date)})
+                pri_df["captured?"] = pri_df["priority"].apply(
+                    lambda p: "✅ Yes" if pd.Series([p]).str.contains(
+                        r"pyxis.*pull|pull.*pyxis", case=False, na=False, regex=True
+                    ).iloc[0] else "—"
+                )
+                st.dataframe(pri_df, use_container_width=True, hide_index=True)
+            except Exception as _e:
+                st.error(str(_e))
+            st.markdown(
+                f"**Pyxis Pull lines captured:** {len(df_pulls):,} lines across "
+                f"{df_pulls['destination'].nunique()} devices"
+            )
