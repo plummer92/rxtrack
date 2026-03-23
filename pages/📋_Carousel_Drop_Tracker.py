@@ -239,7 +239,6 @@ def load_refills(sel_date):
             "pk","dt","user_name","device","med_id","med_desc",
             "event_type","qty","beginning_qty","ending_qty"
         ])
-
 @st.cache_data(ttl=300)
 def load_other_replenishment(sel_date):
     try:
@@ -278,7 +277,6 @@ def load_other_replenishment(sel_date):
             "pk","dt","user_name","device","med_id","med_desc",
             "event_type","qty","beginning_qty","ending_qty"
         ])
-
 @st.cache_data(ttl=300)
 def load_pyxis_pulls(sel_date):
     try:
@@ -478,6 +476,26 @@ with st.spinner("Loading pull and refill data..."):
     df_refills = add_minutes(load_refills(sel_date))
     df_other_repl = add_minutes(load_other_replenishment(sel_date))
     df_pulls = add_minutes(load_pyxis_pulls(sel_date))
+
+st.write("Debug counts")
+st.write({
+    "selected_date": str(sel_date),
+    "refill_rows": len(df_refills),
+    "load_rows": len(df_other_repl),
+    "pull_rows": len(df_pulls),
+})
+
+if not df_refills.empty:
+    st.write("Top refill devices")
+    st.dataframe(
+        df_refills.groupby("device", dropna=False)
+        .agg(refill_txns=("pk", "count"), refill_qty=("qty", "sum"))
+        .reset_index()
+        .sort_values(["refill_qty", "refill_txns"], ascending=[False, False])
+        .head(25),
+        use_container_width=True,
+        hide_index=True
+    )
 
 schedule = get_schedule(sel_date)
 all_drop_dfs = {d["label"]: build_drop_df(d, df_refills, df_other_repl, df_pulls) for d in schedule}
