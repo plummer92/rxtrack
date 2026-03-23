@@ -131,7 +131,19 @@ def init_db():
             status TEXT DEFAULT 'Pending',
             notes TEXT,
             created_at TIMESTAMP DEFAULT NOW()
-        );"""
+        );""",
+        """CREATE TABLE IF NOT EXISTS recurring_tasks (
+            id SERIAL PRIMARY KEY,
+            task TEXT NOT NULL,
+            category TEXT,
+            priority TEXT DEFAULT 'Medium',
+            recurrence TEXT DEFAULT 'Daily',
+            days_of_week TEXT,
+            active BOOLEAN DEFAULT TRUE,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
+        );""",
+        """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
