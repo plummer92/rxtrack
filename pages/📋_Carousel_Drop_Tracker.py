@@ -196,6 +196,7 @@ def get_schedule(sel_date):
                 "time": "04:00",
                 "win_start": (3, 0),
                 "win_end": (11, 30),
+                "refill_win_end": (15, 0),   # refills happen after pull; extend to 15:00
                 "full": _SASU_0400_FULL,
                 "stockouts": [],
             },
@@ -204,6 +205,7 @@ def get_schedule(sel_date):
                 "time": "12:35",
                 "win_start": (11, 31),
                 "win_end": (20, 0),
+                "refill_win_end": (23, 59),
                 "full": _SASU_1235_FULL,
                 "stockouts": _SASU_1235_STOCK,
             },
@@ -216,6 +218,7 @@ def get_schedule(sel_date):
                 "time": "04:00",
                 "win_start": (3, 0),
                 "win_end": (6, 29),
+                "refill_win_end": (11, 0),   # techs refill floors after carousel pull; capture until 11:00
                 "full": _MF_0400_FULL,
                 "stockouts": [],
             },
@@ -224,6 +227,7 @@ def get_schedule(sel_date):
                 "time": "07:00",
                 "win_start": (6, 30),
                 "win_end": (11, 0),
+                "refill_win_end": (14, 30),  # refills from 0700 pull extend into afternoon
                 "full": mf_0700,
                 "stockouts": [],
                 "wed_note": is_wednesday,
@@ -233,6 +237,7 @@ def get_schedule(sel_date):
                 "time": "12:35",
                 "win_start": (10, 30),
                 "win_end": (14, 14),
+                "refill_win_end": (18, 0),   # refills from 1235 pull extend into evening
                 "full": _MF_1235_FULL,
                 "stockouts": _MF_1235_STOCK,
             },
@@ -241,6 +246,7 @@ def get_schedule(sel_date):
                 "time": "14:30",
                 "win_start": (14, 0),
                 "win_end": (20, 0),
+                "refill_win_end": (23, 59),
                 "full": _MF_1430_FULL,
                 "stockouts": [],
             },
@@ -411,19 +417,31 @@ def _reconcile_device(dev_pulls, dev_refills):
 
 
 def build_recon_df(drop, df_pulls, df_refills):
-    """Per-device reconciliation summary for a drop window."""
+    """Per-device reconciliation summary for a drop window.
+
+    Pull window  = win_start → win_end  (tight: when carousel is being worked)
+    Refill window = win_start → refill_win_end  (wider: techs walk to floors and
+                    refill Pyxis machines after the carousel pull, often hours later)
+    """
     h0, m0 = drop["win_start"]
     h1, m1 = drop["win_end"]
-    start_min = h0 * 60 + m0
-    end_min   = h1 * 60 + m1
+    rh1, rm1 = drop.get("refill_win_end", drop["win_end"])  # fallback to win_end if not set
+    start_min      = h0 * 60 + m0
+    end_min        = h1 * 60 + m1
+    refill_end_min = rh1 * 60 + rm1
 
-    def _win(df, dev_col):
+    def _pull_win(df):
         if df.empty: return pd.DataFrame()
         m = df["dt"].dt.hour * 60 + df["dt"].dt.minute
         return df[(m >= start_min) & (m <= end_min)]
 
-    pull_win   = _win(df_pulls,   "destination")
-    refill_win = _win(df_refills, "device")
+    def _refill_win(df):
+        if df.empty: return pd.DataFrame()
+        m = df["dt"].dt.hour * 60 + df["dt"].dt.minute
+        return df[(m >= start_min) & (m <= refill_end_min)]
+
+    pull_win   = _pull_win(df_pulls)
+    refill_win = _refill_win(df_refills)
 
     rows = []
     for dev, drop_type in (
@@ -622,7 +640,7 @@ for i, drop in enumerate(schedule):
         # ── Device reconciliation drill-down ───────────────────────────────
         st.divider()
         st.markdown("#### 🔬 Device Reconciliation Drill-Down")
-        st.caption("Match pull lines to refill lines by med_id within this drop's time window.")
+        st.caption("Pull window = tight carousel pull times. Refill window extends further — techs walk to floors and refill Pyxis after the carousel pull.")
 
         all_devices_in_drop = sorted(drop_df["device"].unique().tolist())
         drill_dev = st.selectbox(
@@ -632,16 +650,23 @@ for i, drop in enumerate(schedule):
         if drill_dev != "— pick a device —":
             h0, m0 = drop["win_start"]
             h1, m1 = drop["win_end"]
-            start_min = h0 * 60 + m0
-            end_min   = h1 * 60 + m1
+            rh1, rm1 = drop.get("refill_win_end", drop["win_end"])
+            start_min      = h0  * 60 + m0
+            end_min        = h1  * 60 + m1
+            refill_end_min = rh1 * 60 + rm1
 
-            def _filter_win(df, dev_col):
+            def _pull_filter(df):
                 if df.empty: return pd.DataFrame()
                 m = df["dt"].dt.hour * 60 + df["dt"].dt.minute
                 return df[(m >= start_min) & (m <= end_min)]
 
-            dev_pulls_raw   = _filter_win(df_pulls,   "destination")
-            dev_refills_raw = _filter_win(df_refills, "device")
+            def _refill_filter(df):
+                if df.empty: return pd.DataFrame()
+                m = df["dt"].dt.hour * 60 + df["dt"].dt.minute
+                return df[(m >= start_min) & (m <= refill_end_min)]
+
+            dev_pulls_raw   = _pull_filter(df_pulls)
+            dev_refills_raw = _refill_filter(df_refills)
             dev_pulls_raw   = dev_pulls_raw[dev_pulls_raw["destination"] == drill_dev]   if not dev_pulls_raw.empty   else pd.DataFrame()
             dev_refills_raw = dev_refills_raw[dev_refills_raw["device"]  == drill_dev]   if not dev_refills_raw.empty else pd.DataFrame()
 
