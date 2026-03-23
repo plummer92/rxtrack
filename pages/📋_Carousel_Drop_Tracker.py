@@ -252,33 +252,26 @@ def get_schedule(sel_date):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
-def load_replenishment(sel_date):
-    """All load/refill/restock events for the selected date."""
+def load_refills(sel_date):
+    """Pyxis Refill events for the selected date (event_type = 'Refill' exact)."""
     try:
         sql = text("""
             SELECT pk, dt, user_name, device, med_id, med_desc, event_type,
                    qty, beginning_qty, ending_qty
             FROM events
             WHERE dt::date = :d
-              AND (
-                    event_type ILIKE '%load%'
-                 OR event_type ILIKE '%refill%'
-                 OR event_type ILIKE '%restock%'
-                 OR event_type ILIKE '%replenish%'
-              )
-              AND event_type NOT ILIKE '%unload%'
-              AND event_type NOT ILIKE '%cancel%'
-              AND event_type NOT ILIKE '%empty%'
+              AND event_type = 'Refill'
         """)
         with engine.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"d": sel_date})
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
         df["dt"]        = pd.to_datetime(df["dt"], errors="coerce")
         df["device"]    = df["device"].fillna("Unknown").astype(str).str.strip()
         df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["med_id"]    = df["med_id"].fillna("").astype(str).str.strip()
         df["qty"]       = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
         return df
     except Exception as e:
-        st.error(f"[load_replenishment] {e}")
+        st.error(f"[load_refills] {e}")
         return pd.DataFrame()
 
 
@@ -341,9 +334,9 @@ with st.sidebar:
     st.info("Sa-Su schedule active." if is_weekend else "M-F schedule active." +
             (" (Wednesday — SM/SMOR included)" if sel_date.weekday() == 2 else ""))
 
-with st.spinner("Loading replenishment and pull data..."):
-    df_loads = load_replenishment(sel_date)
-    df_pulls = load_pyxis_pulls(sel_date)
+with st.spinner("Loading pharmacy pulls and Pyxis refills..."):
+    df_refills = load_refills(sel_date)
+    df_pulls   = load_pyxis_pulls(sel_date)
 
 schedule = get_schedule(sel_date)
 
@@ -352,115 +345,102 @@ schedule = get_schedule(sel_date)
 # HELPER — BUILD DROP TABLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_drop_df(drop, df_loads, df_pulls):
-    """Returns a DataFrame of all scheduled devices for a drop with actual qty/events and pull demand."""
+def _med_status(pull_qty, refill_qty):
+    if pull_qty > 0 and refill_qty == 0:   return "❌ Pulled Not Refilled"
+    if pull_qty == 0 and refill_qty > 0:   return "🔵 Refilled Not Pulled"
+    if pull_qty == refill_qty:             return "✅ Matched Exact"
+    return "⚠️ Qty Mismatch"
+
+def _device_recon_status(matched, mismatch, missing, extra, pull_lines, refill_lines):
+    if pull_lines == 0 and refill_lines == 0: return "⬜ No Activity"
+    if pull_lines == 0:                       return "🔵 Refills Only"
+    if refill_lines == 0:                     return "❌ No Refills"
+    if missing == 0 and mismatch == 0 and extra == 0: return "✅ Full Match"
+    if missing > 0:  return "❌ Missing Refills"
+    if mismatch > 0: return "⚠️ Qty Mismatch"
+    return "🔵 Extra Refills"
+
+def _reconcile_device(dev_pulls, dev_refills):
+    """Merge pull and refill data by med_id. Returns (summary_dict, detail_df)."""
+    if not dev_pulls.empty:
+        pb = dev_pulls.groupby("med_id").agg(
+            pull_qty=("qty","sum"), pull_lines=("pk","count"),
+            med_desc=("med_desc","first")
+        ).reset_index()
+    else:
+        pb = pd.DataFrame(columns=["med_id","pull_qty","pull_lines","med_desc"])
+
+    if not dev_refills.empty:
+        rb = dev_refills.groupby("med_id").agg(
+            refill_qty=("qty","sum"), refill_lines=("pk","count"),
+            med_desc=("med_desc","first")
+        ).reset_index()
+    else:
+        rb = pd.DataFrame(columns=["med_id","refill_qty","refill_lines","med_desc"])
+
+    mg = pd.merge(pb, rb, on="med_id", how="outer", suffixes=("_p","_r"))
+    mg["med_desc"]     = mg["med_desc_p"].fillna(mg["med_desc_r"]).fillna("")
+    mg["pull_qty"]     = mg["pull_qty"].fillna(0)
+    mg["pull_lines"]   = mg["pull_lines"].fillna(0).astype(int)
+    mg["refill_qty"]   = mg["refill_qty"].fillna(0)
+    mg["refill_lines"] = mg["refill_lines"].fillna(0).astype(int)
+    mg["qty_diff"]     = mg["refill_qty"] - mg["pull_qty"]
+    mg["med_status"]   = mg.apply(lambda r: _med_status(r["pull_qty"], r["refill_qty"]), axis=1)
+    mg = mg.drop(columns=["med_desc_p","med_desc_r"], errors="ignore")
+
+    matched  = int((mg["med_status"] == "✅ Matched Exact").sum())
+    mismatch = int((mg["med_status"] == "⚠️ Qty Mismatch").sum())
+    missing  = int((mg["med_status"] == "❌ Pulled Not Refilled").sum())
+    extra    = int((mg["med_status"] == "🔵 Refilled Not Pulled").sum())
+
+    summary = {
+        "pull_lines":    int(dev_pulls["pk"].count()) if not dev_pulls.empty else 0,
+        "pull_qty":      float(dev_pulls["qty"].sum()) if not dev_pulls.empty else 0.0,
+        "refill_lines":  int(dev_refills["pk"].count()) if not dev_refills.empty else 0,
+        "refill_qty":    float(dev_refills["qty"].sum()) if not dev_refills.empty else 0.0,
+        "matched_lines":  matched,
+        "mismatch_lines": mismatch,
+        "missing_lines":  missing,
+        "extra_lines":    extra,
+    }
+    summary["recon_status"] = _device_recon_status(
+        matched, mismatch, missing, extra,
+        summary["pull_lines"], summary["refill_lines"]
+    )
+    return summary, mg
+
+
+def build_recon_df(drop, df_pulls, df_refills):
+    """Per-device reconciliation summary for a drop window."""
     h0, m0 = drop["win_start"]
     h1, m1 = drop["win_end"]
     start_min = h0 * 60 + m0
     end_min   = h1 * 60 + m1
 
-    # ── Pyxis load events in window ──────────────────────────────────────────
-    if not df_loads.empty:
-        ev_min = df_loads["dt"].dt.hour * 60 + df_loads["dt"].dt.minute
-        window = df_loads[(ev_min >= start_min) & (ev_min <= end_min)]
-    else:
-        window = pd.DataFrame()
+    def _win(df, dev_col):
+        if df.empty: return pd.DataFrame()
+        m = df["dt"].dt.hour * 60 + df["dt"].dt.minute
+        return df[(m >= start_min) & (m <= end_min)]
 
-    if not window.empty:
-        agg = (
-            window.groupby("device")
-            .agg(
-                items_loaded = ("pk",        "count"),
-                total_qty    = ("qty",       "sum"),
-                techs        = ("user_name", lambda x: ", ".join(sorted(x.dropna().astype(str).unique()))),
-                first_time   = ("dt",        "min"),
-                last_time    = ("dt",        "max"),
-            )
-            .reset_index()
-        )
-    else:
-        agg = pd.DataFrame(columns=["device","items_loaded","total_qty","techs","first_time","last_time"])
-
-    # ── Pharmacy Pyxis Pull lines in window ──────────────────────────────────
-    if not df_pulls.empty:
-        pu_min = df_pulls["dt"].dt.hour * 60 + df_pulls["dt"].dt.minute
-        pull_win = df_pulls[(pu_min >= start_min) & (pu_min <= end_min)]
-    else:
-        pull_win = pd.DataFrame()
-
-    if not pull_win.empty:
-        pull_agg = (
-            pull_win.groupby("destination")
-            .agg(
-                pull_lines = ("pk",  "count"),
-                pull_qty   = ("qty", "sum"),
-            )
-            .reset_index()
-            .rename(columns={"destination": "device"})
-        )
-    else:
-        pull_agg = pd.DataFrame(columns=["device","pull_lines","pull_qty"])
-
-    def _loop_status(pull_qty, items_loaded, loaded_qty):
-        if pull_qty == 0 and items_loaded == 0:
-            return "⬜ No Activity"
-        if pull_qty == 0 and items_loaded > 0:
-            return "⚠️ Loaded / No Pull Record"
-        if pull_qty > 0 and items_loaded == 0:
-            return "❌ Not Refilled"
-        coverage = loaded_qty / pull_qty if pull_qty > 0 else 0
-        return "✅ Closed Loop" if coverage >= 0.90 else "⚠️ Partial"
+    pull_win   = _win(df_pulls,   "destination")
+    refill_win = _win(df_refills, "device")
 
     rows = []
-    for dev in drop["full"]:
-        m = agg[agg["device"] == dev]
-        p = pull_agg[pull_agg["device"] == dev]
-        pull_lines = int(p["pull_lines"].iloc[0]) if not p.empty else 0
-        pull_qty   = float(p["pull_qty"].iloc[0])  if not p.empty else 0.0
-        items_loaded = int(m["items_loaded"].iloc[0])   if not m.empty else 0
-        loaded_qty   = float(m["total_qty"].iloc[0])    if not m.empty else 0.0
-        row = {
-            "device":         dev,
-            "area":           DEVICE_AREA.get(dev, "Other"),
-            "drop_type":      "Full Drop",
-            "stockout_print": "✅ Auto-Print" if dev in STOCKOUTS_PRINT_AUTO_SET else "❌ No Print",
-            "pull_lines":     pull_lines,
-            "pull_qty":       pull_qty,
-            "items_loaded":   items_loaded,
-            "total_qty":      loaded_qty,
-            "qty_coverage":   round(loaded_qty / pull_qty * 100, 1) if pull_qty > 0 else None,
-            "loop_status":    _loop_status(pull_qty, items_loaded, loaded_qty),
-            "techs":          m["techs"].iloc[0]     if not m.empty else "",
-            "first_time":     m["first_time"].iloc[0] if not m.empty else None,
-            "last_time":      m["last_time"].iloc[0]  if not m.empty else None,
-            "status":         "✅ Touched" if not m.empty else "❌ Missed",
-        }
-        rows.append(row)
+    for dev, drop_type in (
+        [(d, "Full Drop")      for d in drop["full"]] +
+        [(d, "Stockouts Only") for d in drop.get("stockouts", [])]
+    ):
+        dev_pulls   = pull_win[pull_win["destination"] == dev]   if not pull_win.empty   else pd.DataFrame()
+        dev_refills = refill_win[refill_win["device"]  == dev]   if not refill_win.empty else pd.DataFrame()
 
-    for dev in drop["stockouts"]:
-        m = agg[agg["device"] == dev]
-        p = pull_agg[pull_agg["device"] == dev]
-        pull_lines = int(p["pull_lines"].iloc[0]) if not p.empty else 0
-        pull_qty   = float(p["pull_qty"].iloc[0])  if not p.empty else 0.0
-        items_loaded = int(m["items_loaded"].iloc[0])   if not m.empty else 0
-        loaded_qty   = float(m["total_qty"].iloc[0])    if not m.empty else 0.0
-        row = {
+        summary, _ = _reconcile_device(dev_pulls, dev_refills)
+        rows.append({
             "device":         dev,
             "area":           DEVICE_AREA.get(dev, "Other"),
-            "drop_type":      "Stockouts Only",
+            "drop_type":      drop_type,
             "stockout_print": "✅ Auto-Print" if dev in STOCKOUTS_PRINT_AUTO_SET else "❌ No Print",
-            "pull_lines":     pull_lines,
-            "pull_qty":       pull_qty,
-            "items_loaded":   items_loaded,
-            "total_qty":      loaded_qty,
-            "qty_coverage":   round(loaded_qty / pull_qty * 100, 1) if pull_qty > 0 else None,
-            "loop_status":    _loop_status(pull_qty, items_loaded, loaded_qty),
-            "techs":          m["techs"].iloc[0]     if not m.empty else "",
-            "first_time":     m["first_time"].iloc[0] if not m.empty else None,
-            "last_time":      m["last_time"].iloc[0]  if not m.empty else None,
-            "status":         "✅ Touched (Stockout)" if not m.empty else "🔵 No Stockout",
-        }
-        rows.append(row)
+            **summary,
+        })
 
     return pd.DataFrame(rows)
 
@@ -469,46 +449,46 @@ def build_drop_df(drop, df_loads, df_pulls):
 # TOP-LINE KPIs (across all drops for the day)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-all_drop_dfs = {d["label"]: build_drop_df(d, df_loads, df_pulls) for d in schedule}
+all_drop_dfs = {d["label"]: build_recon_df(d, df_pulls, df_refills) for d in schedule}
 combined = pd.concat(all_drop_dfs.values(), ignore_index=True) if all_drop_dfs else pd.DataFrame()
 
 full_combined    = combined[combined["drop_type"] == "Full Drop"] if not combined.empty else pd.DataFrame()
 total_scheduled  = len(full_combined)
-total_pull_lines = int(df_pulls["pk"].count())      if not df_pulls.empty else 0
-total_pull_qty   = float(df_pulls["qty"].sum())     if not df_pulls.empty else 0.0
-total_load_qty   = float(df_loads["qty"].sum())     if not df_loads.empty else 0.0
-total_load_lines = int(df_loads["pk"].count())      if not df_loads.empty else 0
-day_coverage_pct = round(total_load_qty / total_pull_qty * 100, 1) if total_pull_qty > 0 else 0.0
+total_pull_lines   = int(df_pulls["pk"].count())    if not df_pulls.empty   else 0
+total_pull_qty     = float(df_pulls["qty"].sum())   if not df_pulls.empty   else 0.0
+total_refill_lines = int(df_refills["pk"].count())  if not df_refills.empty else 0
+total_refill_qty   = float(df_refills["qty"].sum()) if not df_refills.empty else 0.0
 
-closed_ct  = int((full_combined["loop_status"] == "✅ Closed Loop").sum())      if not full_combined.empty else 0
-partial_ct = int((full_combined["loop_status"] == "⚠️ Partial").sum())          if not full_combined.empty else 0
-no_fill_ct = int((full_combined["loop_status"] == "❌ Not Refilled").sum())      if not full_combined.empty else 0
+full_match_ct  = int((full_combined["recon_status"] == "✅ Full Match").sum())       if not full_combined.empty else 0
+mismatch_ct    = int((full_combined["recon_status"] == "⚠️ Qty Mismatch").sum())     if not full_combined.empty else 0
+missing_ct     = int((full_combined["recon_status"] == "❌ Missing Refills").sum())  if not full_combined.empty else 0
+no_refill_ct   = int((full_combined["recon_status"] == "❌ No Refills").sum())       if not full_combined.empty else 0
 
-# ── Primary pull metrics ──────────────────────────────────────────────────────
-st.markdown("##### 🛒 Pull Demand (Pharmacy Workflow)")
+st.markdown("##### 🛒 Pull Demand  →  📦 Refill Actuals")
 p1, p2, p3, p4 = st.columns(4)
-p1.metric("Pull Lines",   f"{total_pull_lines:,}",  help="Line items pulled from carousel (pharmacy_orders)")
-p2.metric("Pull Qty",     f"{total_pull_qty:,.0f}", help="Total units pulled from carousel — primary workload metric")
-p3.metric("Loaded Qty",   f"{total_load_qty:,.0f}", help="Total units loaded into Pyxis machines (refill/load events)")
-p4.metric("Qty Coverage", f"{day_coverage_pct:.1f}%",
-          delta=f"{day_coverage_pct - 100:.1f}%" if total_pull_qty > 0 else None,
-          help="Loaded ÷ Pulled × 100 — 100% = fully closed loop")
+p1.metric("Pull Lines",   f"{total_pull_lines:,}",   help="Pyxis Pull lines from pharmacy_orders")
+p2.metric("Pull Qty",     f"{total_pull_qty:,.0f}",  help="Total units pulled from carousel")
+p3.metric("Refill Lines", f"{total_refill_lines:,}", help="event_type = 'Refill' transactions")
+p4.metric("Refill Qty",   f"{total_refill_qty:,.0f}",help="Total units loaded via Refill events")
 
-st.markdown("##### 🔄 Loop Closure")
+st.markdown("##### 🔎 Reconciliation (Full Drop devices)")
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Devices Scheduled",  total_scheduled)
-c2.metric("✅ Closed Loop",     closed_ct)
-c3.metric("⚠️ Partial",        partial_ct)
-c4.metric("❌ Not Refilled",    no_fill_ct)
-c5.metric("Load Lines",         f"{total_load_lines:,}", help="Pyxis refill/load transaction count")
+c1.metric("Devices",           total_scheduled)
+c2.metric("✅ Full Match",     full_match_ct)
+c3.metric("⚠️ Qty Mismatch",  mismatch_ct)
+c4.metric("❌ Missing Refills",missing_ct)
+c5.metric("❌ No Refills",     no_refill_ct)
 
-if day_coverage_pct >= 100:
-    st.success(f"✅ Full loop closed — {total_pull_qty:,.0f} units pulled, {total_load_qty:,.0f} loaded ({day_coverage_pct:.1f}% coverage).")
-elif total_pull_qty == 0:
-    st.info("No Pyxis Pull records found for this date. Check pharmacy workflow data.")
+if total_pull_lines == 0:
+    st.info("No Pyxis Pull records found for this date — upload pharmacy workflow data.")
+elif missing_ct == 0 and mismatch_ct == 0 and no_refill_ct == 0:
+    st.success(f"✅ All {full_match_ct} devices reconcile fully — pull and refill quantities match.")
 else:
-    gap = total_pull_qty - total_load_qty
-    st.warning(f"⚠️ Loop not fully closed — {gap:,.0f} units pulled but not yet loaded ({day_coverage_pct:.1f}% coverage).")
+    issues = []
+    if no_refill_ct:   issues.append(f"{no_refill_ct} device(s) pulled but never refilled")
+    if missing_ct:     issues.append(f"{missing_ct} device(s) missing some refill lines")
+    if mismatch_ct:    issues.append(f"{mismatch_ct} device(s) with qty mismatches")
+    st.warning("⚠️ " + " · ".join(issues) + " — see per-drop tabs for detail.")
 
 st.divider()
 
@@ -524,74 +504,61 @@ tabs        = st.tabs(tab_labels)
 # ── Per-drop tabs ──────────────────────────────────────────────────────────────
 for i, drop in enumerate(schedule):
     with tabs[i]:
-        drop_df = all_drop_dfs[drop["label"]]
+        drop_df  = all_drop_dfs[drop["label"]]
         full_df  = drop_df[drop_df["drop_type"] == "Full Drop"]
         stock_df = drop_df[drop_df["drop_type"] == "Stockouts Only"]
 
-        total_full    = len(full_df)
-        drop_pull_qty = float(full_df["pull_qty"].sum())   if not full_df.empty else 0.0
-        drop_pull_lines = int(full_df["pull_lines"].sum()) if not full_df.empty else 0
-        drop_load_qty = float(full_df["total_qty"].sum())  if not full_df.empty else 0.0
-        drop_load_lines = int(full_df["items_loaded"].sum()) if not full_df.empty else 0
-        drop_coverage = round(drop_load_qty / drop_pull_qty * 100, 1) if drop_pull_qty > 0 else 0.0
-        drop_closed   = int((full_df["loop_status"] == "✅ Closed Loop").sum())   if not full_df.empty else 0
-        drop_partial  = int((full_df["loop_status"] == "⚠️ Partial").sum())       if not full_df.empty else 0
-        drop_nofill   = int((full_df["loop_status"] == "❌ Not Refilled").sum())   if not full_df.empty else 0
+        total_full       = len(full_df)
+        drop_pull_qty    = float(full_df["pull_qty"].sum())    if not full_df.empty else 0.0
+        drop_pull_lines  = int(full_df["pull_lines"].sum())    if not full_df.empty else 0
+        drop_refill_qty  = float(full_df["refill_qty"].sum())  if not full_df.empty else 0.0
+        drop_refill_lines= int(full_df["refill_lines"].sum())  if not full_df.empty else 0
+        drop_matched     = int(full_df["matched_lines"].sum()) if not full_df.empty else 0
+        drop_mismatch    = int(full_df["mismatch_lines"].sum())if not full_df.empty else 0
+        drop_missing     = int(full_df["missing_lines"].sum()) if not full_df.empty else 0
+        drop_extra       = int(full_df["extra_lines"].sum())   if not full_df.empty else 0
+        full_match_devs  = int((full_df["recon_status"] == "✅ Full Match").sum()) if not full_df.empty else 0
 
         st.subheader(f"{drop['label']} — Scheduled {drop['time']}")
         if drop.get("wed_note"):
             st.info("📅 Wednesday: SM/SMOR devices included in this drop.")
 
-        st.markdown("**🛒 Pull Demand**")
-        p1, p2, p3, p4 = st.columns(4)
-        p1.metric("Pull Qty",     f"{drop_pull_qty:,.0f}", help="Total units pulled from carousel for this drop")
-        p2.metric("Pull Lines",   f"{drop_pull_lines:,}",  help="Line items in pharmacy pull")
-        p3.metric("Loaded Qty",   f"{drop_load_qty:,.0f}", help="Units actually loaded into Pyxis machines")
-        p4.metric("Qty Coverage", f"{drop_coverage:.1f}%",
-                  delta=f"{drop_coverage - 100:.1f}%" if drop_pull_qty > 0 else None)
+        st.markdown("**Pull  →  Refill**")
+        p1, p2, p3, p4, p5 = st.columns(5)
+        p1.metric("Pull Qty",     f"{drop_pull_qty:,.0f}")
+        p2.metric("Pull Lines",   f"{drop_pull_lines:,}")
+        p3.metric("Refill Qty",   f"{drop_refill_qty:,.0f}")
+        p4.metric("Refill Lines", f"{drop_refill_lines:,}")
+        p5.metric("✅ Devices Full Match", full_match_devs)
 
-        st.markdown("**🔄 Loop Closure**")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Devices",          total_full)
-        c2.metric("✅ Closed Loop",   drop_closed)
-        c3.metric("⚠️ Partial",      drop_partial)
-        c4.metric("❌ Not Refilled",  drop_nofill)
-        c5.metric("Load Transactions", f"{drop_load_lines:,}")
-
-        if drop_pull_qty > 0:
-            cov_bar = min(drop_coverage / 100, 1.0)
-            st.progress(cov_bar, text=f"Qty coverage: {drop_coverage:.1f}% ({drop_load_qty:,.0f} / {drop_pull_qty:,.0f} units)")
+        st.markdown("**By Med-ID**")
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("✅ Matched Exact",      drop_matched)
+        r2.metric("⚠️ Qty Mismatch",      drop_mismatch)
+        r3.metric("❌ Pulled Not Refilled",drop_missing)
+        r4.metric("🔵 Refilled Not Pulled",drop_extra)
 
         st.divider()
 
-        # ── Full-drop devices — sorted by pull_qty desc ────────────────────
+        # ── Device reconciliation table — sorted by pull_qty desc ─────────
         if not full_df.empty:
-            st.markdown("#### Full Drop Devices — Ranked by Pull Size")
+            st.markdown("#### Full Drop — Reconciliation by Device")
 
-            # Dual bar: pull_qty and total_qty side by side
             chart_df = full_df[full_df["pull_qty"] > 0].sort_values("pull_qty", ascending=False)
             if chart_df.empty:
-                chart_df = full_df[full_df["total_qty"] > 0].sort_values("total_qty", ascending=False)
+                chart_df = full_df[full_df["refill_qty"] > 0].sort_values("refill_qty", ascending=False)
 
             if not chart_df.empty:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
-                    y=chart_df["device"],
-                    x=chart_df["pull_qty"],
-                    name="🛒 Pull Qty (Demand)",
-                    orientation="h",
-                    marker_color="#1f77b4",
-                    text=chart_df["pull_qty"].map(lambda v: f"{v:.0f}"),
-                    textposition="outside",
+                    y=chart_df["device"], x=chart_df["pull_qty"],
+                    name="🛒 Pull Qty", orientation="h", marker_color="#1f77b4",
+                    text=chart_df["pull_qty"].map(lambda v: f"{v:.0f}"), textposition="outside",
                 ))
                 fig.add_trace(go.Bar(
-                    y=chart_df["device"],
-                    x=chart_df["total_qty"],
-                    name="📦 Loaded Qty (Actual)",
-                    orientation="h",
-                    marker_color="#2ca02c",
-                    text=chart_df["total_qty"].map(lambda v: f"{v:.0f}"),
-                    textposition="outside",
+                    y=chart_df["device"], x=chart_df["refill_qty"],
+                    name="📦 Refill Qty", orientation="h", marker_color="#2ca02c",
+                    text=chart_df["refill_qty"].map(lambda v: f"{v:.0f}"), textposition="outside",
                 ))
                 fig.update_layout(
                     barmode="group",
@@ -599,156 +566,138 @@ for i, drop in enumerate(schedule):
                     height=max(320, len(chart_df) * 32 + 80),
                     margin=dict(l=0, r=80, t=40, b=0),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                    title=f"{drop['label']} — Pull Demand vs Loaded (Units)",
+                    title=f"{drop['label']} — Pull Qty vs Refill Qty by Device",
                     xaxis_title="Units",
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Table — sorted by pull_qty desc, loop_status first column
             areas = sorted(full_df["area"].unique())
             sel_areas = st.multiselect("Filter by Area", areas, default=areas, key=f"area_{i}")
             view = full_df[full_df["area"].isin(sel_areas)] if sel_areas else full_df
             view = view.sort_values("pull_qty", ascending=False)
 
+            _COL_CFG = {
+                "recon_status":   st.column_config.TextColumn("Reconciliation", width="medium"),
+                "device":         st.column_config.TextColumn("Device"),
+                "area":           st.column_config.TextColumn("Area"),
+                "pull_lines":     st.column_config.NumberColumn("Pull Lines",    format="%d"),
+                "pull_qty":       st.column_config.NumberColumn("🛒 Pull Qty",   format="%.0f"),
+                "refill_lines":   st.column_config.NumberColumn("Refill Lines",  format="%d"),
+                "refill_qty":     st.column_config.NumberColumn("📦 Refill Qty", format="%.0f"),
+                "matched_lines":  st.column_config.NumberColumn("✅ Matched",    format="%d"),
+                "mismatch_lines": st.column_config.NumberColumn("⚠️ Mismatch",  format="%d"),
+                "missing_lines":  st.column_config.NumberColumn("❌ Missing",    format="%d"),
+                "extra_lines":    st.column_config.NumberColumn("🔵 Extra",      format="%d"),
+                "stockout_print": st.column_config.TextColumn("Stockout Report"),
+            }
             st.dataframe(
-                view[["loop_status","device","area",
-                      "pull_qty","pull_lines","total_qty","items_loaded","qty_coverage",
-                      "techs","first_time","last_time","stockout_print"]],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "loop_status":   st.column_config.TextColumn("Loop Status",    width="medium"),
-                    "device":        st.column_config.TextColumn("Device"),
-                    "area":          st.column_config.TextColumn("Area"),
-                    "pull_qty":      st.column_config.NumberColumn("🛒 Pull Qty",  format="%.0f",
-                                         help="Units pulled from carousel (pharmacy workflow)"),
-                    "pull_lines":    st.column_config.NumberColumn("Pull Lines",   format="%d"),
-                    "total_qty":     st.column_config.NumberColumn("📦 Loaded Qty",format="%.0f",
-                                         help="Units loaded into Pyxis (refill/load events)"),
-                    "items_loaded":  st.column_config.NumberColumn("Load Lines",   format="%d"),
-                    "qty_coverage":  st.column_config.NumberColumn("Coverage %",   format="%.1f",
-                                         help="Loaded ÷ Pulled × 100"),
-                    "techs":         st.column_config.TextColumn("Technician(s)"),
-                    "first_time":    st.column_config.DatetimeColumn("First Load", format="HH:mm"),
-                    "last_time":     st.column_config.DatetimeColumn("Last Load",  format="HH:mm"),
-                    "stockout_print":st.column_config.TextColumn("Stockout Report"),
-                }
+                view[["recon_status","device","area",
+                      "pull_lines","pull_qty","refill_lines","refill_qty",
+                      "matched_lines","mismatch_lines","missing_lines","extra_lines",
+                      "stockout_print"]],
+                use_container_width=True, hide_index=True, column_config=_COL_CFG,
             )
             st.download_button(
                 f"⬇️ Export {drop['label']} to Excel",
                 data=to_excel_bytes(view),
-                file_name=f"carousel_{drop['label'].replace(' ','_').lower()}_{sel_date}.xlsx",
+                file_name=f"carousel_recon_{drop['label'].replace(' ','_').lower()}_{sel_date}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key=f"dl_{i}_full",
             )
 
-        # ── Stockouts-only devices ──────────────────────────────────────────
+        # ── Stockouts-only devices ─────────────────────────────────────────
         if not stock_df.empty:
             st.divider()
             st.markdown("#### Stockouts Only Devices")
-            st.caption("These devices only receive a drop if they had a stockout. 🔵 = no stockout needed, ✅ = activated.")
-            touched_stock = int((stock_df["status"] == "✅ Touched (Stockout)").sum())
-            st.markdown(f"**{touched_stock}** of {len(stock_df)} stockout-only devices activated today.")
+            st.caption("Drop triggered by stockout only.")
+            stock_active = stock_df[stock_df["refill_lines"] > 0]
+            st.markdown(f"**{len(stock_active)}** of {len(stock_df)} stockout-only devices had refill activity.")
             st.dataframe(
-                stock_df[["status","device","area","items_loaded","total_qty",
-                          "techs","first_time","last_time","stockout_print"]],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "status":        st.column_config.TextColumn("Status"),
-                    "device":        st.column_config.TextColumn("Device"),
-                    "area":          st.column_config.TextColumn("Area"),
-                    "items_loaded":  st.column_config.NumberColumn("Med Txns",    format="%d"),
-                    "total_qty":     st.column_config.NumberColumn("Total Units", format="%.0f"),
-                    "techs":         st.column_config.TextColumn("Technician(s)"),
-                    "first_time":    st.column_config.DatetimeColumn("First Load", format="HH:mm"),
-                    "last_time":     st.column_config.DatetimeColumn("Last Load",  format="HH:mm"),
-                    "stockout_print":st.column_config.TextColumn("Stockout Report"),
-                }
+                stock_df[["recon_status","device","area",
+                          "pull_lines","pull_qty","refill_lines","refill_qty",
+                          "matched_lines","mismatch_lines","missing_lines","extra_lines"]],
+                use_container_width=True, hide_index=True, column_config=_COL_CFG,
             )
 
-        # ── Device drill-down ──────────────────────────────────────────────
+        # ── Device reconciliation drill-down ───────────────────────────────
         st.divider()
-        st.markdown("#### 🔬 Device Drill-Down")
+        st.markdown("#### 🔬 Device Reconciliation Drill-Down")
+        st.caption("Match pull lines to refill lines by med_id within this drop's time window.")
+
         all_devices_in_drop = sorted(drop_df["device"].unique().tolist())
         drill_dev = st.selectbox(
-            "Select a device to see individual line items",
-            options=["— pick a device —"] + all_devices_in_drop,
-            key=f"drill_{i}",
+            "Select device", options=["— pick a device —"] + all_devices_in_drop, key=f"drill_{i}",
         )
 
         if drill_dev != "— pick a device —":
-            # Time window for this drop
             h0, m0 = drop["win_start"]
             h1, m1 = drop["win_end"]
             start_min = h0 * 60 + m0
             end_min   = h1 * 60 + m1
 
-            col_pull, col_load = st.columns(2)
+            def _filter_win(df, dev_col):
+                if df.empty: return pd.DataFrame()
+                m = df["dt"].dt.hour * 60 + df["dt"].dt.minute
+                return df[(m >= start_min) & (m <= end_min)]
 
-            # ── Pharmacy Pull Lines ──────────────────────────────────────
-            with col_pull:
-                st.markdown(f"**🛒 Pharmacy Pull Lines — {drill_dev}**")
-                st.caption("From pharmacy_orders (Pyxis Pull priority) — what was pulled from the carousel")
-                if not df_pulls.empty:
-                    pu_min  = df_pulls["dt"].dt.hour * 60 + df_pulls["dt"].dt.minute
-                    pull_detail = df_pulls[
-                        (df_pulls["destination"] == drill_dev) &
-                        (pu_min >= start_min) & (pu_min <= end_min)
-                    ][["dt","user_name","med_id","med_desc","qty","priority"]].sort_values("dt").reset_index(drop=True)
-                else:
-                    pull_detail = pd.DataFrame()
+            dev_pulls_raw   = _filter_win(df_pulls,   "destination")
+            dev_refills_raw = _filter_win(df_refills, "device")
+            dev_pulls_raw   = dev_pulls_raw[dev_pulls_raw["destination"] == drill_dev]   if not dev_pulls_raw.empty   else pd.DataFrame()
+            dev_refills_raw = dev_refills_raw[dev_refills_raw["device"]  == drill_dev]   if not dev_refills_raw.empty else pd.DataFrame()
 
-                if pull_detail.empty:
-                    st.info("No pharmacy pull lines for this device in this window.")
-                else:
-                    st.caption(f"{len(pull_detail):,} lines · {pull_detail['qty'].sum():,.0f} units")
-                    st.dataframe(
-                        pull_detail,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "dt":        st.column_config.DatetimeColumn("Time",       format="HH:mm:ss"),
-                            "user_name": st.column_config.TextColumn("User"),
-                            "med_id":    st.column_config.TextColumn("Med ID"),
-                            "med_desc":  st.column_config.TextColumn("Medication"),
-                            "qty":       st.column_config.NumberColumn("Qty",          format="%.0f"),
-                            "priority":  st.column_config.TextColumn("Priority"),
-                        }
-                    )
+            _, detail_df = _reconcile_device(dev_pulls_raw, dev_refills_raw)
 
-            # ── Pyxis Load Events ────────────────────────────────────────
-            with col_load:
-                st.markdown(f"**📦 Pyxis Load Events — {drill_dev}**")
-                st.caption("From events table (refill/load) — what was actually loaded into the machine")
-                if not df_loads.empty:
-                    ev_min      = df_loads["dt"].dt.hour * 60 + df_loads["dt"].dt.minute
-                    load_detail = df_loads[
-                        (df_loads["device"] == drill_dev) &
-                        (ev_min >= start_min) & (ev_min <= end_min)
-                    ][["dt","user_name","med_id","med_desc","event_type","qty","beginning_qty","ending_qty"]].sort_values("dt").reset_index(drop=True)
-                else:
-                    load_detail = pd.DataFrame()
+            # ── 1. Matched / Mismatched comparison ────────────────────────
+            both = detail_df[detail_df["pull_qty"] > 0][detail_df["refill_qty"] > 0] if not detail_df.empty else pd.DataFrame()
+            st.markdown(f"**1 of 3 — Pull vs Refill by Med (both sides present) — {drill_dev}**")
+            if both.empty:
+                st.info("No meds found on both sides for this device in this window.")
+            else:
+                both_disp = both[["med_status","med_id","med_desc","pull_qty","refill_qty","qty_diff"]].sort_values("pull_qty", ascending=False)
+                st.dataframe(both_disp, use_container_width=True, hide_index=True, column_config={
+                    "med_status": st.column_config.TextColumn("Status"),
+                    "med_id":     st.column_config.TextColumn("Med ID"),
+                    "med_desc":   st.column_config.TextColumn("Medication"),
+                    "pull_qty":   st.column_config.NumberColumn("Pull Qty",   format="%.0f"),
+                    "refill_qty": st.column_config.NumberColumn("Refill Qty", format="%.0f"),
+                    "qty_diff":   st.column_config.NumberColumn("Diff (Refill−Pull)", format="%.0f"),
+                })
 
-                if load_detail.empty:
-                    st.info("No Pyxis load events for this device in this window.")
-                else:
-                    st.caption(f"{len(load_detail):,} transactions · {load_detail['qty'].sum():,.0f} units")
-                    st.dataframe(
-                        load_detail,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "dt":            st.column_config.DatetimeColumn("Time",       format="HH:mm:ss"),
-                            "user_name":     st.column_config.TextColumn("Tech"),
-                            "med_id":        st.column_config.TextColumn("Med ID"),
-                            "med_desc":      st.column_config.TextColumn("Medication"),
-                            "event_type":    st.column_config.TextColumn("Event"),
-                            "qty":           st.column_config.NumberColumn("Qty",          format="%.0f"),
-                            "beginning_qty": st.column_config.NumberColumn("Before",       format="%.0f"),
-                            "ending_qty":    st.column_config.NumberColumn("After",        format="%.0f"),
-                        }
-                    )
+            # ── 2. Pulled Not Refilled ─────────────────────────────────────
+            st.markdown(f"**2 of 3 — ❌ Pulled Not Refilled (pull exists, no refill)**")
+            not_refilled = detail_df[detail_df["med_status"] == "❌ Pulled Not Refilled"] if not detail_df.empty else pd.DataFrame()
+            if not_refilled.empty:
+                st.success("None — all pulled meds have a matching refill.")
+            else:
+                nr_raw = dev_pulls_raw[dev_pulls_raw["med_id"].isin(not_refilled["med_id"])]\
+                    [["dt","user_name","med_id","med_desc","qty"]].sort_values("dt").reset_index(drop=True)
+                st.caption(f"{len(nr_raw):,} pull lines · {nr_raw['qty'].sum():,.0f} units with no matching refill")
+                st.dataframe(nr_raw, use_container_width=True, hide_index=True, column_config={
+                    "dt":        st.column_config.DatetimeColumn("Pull Time", format="HH:mm:ss"),
+                    "user_name": st.column_config.TextColumn("User"),
+                    "med_id":    st.column_config.TextColumn("Med ID"),
+                    "med_desc":  st.column_config.TextColumn("Medication"),
+                    "qty":       st.column_config.NumberColumn("Pull Qty", format="%.0f"),
+                })
+
+            # ── 3. Refilled Not Pulled ─────────────────────────────────────
+            st.markdown(f"**3 of 3 — 🔵 Refilled Not Pulled (refill exists, no pull record)**")
+            not_pulled = detail_df[detail_df["med_status"] == "🔵 Refilled Not Pulled"] if not detail_df.empty else pd.DataFrame()
+            if not_pulled.empty:
+                st.success("None — all refill events have a matching pull record.")
+            else:
+                np_raw = dev_refills_raw[dev_refills_raw["med_id"].isin(not_pulled["med_id"])]\
+                    [["dt","user_name","med_id","med_desc","qty","beginning_qty","ending_qty"]].sort_values("dt").reset_index(drop=True)
+                st.caption(f"{len(np_raw):,} refill lines · {np_raw['qty'].sum():,.0f} units with no matching pull")
+                st.dataframe(np_raw, use_container_width=True, hide_index=True, column_config={
+                    "dt":            st.column_config.DatetimeColumn("Refill Time", format="HH:mm:ss"),
+                    "user_name":     st.column_config.TextColumn("Tech"),
+                    "med_id":        st.column_config.TextColumn("Med ID"),
+                    "med_desc":      st.column_config.TextColumn("Medication"),
+                    "qty":           st.column_config.NumberColumn("Refill Qty", format="%.0f"),
+                    "beginning_qty": st.column_config.NumberColumn("Before",     format="%.0f"),
+                    "ending_qty":    st.column_config.NumberColumn("After",      format="%.0f"),
+                })
 
 
 # ── Day Summary Tab ───────────────────────────────────────────────────────────
@@ -758,119 +707,70 @@ with tabs[len(schedule)]:
     if combined.empty:
         st.info("No data found for this date.")
     else:
-        # Completion by drop — pull-first
         drop_summary = []
         for drop in schedule:
-            ddf = all_drop_dfs[drop["label"]]
+            ddf  = all_drop_dfs[drop["label"]]
             full = ddf[ddf["drop_type"] == "Full Drop"]
-            pull_qty   = float(full["pull_qty"].sum())
-            loaded_qty = float(full["total_qty"].sum())
-            closed     = int((full["loop_status"] == "✅ Closed Loop").sum())
-            total      = len(full)
             drop_summary.append({
-                "Drop":         drop["label"],
-                "Pull Qty":     pull_qty,
-                "Loaded Qty":   loaded_qty,
-                "Coverage %":   round(loaded_qty / pull_qty * 100, 1) if pull_qty > 0 else 0.0,
-                "Pull Lines":   int(full["pull_lines"].sum()),
-                "✅ Closed":    closed,
-                "Devices":      total,
+                "Drop":          drop["label"],
+                "Devices":       len(full),
+                "✅ Full Match": int((full["recon_status"] == "✅ Full Match").sum()),
+                "⚠️ Mismatch":  int((full["recon_status"] == "⚠️ Qty Mismatch").sum()),
+                "❌ Missing":    int((full["recon_status"] == "❌ Missing Refills").sum()),
+                "❌ No Refill":  int((full["recon_status"] == "❌ No Refills").sum()),
+                "Pull Qty":      float(full["pull_qty"].sum()),
+                "Refill Qty":    float(full["refill_qty"].sum()),
+                "Pull Lines":    int(full["pull_lines"].sum()),
+                "Matched Lines": int(full["matched_lines"].sum()),
+                "Missing Lines": int(full["missing_lines"].sum()),
             })
         ds = pd.DataFrame(drop_summary)
+        ds["Match %"] = ds.apply(
+            lambda r: round(r["Matched Lines"] / r["Pull Lines"] * 100, 1) if r["Pull Lines"] > 0 else 0.0,
+            axis=1
+        )
 
         fig_comp = px.bar(
-            ds, x="Drop", y="Coverage %",
-            color="Coverage %",
+            ds, x="Drop", y="Match %",
+            color="Match %",
             color_continuous_scale=["#ef4444", "#facc15", "#22c55e"],
             range_color=[0, 100],
-            labels={"Coverage %": "Qty Coverage %"},
-            title="Loop Closure Coverage % by Drop (Loaded ÷ Pulled)",
-            text=ds["Coverage %"].astype(str) + "%",
+            title="Reconciliation Match % by Drop (Matched ÷ Pull Lines)",
+            text=ds["Match %"].astype(str) + "%",
         )
         fig_comp.update_traces(textposition="outside")
         fig_comp.update_layout(coloraxis_showscale=False, height=300)
         st.plotly_chart(fig_comp, use_container_width=True)
 
-        st.dataframe(
-            ds,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Pull Qty":    st.column_config.NumberColumn("🛒 Pull Qty",   format="%.0f"),
-                "Loaded Qty":  st.column_config.NumberColumn("📦 Loaded Qty", format="%.0f"),
-                "Coverage %":  st.column_config.NumberColumn("Coverage %",    format="%.1f"),
-                "Pull Lines":  st.column_config.NumberColumn("Pull Lines",    format="%d"),
-                "✅ Closed":   st.column_config.NumberColumn("✅ Closed Loop",format="%d"),
-                "Devices":     st.column_config.NumberColumn("Devices",       format="%d"),
-            }
-        )
+        st.dataframe(ds, use_container_width=True, hide_index=True, column_config={
+            "Pull Qty":      st.column_config.NumberColumn("🛒 Pull Qty",    format="%.0f"),
+            "Refill Qty":    st.column_config.NumberColumn("📦 Refill Qty",  format="%.0f"),
+            "Pull Lines":    st.column_config.NumberColumn("Pull Lines",     format="%d"),
+            "Matched Lines": st.column_config.NumberColumn("✅ Matched",     format="%d"),
+            "Missing Lines": st.column_config.NumberColumn("❌ Missing",     format="%d"),
+            "Match %":       st.column_config.NumberColumn("Match %",        format="%.1f"),
+        })
 
         st.divider()
-
-        # Hourly load activity
-        st.subheader("Hourly Load Activity")
-        df_loads["_hour"] = df_loads["dt"].dt.hour
-        hourly = df_loads.groupby("_hour").agg(txns=("pk","count"), units=("qty","sum")).reset_index()
-        fig_hr = px.bar(
-            hourly, x="_hour", y="txns",
-            labels={"_hour": "Hour of Day", "txns": "Med Transactions"},
-            title="Transactions by Hour",
-            color="txns", color_continuous_scale="Blues",
-            text="txns",
-        )
-        fig_hr.update_traces(textposition="outside")
-        fig_hr.update_layout(coloraxis_showscale=False, xaxis=dict(tickmode="linear", dtick=1))
-        st.plotly_chart(fig_hr, use_container_width=True)
-
-        st.divider()
-
-        # Top technicians for the day
-        st.subheader("Technician Load Totals")
-        tech_day = (
-            df_loads.groupby("user_name")
-            .agg(txns=("pk","count"), units=("qty","sum"), devices=("device","nunique"))
-            .reset_index().sort_values("txns", ascending=False)
-        )
-        st.dataframe(
-            tech_day,
-            use_container_width=True, hide_index=True,
-            column_config={
-                "txns":    st.column_config.NumberColumn("Transactions", format="%d"),
-                "units":   st.column_config.NumberColumn("Units Loaded", format="%.0f"),
+        st.subheader("Technician Refill Activity")
+        if not df_refills.empty:
+            tech_day = (
+                df_refills.groupby("user_name")
+                .agg(lines=("pk","count"), units=("qty","sum"), devices=("device","nunique"))
+                .reset_index().sort_values("units", ascending=False)
+            )
+            st.dataframe(tech_day, use_container_width=True, hide_index=True, column_config={
+                "lines":   st.column_config.NumberColumn("Refill Lines", format="%d"),
+                "units":   st.column_config.NumberColumn("Units",        format="%.0f"),
                 "devices": st.column_config.NumberColumn("Devices",      format="%d"),
-            }
-        )
-
-        # All devices ranked by units loaded
-        st.divider()
-        st.subheader("All Devices — Units Loaded Today")
-        dev_day = (
-            df_loads.groupby("device")
-            .agg(txns=("pk","count"), units=("qty","sum"))
-            .reset_index().sort_values("units", ascending=False)
-        )
-        dev_day["area"] = dev_day["device"].map(lambda d: DEVICE_AREA.get(d, "Other"))
-        fig_dev = px.bar(
-            dev_day, x="units", y="device",
-            orientation="h",
-            color="area",
-            color_discrete_map=AREA_COLOR,
-            labels={"units": "Units Loaded", "device": ""},
-            title="Units Loaded per Device",
-            text="units",
-        )
-        fig_dev.update_traces(texttemplate="%{text:.0f}", textposition="outside")
-        fig_dev.update_layout(
-            yaxis={"categoryorder": "total ascending"},
-            height=max(400, len(dev_day) * 22 + 80),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        )
-        st.plotly_chart(fig_dev, use_container_width=True)
+            })
+        else:
+            st.info("No Refill events for this date.")
 
         st.download_button(
-            "⬇️ Export Full Day Summary to Excel",
-            data=to_excel_bytes(combined),
-            file_name=f"carousel_day_{sel_date}.xlsx",
+            "⬇️ Export Full Day Reconciliation to Excel",
+            data=to_excel_bytes(combined.drop(columns=["stockout_print"], errors="ignore")),
+            file_name=f"carousel_recon_day_{sel_date}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -945,9 +845,9 @@ st.divider()
 with st.expander("🛠️ Diagnostic: Verify Event Types Being Captured", expanded=False):
     st.markdown(
         "Use this to confirm the correct Pyxis transaction types are being counted. "
-        "The tracker currently includes events matching **refill / load / restock / replenish** "
-        "(excluding unload / cancel / empty). If your Pyxis uses a different label, the filters "
-        "can be updated to match."
+        "The tracker currently captures events with **exact** `event_type = 'Refill'`. "
+        "The table below shows all distinct event types present on this date so you can "
+        "confirm 'Refill' exists and is spelled correctly in your Pyxis data."
     )
 
     df_all = load_all_events_for_date(sel_date)
@@ -971,14 +871,8 @@ with st.expander("🛠️ Diagnostic: Verify Event Types Being Captured", expand
                 .reset_index()
                 .sort_values("count", ascending=False)
             )
-            # Flag which ones are currently captured by our filter
-            _capture = r"refill|load|restock|replenish"
-            _exclude = r"unload|cancel|empty"
             etype_all["captured?"] = etype_all["event_type"].apply(
-                lambda e: "✅ Yes" if (
-                    pd.Series([e]).str.contains(_capture, case=False, na=False).iloc[0]
-                    and not pd.Series([e]).str.contains(_exclude, case=False, na=False).iloc[0]
-                ) else "—"
+                lambda e: "✅ Yes" if e == "Refill" else "—"
             )
             st.dataframe(etype_all, use_container_width=True, hide_index=True)
 
@@ -995,17 +889,14 @@ with st.expander("🛠️ Diagnostic: Verify Event Types Being Captured", expand
                     .sort_values("count", ascending=False)
                 )
                 etype_sched["captured?"] = etype_sched["event_type"].apply(
-                    lambda e: "✅ Yes" if (
-                        pd.Series([e]).str.contains(_capture, case=False, na=False).iloc[0]
-                        and not pd.Series([e]).str.contains(_exclude, case=False, na=False).iloc[0]
-                    ) else "—"
+                    lambda e: "✅ Yes" if e == "Refill" else "—"
                 )
                 st.dataframe(etype_sched, use_container_width=True, hide_index=True)
 
         st.markdown(
-            f"**Load/Refill events captured:** {len(df_loads):,} transactions · "
-            f"{df_loads['qty'].sum():,.0f} units · "
-            f"{df_loads['device'].nunique()} devices  \n"
+            f"**Refill events captured:** {len(df_refills):,} transactions · "
+            f"{df_refills['qty'].sum():,.0f} units · "
+            f"{df_refills['device'].nunique()} devices  \n"
             f"**Total events on date (all types):** {len(df_all):,}"
         )
 
