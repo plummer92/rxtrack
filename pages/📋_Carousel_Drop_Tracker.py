@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 import io
 from datetime import date, timedelta
 from sqlalchemy import text
@@ -400,59 +401,65 @@ def build_drop_df(drop, df_loads, df_pulls):
     else:
         pull_agg = pd.DataFrame(columns=["device","pull_lines","pull_qty"])
 
+    def _loop_status(pull_qty, items_loaded, loaded_qty):
+        if pull_qty == 0 and items_loaded == 0:
+            return "⬜ No Activity"
+        if pull_qty == 0 and items_loaded > 0:
+            return "⚠️ Loaded / No Pull Record"
+        if pull_qty > 0 and items_loaded == 0:
+            return "❌ Not Refilled"
+        coverage = loaded_qty / pull_qty if pull_qty > 0 else 0
+        return "✅ Closed Loop" if coverage >= 0.90 else "⚠️ Partial"
+
     rows = []
     for dev in drop["full"]:
         m = agg[agg["device"] == dev]
         p = pull_agg[pull_agg["device"] == dev]
+        pull_lines = int(p["pull_lines"].iloc[0]) if not p.empty else 0
+        pull_qty   = float(p["pull_qty"].iloc[0])  if not p.empty else 0.0
+        items_loaded = int(m["items_loaded"].iloc[0])   if not m.empty else 0
+        loaded_qty   = float(m["total_qty"].iloc[0])    if not m.empty else 0.0
         row = {
             "device":         dev,
             "area":           DEVICE_AREA.get(dev, "Other"),
             "drop_type":      "Full Drop",
             "stockout_print": "✅ Auto-Print" if dev in STOCKOUTS_PRINT_AUTO_SET else "❌ No Print",
-            "pull_lines":     int(p["pull_lines"].iloc[0]) if not p.empty else 0,
-            "pull_qty":       float(p["pull_qty"].iloc[0]) if not p.empty else 0.0,
+            "pull_lines":     pull_lines,
+            "pull_qty":       pull_qty,
+            "items_loaded":   items_loaded,
+            "total_qty":      loaded_qty,
+            "qty_coverage":   round(loaded_qty / pull_qty * 100, 1) if pull_qty > 0 else None,
+            "loop_status":    _loop_status(pull_qty, items_loaded, loaded_qty),
+            "techs":          m["techs"].iloc[0]     if not m.empty else "",
+            "first_time":     m["first_time"].iloc[0] if not m.empty else None,
+            "last_time":      m["last_time"].iloc[0]  if not m.empty else None,
+            "status":         "✅ Touched" if not m.empty else "❌ Missed",
         }
-        if not m.empty:
-            row["items_loaded"] = int(m["items_loaded"].iloc[0])
-            row["total_qty"]    = float(m["total_qty"].iloc[0])
-            row["techs"]        = m["techs"].iloc[0]
-            row["first_time"]   = m["first_time"].iloc[0]
-            row["last_time"]    = m["last_time"].iloc[0]
-            row["status"]       = "✅ Touched"
-        else:
-            row["items_loaded"] = 0
-            row["total_qty"]    = 0.0
-            row["techs"]        = ""
-            row["first_time"]   = None
-            row["last_time"]    = None
-            row["status"]       = "❌ Missed"
         rows.append(row)
 
     for dev in drop["stockouts"]:
         m = agg[agg["device"] == dev]
         p = pull_agg[pull_agg["device"] == dev]
+        pull_lines = int(p["pull_lines"].iloc[0]) if not p.empty else 0
+        pull_qty   = float(p["pull_qty"].iloc[0])  if not p.empty else 0.0
+        items_loaded = int(m["items_loaded"].iloc[0])   if not m.empty else 0
+        loaded_qty   = float(m["total_qty"].iloc[0])    if not m.empty else 0.0
         row = {
             "device":         dev,
             "area":           DEVICE_AREA.get(dev, "Other"),
             "drop_type":      "Stockouts Only",
             "stockout_print": "✅ Auto-Print" if dev in STOCKOUTS_PRINT_AUTO_SET else "❌ No Print",
-            "pull_lines":     int(p["pull_lines"].iloc[0]) if not p.empty else 0,
-            "pull_qty":       float(p["pull_qty"].iloc[0]) if not p.empty else 0.0,
+            "pull_lines":     pull_lines,
+            "pull_qty":       pull_qty,
+            "items_loaded":   items_loaded,
+            "total_qty":      loaded_qty,
+            "qty_coverage":   round(loaded_qty / pull_qty * 100, 1) if pull_qty > 0 else None,
+            "loop_status":    _loop_status(pull_qty, items_loaded, loaded_qty),
+            "techs":          m["techs"].iloc[0]     if not m.empty else "",
+            "first_time":     m["first_time"].iloc[0] if not m.empty else None,
+            "last_time":      m["last_time"].iloc[0]  if not m.empty else None,
+            "status":         "✅ Touched (Stockout)" if not m.empty else "🔵 No Stockout",
         }
-        if not m.empty:
-            row["items_loaded"] = int(m["items_loaded"].iloc[0])
-            row["total_qty"]    = float(m["total_qty"].iloc[0])
-            row["techs"]        = m["techs"].iloc[0]
-            row["first_time"]   = m["first_time"].iloc[0]
-            row["last_time"]    = m["last_time"].iloc[0]
-            row["status"]       = "✅ Touched (Stockout)"
-        else:
-            row["items_loaded"] = 0
-            row["total_qty"]    = 0.0
-            row["techs"]        = ""
-            row["first_time"]   = None
-            row["last_time"]    = None
-            row["status"]       = "🔵 No Stockout"
         rows.append(row)
 
     return pd.DataFrame(rows)
@@ -465,28 +472,43 @@ def build_drop_df(drop, df_loads, df_pulls):
 all_drop_dfs = {d["label"]: build_drop_df(d, df_loads, df_pulls) for d in schedule}
 combined = pd.concat(all_drop_dfs.values(), ignore_index=True) if all_drop_dfs else pd.DataFrame()
 
-total_scheduled  = int((combined["drop_type"] == "Full Drop").sum()) if not combined.empty else 0
-total_touched    = int((combined["status"] == "✅ Touched").sum())   if not combined.empty else 0
-total_missed     = int((combined["status"] == "❌ Missed").sum())    if not combined.empty else 0
-stockout_touched = int((combined["status"] == "✅ Touched (Stockout)").sum()) if not combined.empty else 0
-total_items      = int(df_loads["pk"].count()) if not df_loads.empty else 0
-total_qty        = float(df_loads["qty"].sum()) if not df_loads.empty else 0.0
-total_pull_lines = int(df_pulls["pk"].count()) if not df_pulls.empty else 0
-completion_pct   = round(total_touched / total_scheduled * 100, 1) if total_scheduled > 0 else 0.0
+full_combined    = combined[combined["drop_type"] == "Full Drop"] if not combined.empty else pd.DataFrame()
+total_scheduled  = len(full_combined)
+total_pull_lines = int(df_pulls["pk"].count())      if not df_pulls.empty else 0
+total_pull_qty   = float(df_pulls["qty"].sum())     if not df_pulls.empty else 0.0
+total_load_qty   = float(df_loads["qty"].sum())     if not df_loads.empty else 0.0
+total_load_lines = int(df_loads["pk"].count())      if not df_loads.empty else 0
+day_coverage_pct = round(total_load_qty / total_pull_qty * 100, 1) if total_pull_qty > 0 else 0.0
 
-k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
-k1.metric("Scheduled Full Drops", total_scheduled)
-k2.metric("✅ Completed", total_touched, delta=f"{completion_pct}%")
-k3.metric("❌ Missed", total_missed)
-k4.metric("🔵 Stockout Activations", stockout_touched)
-k5.metric("🛒 Carousel Pull Lines", f"{total_pull_lines:,}")
-k6.metric("Total Med Transactions", f"{total_items:,}")
-k7.metric("Total Units Loaded", f"{total_qty:,.0f}")
+closed_ct  = int((full_combined["loop_status"] == "✅ Closed Loop").sum())      if not full_combined.empty else 0
+partial_ct = int((full_combined["loop_status"] == "⚠️ Partial").sum())          if not full_combined.empty else 0
+no_fill_ct = int((full_combined["loop_status"] == "❌ Not Refilled").sum())      if not full_combined.empty else 0
 
-if total_missed > 0:
-    st.warning(f"⚠️ **{total_missed} device(s) scheduled for a full drop were not touched** — see per-drop tabs below.")
-elif total_scheduled > 0:
-    st.success(f"✅ All {total_scheduled} full-drop devices completed for {sel_date.strftime('%A %b %d, %Y')}.")
+# ── Primary pull metrics ──────────────────────────────────────────────────────
+st.markdown("##### 🛒 Pull Demand (Pharmacy Workflow)")
+p1, p2, p3, p4 = st.columns(4)
+p1.metric("Pull Lines",   f"{total_pull_lines:,}",  help="Line items pulled from carousel (pharmacy_orders)")
+p2.metric("Pull Qty",     f"{total_pull_qty:,.0f}", help="Total units pulled from carousel — primary workload metric")
+p3.metric("Loaded Qty",   f"{total_load_qty:,.0f}", help="Total units loaded into Pyxis machines (refill/load events)")
+p4.metric("Qty Coverage", f"{day_coverage_pct:.1f}%",
+          delta=f"{day_coverage_pct - 100:.1f}%" if total_pull_qty > 0 else None,
+          help="Loaded ÷ Pulled × 100 — 100% = fully closed loop")
+
+st.markdown("##### 🔄 Loop Closure")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Devices Scheduled",  total_scheduled)
+c2.metric("✅ Closed Loop",     closed_ct)
+c3.metric("⚠️ Partial",        partial_ct)
+c4.metric("❌ Not Refilled",    no_fill_ct)
+c5.metric("Load Lines",         f"{total_load_lines:,}", help="Pyxis refill/load transaction count")
+
+if day_coverage_pct >= 100:
+    st.success(f"✅ Full loop closed — {total_pull_qty:,.0f} units pulled, {total_load_qty:,.0f} loaded ({day_coverage_pct:.1f}% coverage).")
+elif total_pull_qty == 0:
+    st.info("No Pyxis Pull records found for this date. Check pharmacy workflow data.")
+else:
+    gap = total_pull_qty - total_load_qty
+    st.warning(f"⚠️ Loop not fully closed — {gap:,.0f} units pulled but not yet loaded ({day_coverage_pct:.1f}% coverage).")
 
 st.divider()
 
@@ -506,76 +528,106 @@ for i, drop in enumerate(schedule):
         full_df  = drop_df[drop_df["drop_type"] == "Full Drop"]
         stock_df = drop_df[drop_df["drop_type"] == "Stockouts Only"]
 
-        touched_ct  = int((full_df["status"] == "✅ Touched").sum())
-        missed_ct   = int((full_df["status"] == "❌ Missed").sum())
-        total_full  = len(full_df)
-        drop_items  = int(full_df["items_loaded"].sum())
-        drop_qty    = float(full_df["total_qty"].sum())
-        drop_pulls  = int(full_df["pull_lines"].sum()) if "pull_lines" in full_df.columns else 0
+        total_full    = len(full_df)
+        drop_pull_qty = float(full_df["pull_qty"].sum())   if not full_df.empty else 0.0
+        drop_pull_lines = int(full_df["pull_lines"].sum()) if not full_df.empty else 0
+        drop_load_qty = float(full_df["total_qty"].sum())  if not full_df.empty else 0.0
+        drop_load_lines = int(full_df["items_loaded"].sum()) if not full_df.empty else 0
+        drop_coverage = round(drop_load_qty / drop_pull_qty * 100, 1) if drop_pull_qty > 0 else 0.0
+        drop_closed   = int((full_df["loop_status"] == "✅ Closed Loop").sum())   if not full_df.empty else 0
+        drop_partial  = int((full_df["loop_status"] == "⚠️ Partial").sum())       if not full_df.empty else 0
+        drop_nofill   = int((full_df["loop_status"] == "❌ Not Refilled").sum())   if not full_df.empty else 0
 
         st.subheader(f"{drop['label']} — Scheduled {drop['time']}")
         if drop.get("wed_note"):
             st.info("📅 Wednesday: SM/SMOR devices included in this drop.")
 
-        d1, d2, d3, d4, d5, d6 = st.columns(6)
-        d1.metric("Devices Scheduled", total_full)
-        d2.metric("✅ Touched", touched_ct)
-        d3.metric("❌ Missed", missed_ct)
-        d4.metric("🛒 Pull Lines", f"{drop_pulls:,}", help="Pyxis Pull lines from pharmacy workflow — carousel demand for this drop")
-        d5.metric("Med Transactions", drop_items)
-        d6.metric("Units Loaded", f"{drop_qty:,.0f}")
+        st.markdown("**🛒 Pull Demand**")
+        p1, p2, p3, p4 = st.columns(4)
+        p1.metric("Pull Qty",     f"{drop_pull_qty:,.0f}", help="Total units pulled from carousel for this drop")
+        p2.metric("Pull Lines",   f"{drop_pull_lines:,}",  help="Line items in pharmacy pull")
+        p3.metric("Loaded Qty",   f"{drop_load_qty:,.0f}", help="Units actually loaded into Pyxis machines")
+        p4.metric("Qty Coverage", f"{drop_coverage:.1f}%",
+                  delta=f"{drop_coverage - 100:.1f}%" if drop_pull_qty > 0 else None)
 
-        # Progress bar
-        pct = touched_ct / total_full if total_full > 0 else 0
-        st.progress(pct, text=f"{touched_ct}/{total_full} devices completed ({pct*100:.0f}%)")
+        st.markdown("**🔄 Loop Closure**")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Devices",          total_full)
+        c2.metric("✅ Closed Loop",   drop_closed)
+        c3.metric("⚠️ Partial",      drop_partial)
+        c4.metric("❌ Not Refilled",  drop_nofill)
+        c5.metric("Load Transactions", f"{drop_load_lines:,}")
+
+        if drop_pull_qty > 0:
+            cov_bar = min(drop_coverage / 100, 1.0)
+            st.progress(cov_bar, text=f"Qty coverage: {drop_coverage:.1f}% ({drop_load_qty:,.0f} / {drop_pull_qty:,.0f} units)")
 
         st.divider()
 
-        # ── Full-drop devices ──────────────────────────────────────────────
+        # ── Full-drop devices — sorted by pull_qty desc ────────────────────
         if not full_df.empty:
-            st.markdown("#### Full Drop Devices")
+            st.markdown("#### Full Drop Devices — Ranked by Pull Size")
 
-            # Bar chart — qty per device (touched only)
-            chart_df = full_df[full_df["items_loaded"] > 0].sort_values("items_loaded", ascending=False)
+            # Dual bar: pull_qty and total_qty side by side
+            chart_df = full_df[full_df["pull_qty"] > 0].sort_values("pull_qty", ascending=False)
+            if chart_df.empty:
+                chart_df = full_df[full_df["total_qty"] > 0].sort_values("total_qty", ascending=False)
+
             if not chart_df.empty:
-                fig = px.bar(
-                    chart_df,
-                    x="items_loaded", y="device",
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    y=chart_df["device"],
+                    x=chart_df["pull_qty"],
+                    name="🛒 Pull Qty (Demand)",
                     orientation="h",
-                    color="area",
-                    color_discrete_map=AREA_COLOR,
-                    labels={"items_loaded": "Med Transactions", "device": "", "area": "Area"},
-                    title=f"{drop['label']} — Med Transactions per Device",
-                    text="items_loaded",
-                    hover_data=["total_qty", "techs"],
-                )
-                fig.update_traces(textposition="outside")
+                    marker_color="#1f77b4",
+                    text=chart_df["pull_qty"].map(lambda v: f"{v:.0f}"),
+                    textposition="outside",
+                ))
+                fig.add_trace(go.Bar(
+                    y=chart_df["device"],
+                    x=chart_df["total_qty"],
+                    name="📦 Loaded Qty (Actual)",
+                    orientation="h",
+                    marker_color="#2ca02c",
+                    text=chart_df["total_qty"].map(lambda v: f"{v:.0f}"),
+                    textposition="outside",
+                ))
                 fig.update_layout(
+                    barmode="group",
                     yaxis={"categoryorder": "total ascending"},
-                    height=max(300, len(chart_df) * 26 + 80),
-                    margin=dict(l=0, r=60, t=40, b=0),
+                    height=max(320, len(chart_df) * 32 + 80),
+                    margin=dict(l=0, r=80, t=40, b=0),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    title=f"{drop['label']} — Pull Demand vs Loaded (Units)",
+                    xaxis_title="Units",
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            # Area filter
+            # Table — sorted by pull_qty desc, loop_status first column
             areas = sorted(full_df["area"].unique())
             sel_areas = st.multiselect("Filter by Area", areas, default=areas, key=f"area_{i}")
             view = full_df[full_df["area"].isin(sel_areas)] if sel_areas else full_df
+            view = view.sort_values("pull_qty", ascending=False)
 
             st.dataframe(
-                view[["status","device","area","pull_lines","items_loaded","total_qty",
+                view[["loop_status","device","area",
+                      "pull_qty","pull_lines","total_qty","items_loaded","qty_coverage",
                       "techs","first_time","last_time","stockout_print"]],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "pull_lines":    st.column_config.NumberColumn("🛒 Pull Lines", format="%d",
-                                        help="Pyxis Pull order lines from pharmacy workflow"),
-                    "status":        st.column_config.TextColumn("Status"),
+                    "loop_status":   st.column_config.TextColumn("Loop Status",    width="medium"),
                     "device":        st.column_config.TextColumn("Device"),
                     "area":          st.column_config.TextColumn("Area"),
-                    "items_loaded":  st.column_config.NumberColumn("Med Txns",    format="%d"),
-                    "total_qty":     st.column_config.NumberColumn("Total Units", format="%.0f"),
+                    "pull_qty":      st.column_config.NumberColumn("🛒 Pull Qty",  format="%.0f",
+                                         help="Units pulled from carousel (pharmacy workflow)"),
+                    "pull_lines":    st.column_config.NumberColumn("Pull Lines",   format="%d"),
+                    "total_qty":     st.column_config.NumberColumn("📦 Loaded Qty",format="%.0f",
+                                         help="Units loaded into Pyxis (refill/load events)"),
+                    "items_loaded":  st.column_config.NumberColumn("Load Lines",   format="%d"),
+                    "qty_coverage":  st.column_config.NumberColumn("Coverage %",   format="%.1f",
+                                         help="Loaded ÷ Pulled × 100"),
                     "techs":         st.column_config.TextColumn("Technician(s)"),
                     "first_time":    st.column_config.DatetimeColumn("First Load", format="HH:mm"),
                     "last_time":     st.column_config.DatetimeColumn("Last Load",  format="HH:mm"),
@@ -703,34 +755,37 @@ for i, drop in enumerate(schedule):
 with tabs[len(schedule)]:
     st.subheader(f"Day Summary — {sel_date.strftime('%A %b %d, %Y')}")
 
-    if combined.empty or df_loads.empty:
-        st.info("No load events found for this date.")
+    if combined.empty:
+        st.info("No data found for this date.")
     else:
-        # Completion by drop
+        # Completion by drop — pull-first
         drop_summary = []
         for drop in schedule:
             ddf = all_drop_dfs[drop["label"]]
             full = ddf[ddf["drop_type"] == "Full Drop"]
-            touched = int((full["status"] == "✅ Touched").sum())
-            total   = len(full)
+            pull_qty   = float(full["pull_qty"].sum())
+            loaded_qty = float(full["total_qty"].sum())
+            closed     = int((full["loop_status"] == "✅ Closed Loop").sum())
+            total      = len(full)
             drop_summary.append({
-                "Drop":       drop["label"],
-                "Scheduled":  total,
-                "Completed":  touched,
-                "Missed":     total - touched,
-                "Completion": round(touched / total * 100, 1) if total > 0 else 0.0,
-                "Total Units": float(full["total_qty"].sum()),
+                "Drop":         drop["label"],
+                "Pull Qty":     pull_qty,
+                "Loaded Qty":   loaded_qty,
+                "Coverage %":   round(loaded_qty / pull_qty * 100, 1) if pull_qty > 0 else 0.0,
+                "Pull Lines":   int(full["pull_lines"].sum()),
+                "✅ Closed":    closed,
+                "Devices":      total,
             })
         ds = pd.DataFrame(drop_summary)
 
         fig_comp = px.bar(
-            ds, x="Drop", y="Completion",
-            color="Completion",
+            ds, x="Drop", y="Coverage %",
+            color="Coverage %",
             color_continuous_scale=["#ef4444", "#facc15", "#22c55e"],
             range_color=[0, 100],
-            labels={"Completion": "% Complete"},
-            title="Drop Completion % by Time",
-            text=ds["Completion"].astype(str) + "%",
+            labels={"Coverage %": "Qty Coverage %"},
+            title="Loop Closure Coverage % by Drop (Loaded ÷ Pulled)",
+            text=ds["Coverage %"].astype(str) + "%",
         )
         fig_comp.update_traces(textposition="outside")
         fig_comp.update_layout(coloraxis_showscale=False, height=300)
@@ -741,8 +796,12 @@ with tabs[len(schedule)]:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Completion":   st.column_config.NumberColumn("Completion %", format="%.1f%%"),
-                "Total Units":  st.column_config.NumberColumn("Units Loaded", format="%.0f"),
+                "Pull Qty":    st.column_config.NumberColumn("🛒 Pull Qty",   format="%.0f"),
+                "Loaded Qty":  st.column_config.NumberColumn("📦 Loaded Qty", format="%.0f"),
+                "Coverage %":  st.column_config.NumberColumn("Coverage %",    format="%.1f"),
+                "Pull Lines":  st.column_config.NumberColumn("Pull Lines",    format="%d"),
+                "✅ Closed":   st.column_config.NumberColumn("✅ Closed Loop",format="%d"),
+                "Devices":     st.column_config.NumberColumn("Devices",       format="%d"),
             }
         )
 
