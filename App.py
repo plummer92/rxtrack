@@ -112,6 +112,25 @@ def init_db():
             username TEXT PRIMARY KEY,
             display_name TEXT,
             added_at TIMESTAMP DEFAULT NOW()
+        );""",
+        """CREATE TABLE IF NOT EXISTS daily_ops (
+            id SERIAL PRIMARY KEY,
+            task TEXT NOT NULL,
+            category TEXT,
+            priority TEXT DEFAULT 'Medium',
+            status TEXT DEFAULT 'Not Started',
+            due_date DATE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            notes TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS follow_ups (
+            id SERIAL PRIMARY KEY,
+            item TEXT NOT NULL,
+            action_taken TEXT,
+            follow_up_date DATE,
+            status TEXT DEFAULT 'Pending',
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT NOW()
         );"""
     ]
     with db_cursor() as (conn, cur):
