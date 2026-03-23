@@ -6,7 +6,7 @@ import plotly.express as px
 import io
 from datetime import date
 from sqlalchemy import text
-from App import engine
+from App import engine, load_data
 
 st.set_page_config(page_title="Carousel Drop Tracker", page_icon="📋", layout="wide")
 
@@ -208,29 +208,35 @@ def get_schedule(sel_date):
 
 @st.cache_data(ttl=300)
 def load_refills(sel_date):
+    """Load refill-like Pyxis transactions using the same shared loader pattern as Session Explorer."""
     try:
-        sql = text(
-            """
-            SELECT pk, dt, user_name, device, med_id, med_desc, event_type,
-                   qty, beginning_qty, ending_qty
-            FROM events
-            WHERE dt::date = :d
-              AND event_type ILIKE '%refill%'
-              AND event_type NOT ILIKE '%unload%'
-              AND event_type NOT ILIKE '%cancel%'
-              AND event_type NOT ILIKE '%empty%'
-            """
-        )
-        with engine.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"d": sel_date})
+        start_ts = pd.Timestamp(sel_date)
+        end_ts = start_ts + pd.Timedelta(days=1)
+        df_events, _, _, _, _ = load_data(start_ts, end_ts)
+        if df_events is None or df_events.empty:
+            return pd.DataFrame(columns=["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"])
+
+        df = df_events.copy()
+        keep_cols = [c for c in ["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"] if c in df.columns]
+        df = df[keep_cols]
         df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
-        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
-        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
-        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
-        df["beginning_qty"] = pd.to_numeric(df.get("beginning_qty"), errors="coerce")
-        df["ending_qty"] = pd.to_numeric(df.get("ending_qty"), errors="coerce")
-        return df
+        df = df[df["dt"].dt.date == pd.Timestamp(sel_date).date()].copy()
+        df["device"] = df.get("device", "Unknown").fillna("Unknown").astype(str).str.strip()
+        df["user_name"] = df.get("user_name", "Unknown").fillna("Unknown").astype(str).str.strip()
+        df["event_type"] = df.get("event_type", "").fillna("").astype(str).str.strip()
+        df["qty"] = pd.to_numeric(df.get("qty"), errors="coerce").fillna(0)
+        if "beginning_qty" not in df.columns:
+            df["beginning_qty"] = pd.NA
+        if "ending_qty" not in df.columns:
+            df["ending_qty"] = pd.NA
+        df["beginning_qty"] = pd.to_numeric(df["beginning_qty"], errors="coerce")
+        df["ending_qty"] = pd.to_numeric(df["ending_qty"], errors="coerce")
+
+        mask = (
+            df["event_type"].str.contains("refill", case=False, na=False)
+            & ~df["event_type"].str.contains("unload|cancel|empty", case=False, na=False)
+        )
+        return df[mask].copy()
     except Exception as e:
         st.error(f"[load_refills] {e}")
         return pd.DataFrame()
@@ -238,34 +244,35 @@ def load_refills(sel_date):
 
 @st.cache_data(ttl=300)
 def load_other_replenishment(sel_date):
+    """Load non-refill replenishment-like Pyxis transactions using the shared Session Explorer loader path."""
     try:
-        sql = text(
-            """
-            SELECT pk, dt, user_name, device, med_id, med_desc, event_type,
-                   qty, beginning_qty, ending_qty
-            FROM events
-            WHERE dt::date = :d
-              AND (
-                    event_type ILIKE '%load%'
-                 OR event_type ILIKE '%restock%'
-                 OR event_type ILIKE '%replenish%'
-              )
-              AND event_type NOT ILIKE '%refill%'
-              AND event_type NOT ILIKE '%unload%'
-              AND event_type NOT ILIKE '%cancel%'
-              AND event_type NOT ILIKE '%empty%'
-            """
-        )
-        with engine.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"d": sel_date})
+        start_ts = pd.Timestamp(sel_date)
+        end_ts = start_ts + pd.Timedelta(days=1)
+        df_events, _, _, _, _ = load_data(start_ts, end_ts)
+        if df_events is None or df_events.empty:
+            return pd.DataFrame(columns=["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"])
+
+        df = df_events.copy()
+        keep_cols = [c for c in ["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"] if c in df.columns]
+        df = df[keep_cols]
         df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
-        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
-        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
-        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
-        df["beginning_qty"] = pd.to_numeric(df.get("beginning_qty"), errors="coerce")
-        df["ending_qty"] = pd.to_numeric(df.get("ending_qty"), errors="coerce")
-        return df
+        df = df[df["dt"].dt.date == pd.Timestamp(sel_date).date()].copy()
+        df["device"] = df.get("device", "Unknown").fillna("Unknown").astype(str).str.strip()
+        df["user_name"] = df.get("user_name", "Unknown").fillna("Unknown").astype(str).str.strip()
+        df["event_type"] = df.get("event_type", "").fillna("").astype(str).str.strip()
+        df["qty"] = pd.to_numeric(df.get("qty"), errors="coerce").fillna(0)
+        if "beginning_qty" not in df.columns:
+            df["beginning_qty"] = pd.NA
+        if "ending_qty" not in df.columns:
+            df["ending_qty"] = pd.NA
+        df["beginning_qty"] = pd.to_numeric(df["beginning_qty"], errors="coerce")
+        df["ending_qty"] = pd.to_numeric(df["ending_qty"], errors="coerce")
+
+        mask = (
+            df["event_type"].str.contains("load|restock|replenish", case=False, na=False)
+            & ~df["event_type"].str.contains("refill|unload|cancel|empty", case=False, na=False)
+        )
+        return df[mask].copy()
     except Exception as e:
         st.error(f"[load_other_replenishment] {e}")
         return pd.DataFrame()
@@ -297,17 +304,19 @@ def load_pyxis_pulls(sel_date):
 
 @st.cache_data(ttl=300)
 def load_all_events_for_date(sel_date):
+    """Load all Pyxis transactions for diagnostics using the same shared loader path as Session Explorer."""
     try:
-        sql = text(
-            """
-            SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty
-            FROM events
-            WHERE dt::date = :d
-            """
-        )
-        with engine.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"d": sel_date})
-        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        start_ts = pd.Timestamp(sel_date)
+        end_ts = start_ts + pd.Timedelta(days=1)
+        df_events, _, _, _, _ = load_data(start_ts, end_ts)
+        if df_events is None or df_events.empty:
+            return pd.DataFrame()
+        df = df_events.copy()
+        if "dt" in df.columns:
+            df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+            df = df[df["dt"].dt.date == pd.Timestamp(sel_date).date()].copy()
+        if "qty" in df.columns:
+            df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
         return df
     except Exception as e:
         st.error(f"[load_all_events_for_date] {e}")
@@ -495,7 +504,7 @@ st.markdown("##### 🛒 Pull Demand → 🔄 Refill Completion")
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("Pull Lines", f"{total_pull_lines:,}", help="Line items pulled from carousel via pharmacy workflow")
 p2.metric("Pull Qty", f"{total_pull_qty:,.0f}", help="Primary workload metric — total units pulled from carousel")
-p3.metric("Refill Qty", f"{total_refill_qty:,.0f}", help="True refill units captured in events table")
+p3.metric("Refill Qty", f"{total_refill_qty:,.0f}", help="True refill units captured from the same Pyxis transaction source used by Session Explorer")
 p4.metric("Qty Coverage", f"{day_coverage_pct:.1f}%")
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -685,7 +694,7 @@ for i, drop in enumerate(schedule):
 
             with col_refill:
                 st.markdown(f"**🔄 Pyxis Refill Events — {drill_dev}**")
-                st.caption("Primary completion signal from events table — true refill activity")
+                st.caption("Primary completion signal from the same Pyxis transaction source used by Session Explorer — true refill activity")
                 if refill_detail.empty:
                     st.info("No Pyxis refill events for this device in this window.")
                 else:
