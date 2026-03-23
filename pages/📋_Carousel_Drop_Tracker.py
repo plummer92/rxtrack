@@ -6,7 +6,7 @@ import plotly.express as px
 import io
 from datetime import date
 from sqlalchemy import text
-from App import engine, load_data
+from App import engine
 
 st.set_page_config(page_title="Carousel Drop Tracker", page_icon="📋", layout="wide")
 
@@ -17,9 +17,6 @@ st.caption(
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SCHEDULE + DEVICE CONFIG
-# NOTE:
-# These mappings are intentionally kept the same structure as your current page.
-# If you already have updated versions in production, keep yours.
 # ═══════════════════════════════════════════════════════════════════════════════
 
 AREA_COLOR = {
@@ -181,7 +178,6 @@ _SASU_1235_STOCK = [
     "SJSNICU","SJSNICUC","SJSNICUN","SJSNICUS","SJSPEDOP",
 ]
 
-
 def get_schedule(sel_date):
     dow = sel_date.weekday()
     is_weekend = dow >= 5
@@ -201,29 +197,28 @@ def get_schedule(sel_date):
         {"label": "1430 Drop", "time": "14:30", "win_start": (14, 0), "win_end": (20, 0), "full": _MF_1430_FULL, "stockouts": []},
     ]
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATA LOADERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=300)
 def load_refills(sel_date):
-    """Load true Pyxis refill transactions from all_transactions_detail."""
     try:
         sql = text("""
             SELECT
-                "UserName"            AS user_name,
-                "Device"              AS device,
-                "MedID"               AS med_id,
-                "MedDescription"      AS med_desc,
-                "TransactionType"     AS event_type,
-                "TransactionDateTime" AS dt,
-                "Quantity"            AS qty,
-                "Beg"                 AS beginning_qty,
-                "End"                 AS ending_qty
-            FROM all_transactions_detail
-            WHERE CAST("TransactionDateTime" AS date) = :d
-              AND "TransactionType" = 'Refill'
+                pk,
+                dt,
+                user_name,
+                device,
+                med_id,
+                med_desc,
+                event_type,
+                qty,
+                beginning_qty,
+                ending_qty
+            FROM events
+            WHERE dt::date = :d
+              AND event_type = 'Refill'
         """)
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
@@ -238,32 +233,31 @@ def load_refills(sel_date):
         df["beginning_qty"] = pd.to_numeric(df["beginning_qty"], errors="coerce")
         df["ending_qty"] = pd.to_numeric(df["ending_qty"], errors="coerce")
         return df
-
     except Exception as e:
         st.error(f"[load_refills] {e}")
         return pd.DataFrame(columns=[
-            "user_name","device","med_id","med_desc",
-            "event_type","dt","qty","beginning_qty","ending_qty"
+            "pk","dt","user_name","device","med_id","med_desc",
+            "event_type","qty","beginning_qty","ending_qty"
         ])
 
 @st.cache_data(ttl=300)
 def load_other_replenishment(sel_date):
-    """Optional fallback from all_transactions_detail."""
     try:
         sql = text("""
             SELECT
-                "UserName"            AS user_name,
-                "Device"              AS device,
-                "MedID"               AS med_id,
-                "MedDescription"      AS med_desc,
-                "TransactionType"     AS event_type,
-                "TransactionDateTime" AS dt,
-                "Quantity"            AS qty,
-                "Beg"                 AS beginning_qty,
-                "End"                 AS ending_qty
-            FROM all_transactions_detail
-            WHERE CAST("TransactionDateTime" AS date) = :d
-              AND "TransactionType" IN ('Load')
+                pk,
+                dt,
+                user_name,
+                device,
+                med_id,
+                med_desc,
+                event_type,
+                qty,
+                beginning_qty,
+                ending_qty
+            FROM events
+            WHERE dt::date = :d
+              AND event_type IN ('Load', 'Load Insert')
         """)
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
@@ -278,26 +272,22 @@ def load_other_replenishment(sel_date):
         df["beginning_qty"] = pd.to_numeric(df["beginning_qty"], errors="coerce")
         df["ending_qty"] = pd.to_numeric(df["ending_qty"], errors="coerce")
         return df
-
     except Exception as e:
         st.error(f"[load_other_replenishment] {e}")
         return pd.DataFrame(columns=[
-            "user_name","device","med_id","med_desc",
-            "event_type","dt","qty","beginning_qty","ending_qty"
+            "pk","dt","user_name","device","med_id","med_desc",
+            "event_type","qty","beginning_qty","ending_qty"
         ])
-
 
 @st.cache_data(ttl=300)
 def load_pyxis_pulls(sel_date):
     try:
-        sql = text(
-            """
+        sql = text("""
             SELECT pk, dt, user_name, destination, med_id, med_desc, priority, qty
             FROM pharmacy_orders
             WHERE dt::date = :d
               AND priority ILIKE '%pyxis%pull%'
-            """
-        )
+        """)
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
         df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
@@ -310,24 +300,23 @@ def load_pyxis_pulls(sel_date):
         st.error(f"[load_pyxis_pulls] {e}")
         return pd.DataFrame()
 
-
 @st.cache_data(ttl=300)
 def load_all_events_for_date(sel_date):
-    """Load all transaction types from all_transactions_detail for diagnostics."""
     try:
         sql = text("""
             SELECT
-                "UserName"            AS user_name,
-                "Device"              AS device,
-                "MedID"               AS med_id,
-                "MedDescription"      AS med_desc,
-                "TransactionType"     AS event_type,
-                "TransactionDateTime" AS dt,
-                "Quantity"            AS qty,
-                "Beg"                 AS beginning_qty,
-                "End"                 AS ending_qty
-            FROM all_transactions_detail
-            WHERE CAST("TransactionDateTime" AS date) = :d
+                pk,
+                dt,
+                user_name,
+                device,
+                med_id,
+                med_desc,
+                event_type,
+                qty,
+                beginning_qty,
+                ending_qty
+            FROM events
+            WHERE dt::date = :d
         """)
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
@@ -337,18 +326,15 @@ def load_all_events_for_date(sel_date):
         df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
         df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
         return df
-
     except Exception as e:
         st.error(f"[load_all_events_for_date] {e}")
         return pd.DataFrame()
-
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
     return buf.getvalue()
-
 
 def add_minutes(df: pd.DataFrame, dt_col: str = "dt") -> pd.DataFrame:
     if df.empty:
@@ -357,12 +343,10 @@ def add_minutes(df: pd.DataFrame, dt_col: str = "dt") -> pd.DataFrame:
     out["_mins"] = out[dt_col].dt.hour * 60 + out[dt_col].dt.minute
     return out
 
-
 def filter_window(df: pd.DataFrame, start_min: int, end_min: int) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     return df[(df["_mins"] >= start_min) & (df["_mins"] <= end_min)].copy()
-
 
 def loop_status(pull_qty: float, refill_qty: float, refill_txns: int, other_txns: int) -> str:
     if pull_qty == 0 and refill_txns == 0 and other_txns == 0:
@@ -378,12 +362,10 @@ def loop_status(pull_qty: float, refill_qty: float, refill_txns: int, other_txns
         return "✅ Closed Loop"
     return "⚠️ Partial"
 
-
 def coverage_pct(numer: float, denom: float):
     if denom <= 0:
         return None
     return round((numer / denom) * 100, 1)
-
 
 def build_drop_df(drop, df_refills, df_other_repl, df_pulls):
     h0, m0 = drop["win_start"]
@@ -477,7 +459,6 @@ def build_drop_df(drop, df_refills, df_other_repl, df_pulls):
         out = out.sort_values(["pull_qty", "pull_lines", "device"], ascending=[False, False, True]).reset_index(drop=True)
     return out
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATE SELECTOR + LOAD
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -504,7 +485,7 @@ combined = pd.concat(all_drop_dfs.values(), ignore_index=True) if all_drop_dfs e
 full_combined = combined[combined["drop_type"] == "Full Drop"] if not combined.empty else pd.DataFrame()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TOP-LINE KPIs
+# TOP KPIS
 # ═══════════════════════════════════════════════════════════════════════════════
 
 total_scheduled = len(full_combined)
@@ -513,7 +494,6 @@ total_pull_qty = float(df_pulls["qty"].sum()) if not df_pulls.empty else 0.0
 total_refill_lines = int(df_refills["pk"].count()) if not df_refills.empty else 0
 total_refill_qty = float(df_refills["qty"].sum()) if not df_refills.empty else 0.0
 total_other_lines = int(df_other_repl["pk"].count()) if not df_other_repl.empty else 0
-total_other_qty = float(df_other_repl["qty"].sum()) if not df_other_repl.empty else 0.0
 day_coverage_pct = coverage_pct(total_refill_qty, total_pull_qty) or 0.0
 
 closed_ct = int((full_combined["loop_status"] == "✅ Closed Loop").sum()) if not full_combined.empty else 0
@@ -524,7 +504,7 @@ st.markdown("##### 🛒 Pull Demand → 🔄 Refill Completion")
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("Pull Lines", f"{total_pull_lines:,}", help="Line items pulled from carousel via pharmacy workflow")
 p2.metric("Pull Qty", f"{total_pull_qty:,.0f}", help="Primary workload metric — total units pulled from carousel")
-p3.metric("Refill Qty", f"{total_refill_qty:,.0f}", help="True refill units captured from the same Pyxis transaction source used by Session Explorer")
+p3.metric("Refill Qty", f"{total_refill_qty:,.0f}", help="True refill units captured from events")
 p4.metric("Qty Coverage", f"{day_coverage_pct:.1f}%")
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -533,7 +513,7 @@ c2.metric("✅ Closed", f"{closed_ct:,}")
 c3.metric("⚠️ Partial", f"{partial_ct:,}")
 c4.metric("❌ Not Refilled", f"{no_refill_ct:,}")
 c5.metric("Refill Transactions", f"{total_refill_lines:,}")
-c6.metric("Other Repl Txns", f"{total_other_lines:,}")
+c6.metric("Load/Insert Txns", f"{total_other_lines:,}")
 
 if total_pull_qty == 0:
     st.info("No Pyxis Pull records found for this date.")
@@ -557,7 +537,6 @@ drop_labels = [d["label"] for d in schedule]
 tab_labels = drop_labels + ["📊 Day Summary", "📅 Schedule Reference", "🖨️ Stockout Print Config", "🧪 Event Diagnostics"]
 tabs = st.tabs(tab_labels)
 
-# ── Per-drop tabs ──────────────────────────────────────────────────────────────
 for i, drop in enumerate(schedule):
     with tabs[i]:
         drop_df = all_drop_dfs[drop["label"]].copy()
@@ -570,8 +549,6 @@ for i, drop in enumerate(schedule):
         drop_refill_lines = int(full_df["refill_txns"].sum()) if not full_df.empty else 0
         drop_coverage = coverage_pct(drop_refill_qty, drop_pull_qty) or 0.0
         drop_closed = int((full_df["loop_status"] == "✅ Closed Loop").sum()) if not full_df.empty else 0
-        drop_partial = int((full_df["loop_status"] == "⚠️ Partial").sum()) if not full_df.empty else 0
-        drop_missed = int((full_df["loop_status"] == "❌ Not Refilled").sum()) if not full_df.empty else 0
 
         st.markdown(f"### {drop['label']} · {drop['time']}")
         if drop.get("wed_note"):
@@ -591,18 +568,8 @@ for i, drop in enumerate(schedule):
         chart_df = full_df.sort_values(["pull_qty", "device"], ascending=[False, True]).copy()
         if not chart_df.empty:
             fig = go.Figure()
-            fig.add_trace(go.Bar(
-                y=chart_df["device"],
-                x=chart_df["pull_qty"],
-                name="🛒 Pull Qty",
-                orientation="h",
-            ))
-            fig.add_trace(go.Bar(
-                y=chart_df["device"],
-                x=chart_df["refill_qty"],
-                name="🔄 Refill Qty",
-                orientation="h",
-            ))
+            fig.add_trace(go.Bar(y=chart_df["device"], x=chart_df["pull_qty"], name="🛒 Pull Qty", orientation="h"))
+            fig.add_trace(go.Bar(y=chart_df["device"], x=chart_df["refill_qty"], name="🔄 Refill Qty", orientation="h"))
             fig.update_layout(
                 barmode="group",
                 height=max(450, len(chart_df) * 24),
@@ -631,8 +598,8 @@ for i, drop in enumerate(schedule):
                 "pull_lines": st.column_config.NumberColumn("Pull Lines", format="%d"),
                 "refill_qty": st.column_config.NumberColumn("🔄 Refill Qty", format="%.0f"),
                 "refill_txns": st.column_config.NumberColumn("Refill Txns", format="%d"),
-                "other_qty": st.column_config.NumberColumn("Other Repl Qty", format="%.0f"),
-                "other_txns": st.column_config.NumberColumn("Other Repl Txns", format="%d"),
+                "other_qty": st.column_config.NumberColumn("Load Qty", format="%.0f"),
+                "other_txns": st.column_config.NumberColumn("Load Txns", format="%d"),
                 "qty_coverage": st.column_config.NumberColumn("Coverage %", format="%.1f"),
                 "techs": st.column_config.TextColumn("Technician(s)"),
                 "first_time": st.column_config.DatetimeColumn("First Refill", format="HH:mm"),
@@ -714,7 +681,7 @@ for i, drop in enumerate(schedule):
 
             with col_refill:
                 st.markdown(f"**🔄 Pyxis Refill Events — {drill_dev}**")
-                st.caption("Primary completion signal from the same Pyxis transaction source used by Session Explorer — true refill activity")
+                st.caption("Primary completion signal from events table — exact Refill transactions")
                 if refill_detail.empty:
                     st.info("No Pyxis refill events for this device in this window.")
                 else:
@@ -735,9 +702,9 @@ for i, drop in enumerate(schedule):
                         },
                     )
 
-                st.markdown("**Secondary fallback: other replenishment events**")
+                st.markdown("**Secondary fallback: Load / Load Insert**")
                 if other_detail.empty:
-                    st.caption("No secondary replenishment events in this window.")
+                    st.caption("No secondary load events in this window.")
                 else:
                     st.caption(f"{len(other_detail):,} fallback transactions · {other_detail['qty'].sum():,.0f} units")
                     st.dataframe(
@@ -746,7 +713,6 @@ for i, drop in enumerate(schedule):
                         hide_index=True,
                     )
 
-# ── Day Summary ───────────────────────────────────────────────────────────────
 with tabs[len(schedule)]:
     st.markdown("### 📊 Day Summary")
     if combined.empty:
@@ -794,7 +760,6 @@ with tabs[len(schedule)]:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-# ── Schedule reference ────────────────────────────────────────────────────────
 with tabs[len(schedule) + 1]:
     st.markdown("### 📅 Schedule Reference")
     ref_rows = []
@@ -818,7 +783,6 @@ with tabs[len(schedule) + 1]:
     ref_df = pd.DataFrame(ref_rows)
     st.dataframe(ref_df, use_container_width=True, hide_index=True)
 
-# ── Stockout print config ─────────────────────────────────────────────────────
 with tabs[len(schedule) + 2]:
     st.markdown("### 🖨️ Stockout Print Config")
     print_df = pd.DataFrame({
@@ -828,19 +792,17 @@ with tabs[len(schedule) + 2]:
     })
     st.dataframe(print_df, use_container_width=True, hide_index=True)
 
-# ── Diagnostics ───────────────────────────────────────────────────────────────
 with tabs[len(schedule) + 3]:
     st.markdown("### 🧪 Event Diagnostics")
     st.markdown(
-        "Use this to confirm the correct Pyxis transaction types are being counted. "
-        "This tracker treats **refill** as the primary completion signal and shows "
-        "**load / restock / replenish** only as secondary fallback events."
+        "This tracker treats **Refill** as the primary completion signal and uses "
+        "**Load / Load Insert** only as secondary fallback events."
     )
 
     df_all = load_all_events_for_date(sel_date)
     st.markdown(
         f"**Refill events captured:** {len(df_refills):,} transactions · {df_refills['qty'].sum():,.0f} units · {df_refills['device'].nunique() if not df_refills.empty else 0} devices  \n"
-        f"**Other replenishment events captured:** {len(df_other_repl):,} transactions · {df_other_repl['qty'].sum():,.0f} units  \n"
+        f"**Load/Insert events captured:** {len(df_other_repl):,} transactions · {df_other_repl['qty'].sum():,.0f} units  \n"
         f"**Total events on date (all types):** {len(df_all):,}"
     )
 
