@@ -208,74 +208,83 @@ def get_schedule(sel_date):
 
 @st.cache_data(ttl=300)
 def load_refills(sel_date):
-    """Load refill-like Pyxis transactions using the same shared loader pattern as Session Explorer."""
+    """Load true Pyxis refill transactions from all_transactions_detail."""
     try:
-        start_ts = pd.Timestamp(sel_date)
-        end_ts = start_ts + pd.Timedelta(days=1)
-        df_events, _, _, _, _ = load_data(start_ts, end_ts)
-        if df_events is None or df_events.empty:
-            return pd.DataFrame(columns=["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"])
+        sql = text("""
+            SELECT
+                "UserName"            AS user_name,
+                "Device"              AS device,
+                "MedID"               AS med_id,
+                "MedDescription"      AS med_desc,
+                "TransactionType"     AS event_type,
+                "TransactionDateTime" AS dt,
+                "Quantity"            AS qty,
+                "Beg"                 AS beginning_qty,
+                "End"                 AS ending_qty
+            FROM all_transactions_detail
+            WHERE CAST("TransactionDateTime" AS date) = :d
+              AND "TransactionType" = 'Refill'
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
 
-        df = df_events.copy()
-        keep_cols = [c for c in ["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"] if c in df.columns]
-        df = df[keep_cols]
         df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-        df = df[df["dt"].dt.date == pd.Timestamp(sel_date).date()].copy()
-        df["device"] = df.get("device", "Unknown").fillna("Unknown").astype(str).str.strip()
-        df["user_name"] = df.get("user_name", "Unknown").fillna("Unknown").astype(str).str.strip()
-        df["event_type"] = df.get("event_type", "").fillna("").astype(str).str.strip()
-        df["qty"] = pd.to_numeric(df.get("qty"), errors="coerce").fillna(0)
-        if "beginning_qty" not in df.columns:
-            df["beginning_qty"] = pd.NA
-        if "ending_qty" not in df.columns:
-            df["ending_qty"] = pd.NA
+        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["med_id"] = df["med_id"].fillna("").astype(str).str.strip()
+        df["med_desc"] = df["med_desc"].fillna("").astype(str).str.strip()
+        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
         df["beginning_qty"] = pd.to_numeric(df["beginning_qty"], errors="coerce")
         df["ending_qty"] = pd.to_numeric(df["ending_qty"], errors="coerce")
+        return df
 
-        mask = (
-            df["event_type"].str.contains("refill", case=False, na=False)
-            & ~df["event_type"].str.contains("unload|cancel|empty", case=False, na=False)
-        )
-        return df[mask].copy()
     except Exception as e:
         st.error(f"[load_refills] {e}")
-        return pd.DataFrame()
-
+        return pd.DataFrame(columns=[
+            "user_name","device","med_id","med_desc",
+            "event_type","dt","qty","beginning_qty","ending_qty"
+        ])
 
 @st.cache_data(ttl=300)
 def load_other_replenishment(sel_date):
-    """Load non-refill replenishment-like Pyxis transactions using the shared Session Explorer loader path."""
+    """Optional fallback from all_transactions_detail."""
     try:
-        start_ts = pd.Timestamp(sel_date)
-        end_ts = start_ts + pd.Timedelta(days=1)
-        df_events, _, _, _, _ = load_data(start_ts, end_ts)
-        if df_events is None or df_events.empty:
-            return pd.DataFrame(columns=["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"])
+        sql = text("""
+            SELECT
+                "UserName"            AS user_name,
+                "Device"              AS device,
+                "MedID"               AS med_id,
+                "MedDescription"      AS med_desc,
+                "TransactionType"     AS event_type,
+                "TransactionDateTime" AS dt,
+                "Quantity"            AS qty,
+                "Beg"                 AS beginning_qty,
+                "End"                 AS ending_qty
+            FROM all_transactions_detail
+            WHERE CAST("TransactionDateTime" AS date) = :d
+              AND "TransactionType" IN ('Load')
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
 
-        df = df_events.copy()
-        keep_cols = [c for c in ["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty"] if c in df.columns]
-        df = df[keep_cols]
         df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-        df = df[df["dt"].dt.date == pd.Timestamp(sel_date).date()].copy()
-        df["device"] = df.get("device", "Unknown").fillna("Unknown").astype(str).str.strip()
-        df["user_name"] = df.get("user_name", "Unknown").fillna("Unknown").astype(str).str.strip()
-        df["event_type"] = df.get("event_type", "").fillna("").astype(str).str.strip()
-        df["qty"] = pd.to_numeric(df.get("qty"), errors="coerce").fillna(0)
-        if "beginning_qty" not in df.columns:
-            df["beginning_qty"] = pd.NA
-        if "ending_qty" not in df.columns:
-            df["ending_qty"] = pd.NA
+        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["med_id"] = df["med_id"].fillna("").astype(str).str.strip()
+        df["med_desc"] = df["med_desc"].fillna("").astype(str).str.strip()
+        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
         df["beginning_qty"] = pd.to_numeric(df["beginning_qty"], errors="coerce")
         df["ending_qty"] = pd.to_numeric(df["ending_qty"], errors="coerce")
+        return df
 
-        mask = (
-            df["event_type"].str.contains("load|restock|replenish", case=False, na=False)
-            & ~df["event_type"].str.contains("refill|unload|cancel|empty", case=False, na=False)
-        )
-        return df[mask].copy()
     except Exception as e:
         st.error(f"[load_other_replenishment] {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(columns=[
+            "user_name","device","med_id","med_desc",
+            "event_type","dt","qty","beginning_qty","ending_qty"
+        ])
 
 
 @st.cache_data(ttl=300)
@@ -304,20 +313,31 @@ def load_pyxis_pulls(sel_date):
 
 @st.cache_data(ttl=300)
 def load_all_events_for_date(sel_date):
-    """Load all Pyxis transactions for diagnostics using the same shared loader path as Session Explorer."""
+    """Load all transaction types from all_transactions_detail for diagnostics."""
     try:
-        start_ts = pd.Timestamp(sel_date)
-        end_ts = start_ts + pd.Timedelta(days=1)
-        df_events, _, _, _, _ = load_data(start_ts, end_ts)
-        if df_events is None or df_events.empty:
-            return pd.DataFrame()
-        df = df_events.copy()
-        if "dt" in df.columns:
-            df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-            df = df[df["dt"].dt.date == pd.Timestamp(sel_date).date()].copy()
-        if "qty" in df.columns:
-            df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        sql = text("""
+            SELECT
+                "UserName"            AS user_name,
+                "Device"              AS device,
+                "MedID"               AS med_id,
+                "MedDescription"      AS med_desc,
+                "TransactionType"     AS event_type,
+                "TransactionDateTime" AS dt,
+                "Quantity"            AS qty,
+                "Beg"                 AS beginning_qty,
+                "End"                 AS ending_qty
+            FROM all_transactions_detail
+            WHERE CAST("TransactionDateTime" AS date) = :d
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
+
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
+        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
         return df
+
     except Exception as e:
         st.error(f"[load_all_events_for_date] {e}")
         return pd.DataFrame()
