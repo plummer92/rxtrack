@@ -196,7 +196,7 @@ def get_schedule(sel_date):
                 "time": "04:00",
                 "win_start": (3, 0),
                 "win_end": (11, 30),
-                "refill_win_end": (15, 0),   # refills happen after pull; extend to 15:00
+                "refill_win_end": (19, 30),  # 11:30 + 8h
                 "full": _SASU_0400_FULL,
                 "stockouts": [],
             },
@@ -205,7 +205,7 @@ def get_schedule(sel_date):
                 "time": "12:35",
                 "win_start": (11, 31),
                 "win_end": (20, 0),
-                "refill_win_end": (23, 59),
+                "refill_win_end": (23, 59),  # 20:00 + 8h capped
                 "full": _SASU_1235_FULL,
                 "stockouts": _SASU_1235_STOCK,
             },
@@ -218,7 +218,7 @@ def get_schedule(sel_date):
                 "time": "04:00",
                 "win_start": (3, 0),
                 "win_end": (6, 29),
-                "refill_win_end": (11, 0),   # techs refill floors after carousel pull; capture until 11:00
+                "refill_win_end": (14, 29),  # 6:29 + 8h
                 "full": _MF_0400_FULL,
                 "stockouts": [],
             },
@@ -227,7 +227,7 @@ def get_schedule(sel_date):
                 "time": "07:00",
                 "win_start": (6, 30),
                 "win_end": (11, 0),
-                "refill_win_end": (14, 30),  # refills from 0700 pull extend into afternoon
+                "refill_win_end": (19, 0),   # 11:00 + 8h
                 "full": mf_0700,
                 "stockouts": [],
                 "wed_note": is_wednesday,
@@ -237,7 +237,7 @@ def get_schedule(sel_date):
                 "time": "12:35",
                 "win_start": (10, 30),
                 "win_end": (14, 14),
-                "refill_win_end": (18, 0),   # refills from 1235 pull extend into evening
+                "refill_win_end": (22, 14),  # 14:14 + 8h
                 "full": _MF_1235_FULL,
                 "stockouts": _MF_1235_STOCK,
             },
@@ -246,7 +246,7 @@ def get_schedule(sel_date):
                 "time": "14:30",
                 "win_start": (14, 0),
                 "win_end": (20, 0),
-                "refill_win_end": (23, 59),
+                "refill_win_end": (23, 59),  # 20:00 + 8h capped
                 "full": _MF_1430_FULL,
                 "stockouts": [],
             },
