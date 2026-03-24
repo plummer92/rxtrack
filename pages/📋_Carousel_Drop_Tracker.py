@@ -525,6 +525,10 @@ for i, drop in enumerate(schedule):
         drop_df  = all_drop_dfs[drop["label"]]
         full_df  = drop_df[drop_df["drop_type"] == "Full Drop"]
         stock_df = drop_df[drop_df["drop_type"] == "Stockouts Only"]
+        full_tbl_event  = None
+        stock_tbl_event = None
+        _full_tbl_df    = pd.DataFrame()
+        _stock_tbl_df   = pd.DataFrame()
 
         total_full       = len(full_df)
         drop_pull_qty    = float(full_df["pull_qty"].sum())    if not full_df.empty else 0.0
@@ -608,13 +612,16 @@ for i, drop in enumerate(schedule):
                 "extra_lines":    st.column_config.NumberColumn("🔵 Extra",      format="%d"),
                 "stockout_print": st.column_config.TextColumn("Stockout Report"),
             }
-            st.dataframe(
+            full_tbl_event = st.dataframe(
                 view[["recon_status","device","area",
                       "pull_lines","pull_qty","refill_lines","refill_qty",
                       "matched_lines","mismatch_lines","missing_lines","extra_lines",
                       "stockout_print"]],
                 use_container_width=True, hide_index=True, column_config=_COL_CFG,
+                on_select="rerun", selection_mode="single-row",
+                key=f"full_tbl_{i}",
             )
+            _full_tbl_df = view.reset_index(drop=True)
             st.download_button(
                 f"⬇️ Export {drop['label']} to Excel",
                 data=to_excel_bytes(view),
@@ -630,24 +637,30 @@ for i, drop in enumerate(schedule):
             st.caption("Drop triggered by stockout only.")
             stock_active = stock_df[stock_df["refill_lines"] > 0]
             st.markdown(f"**{len(stock_active)}** of {len(stock_df)} stockout-only devices had refill activity.")
-            st.dataframe(
+            stock_tbl_event = st.dataframe(
                 stock_df[["recon_status","device","area",
                           "pull_lines","pull_qty","refill_lines","refill_qty",
                           "matched_lines","mismatch_lines","missing_lines","extra_lines"]],
                 use_container_width=True, hide_index=True, column_config=_COL_CFG,
+                on_select="rerun", selection_mode="single-row",
+                key=f"stock_tbl_{i}",
             )
+            _stock_tbl_df = stock_df.reset_index(drop=True)
 
         # ── Device reconciliation drill-down ───────────────────────────────
-        st.divider()
-        st.markdown("#### 🔬 Device Reconciliation Drill-Down")
-        st.caption("Pull window = tight carousel pull times. Refill window extends further — techs walk to floors and refill Pyxis after the carousel pull.")
+        # Determine selected device from whichever table had a row clicked
+        drill_dev = None
+        _full_rows  = full_tbl_event.selection.rows  if full_tbl_event  is not None else []
+        _stock_rows = stock_tbl_event.selection.rows if stock_tbl_event is not None else []
+        if _full_rows and not _full_tbl_df.empty:
+            drill_dev = _full_tbl_df.iloc[_full_rows[0]]["device"]
+        elif _stock_rows and not _stock_tbl_df.empty:
+            drill_dev = _stock_tbl_df.iloc[_stock_rows[0]]["device"]
 
-        all_devices_in_drop = sorted(drop_df["device"].unique().tolist())
-        drill_dev = st.selectbox(
-            "Select device", options=["— pick a device —"] + all_devices_in_drop, key=f"drill_{i}",
-        )
-
-        if drill_dev != "— pick a device —":
+        if drill_dev:
+            st.divider()
+            st.markdown(f"#### 🔬 Device Drill-Down — {drill_dev}")
+            st.caption("Pull window = tight carousel pull times. Refill window extends further — techs walk to floors and refill Pyxis after the carousel pull.")
             h0, m0 = drop["win_start"]
             h1, m1 = drop["win_end"]
             rh1, rm1 = drop.get("refill_win_end", drop["win_end"])
