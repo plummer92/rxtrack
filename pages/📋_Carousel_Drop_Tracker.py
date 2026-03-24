@@ -267,6 +267,7 @@ def load_refills(sel_date):
             FROM events
             WHERE dt::date = :d
               AND event_type = 'Refill'
+              AND UPPER(med_id) != 'PATCAS'
         """)
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
