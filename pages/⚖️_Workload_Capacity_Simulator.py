@@ -324,7 +324,7 @@ def observed_stats(task_df):
     work = task_df.copy()
     work["date"] = work["dt"].dt.date
     daily_counts = work.groupby("date").size()
-    hourly_counts = work.groupby(work["dt"].dt.floor("H")).size()
+    hourly_counts = work.groupby(work["dt"].dt.floor("h")).size()
     return {
         "days": int(daily_counts.size),
         "avg_daily_count": float(daily_counts.mean()) if not daily_counts.empty else 0.0,
@@ -346,7 +346,7 @@ def shift_hourly_p90(task_df, start_str, end_str):
     work = work[mask].copy()
     if work.empty:
         return 0.0
-    hourly_counts = work.groupby(work["dt"].dt.floor("H")).size()
+    hourly_counts = work.groupby(work["dt"].dt.floor("h")).size()
     return float(hourly_counts.quantile(0.90)) if not hourly_counts.empty else 0.0
 
 
@@ -522,7 +522,7 @@ if template_name == "1430 Delivery + 2 Overnights":
 with st.expander("1. Role Setup", expanded=True):
     edited_roles = st.data_editor(
         role_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         key="role_editor",
         column_config={
@@ -535,7 +535,7 @@ with st.expander("1. Role Setup", expanded=True):
 with st.expander("2. Task Assumptions", expanded=True):
     edited_assumptions = st.data_editor(
         assumptions_df.drop(columns=["task_key"]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         key="assumption_editor",
         column_config={
@@ -551,7 +551,7 @@ with st.expander("2. Task Assumptions", expanded=True):
 with st.expander("3. Task Allocation by Role", expanded=True):
     edited_allocations = st.data_editor(
         allocation_df.drop(columns=["task_key"]),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         key="allocation_editor",
         column_config={
@@ -571,7 +571,7 @@ with st.expander("3. Task Allocation by Role", expanded=True):
     )
     st.dataframe(
         share_status,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Total Assigned %": st.column_config.NumberColumn(format="%.0f"),
@@ -591,7 +591,7 @@ c4.metric("Unassigned Avg-Day Minutes", f"{unassigned_minutes:.1f}")
 st.subheader("Capacity Summary")
 st.dataframe(
     capacity_df,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "Available Min": st.column_config.NumberColumn(format="%.0f"),
@@ -611,7 +611,7 @@ with tab1:
     breakdown = build_role_task_breakdown(selected_role, edited_roles, edited_assumptions, edited_allocations, task_frames)
     st.dataframe(
         breakdown,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Share %": st.column_config.NumberColumn(format="%.0f"),
@@ -638,7 +638,7 @@ with tab2:
         )
     st.dataframe(
         pd.DataFrame(signal_rows),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "Observed Avg / Day": st.column_config.NumberColumn(format="%.2f"),

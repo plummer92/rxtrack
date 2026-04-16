@@ -176,10 +176,15 @@ def compute_reconciliation(df_events, df_pharm, selected_users=None, exclude_con
         mismatch_daily = unmatched.groupby("date").size().reset_index(name="unmatched_med_days") if not unmatched.empty else pd.DataFrame(columns=["date", "unmatched_med_days"])
         daily = daily.merge(mismatch_daily, on="date", how="left")
         daily["unmatched_med_days"] = daily["unmatched_med_days"].fillna(0).astype(int)
-        daily["recon_pct_day"] = np.where(
-            daily["qty_pyxis"] > 0,
-            np.minimum(daily["qty_pyxis"], daily["qty_pharm"]) / daily["qty_pyxis"] * 100,
-            100.0,
+        daily["recon_pct_day"] = 100.0
+        nonzero_mask = daily["qty_pyxis"] > 0
+        daily.loc[nonzero_mask, "recon_pct_day"] = (
+            np.minimum(
+                daily.loc[nonzero_mask, "qty_pyxis"],
+                daily.loc[nonzero_mask, "qty_pharm"],
+            )
+            / daily.loc[nonzero_mask, "qty_pyxis"]
+            * 100
         )
         daily["weekday"] = pd.to_datetime(daily["date"]).dt.day_name()
 
@@ -355,7 +360,7 @@ summary = pd.DataFrame(
 
 st.dataframe(
     summary,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "Unload Qty": st.column_config.NumberColumn(format="%.0f"),
@@ -393,7 +398,7 @@ with tab1:
             markers=True,
             title="Unmatched Med-Days by Day",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         fig2 = px.line(
             daily_compare.sort_values("date"),
@@ -403,7 +408,7 @@ with tab1:
             markers=True,
             title="Daily Reconciliation %",
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
         weekday_compare = (
             daily_compare.groupby(["window", "weekday"])
@@ -418,7 +423,7 @@ with tab1:
         weekday_compare = weekday_compare.sort_values("weekday")
         st.dataframe(
             weekday_compare,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "avg_recon_pct": st.column_config.NumberColumn("Avg Recon %", format="%.1f"),
@@ -458,7 +463,7 @@ with tab2:
 
         st.dataframe(
             med_delta.head(25),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "baseline_unmatched_days": st.column_config.NumberColumn("Baseline Days", format="%.0f"),
@@ -491,7 +496,7 @@ with tab3:
         st.success("No unmatched variance found in either selected window.")
     else:
         variance = variance.sort_values("difference", key=lambda s: s.abs(), ascending=False)
-        st.dataframe(variance, use_container_width=True, hide_index=True)
+        st.dataframe(variance, width="stretch", hide_index=True)
         st.download_button(
             "Export Raw Variance CSV",
             data=to_csv_bytes(variance),
