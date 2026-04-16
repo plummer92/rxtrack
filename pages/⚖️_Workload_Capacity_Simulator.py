@@ -30,13 +30,14 @@ TEMPLATE_DEFAULTS = {
             {"role": "IV Room", "start": "07:00", "end": "15:30", "available_min": 450},
         ],
         "allocations": {
-            "standard_pyxis_activity": {"0500 Tech": 50, "0600 Tech": 50, "Packager": 0, "IV Room": 0},
-            "special_unit_activity": {"0500 Tech": 40, "0600 Tech": 60, "Packager": 0, "IV Room": 0},
-            "urgent_delivery_orders": {"0500 Tech": 35, "0600 Tech": 35, "Packager": 30, "IV Room": 0},
-            "routine_delivery_orders": {"0500 Tech": 20, "0600 Tech": 25, "Packager": 55, "IV Room": 0},
-            "transfer_discharge_orders": {"0500 Tech": 30, "0600 Tech": 30, "Packager": 40, "IV Room": 0},
+            "scheduled_pyxis_route": {"0500 Tech": 50, "0600 Tech": 50, "Packager": 0, "IV Room": 0},
+            "special_unit_pyxis_route": {"0500 Tech": 40, "0600 Tech": 60, "Packager": 0, "IV Room": 0},
+            "patient_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 60, "IV Room": 0},
+            "stockout_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 70, "IV Room": 0},
+            "transfer_discharge_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 60, "IV Room": 0},
+            "routine_patient_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 70, "IV Room": 0},
             "return_processing": {"0500 Tech": 55, "0600 Tech": 45, "Packager": 0, "IV Room": 0},
-            "cartfill_batch_delivery": {"0500 Tech": 0, "0600 Tech": 20, "Packager": 80, "IV Room": 0},
+            "cartfill_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 80, "IV Room": 0},
             "packaging_support": {"0500 Tech": 0, "0600 Tech": 10, "Packager": 90, "IV Room": 0},
             "code_cart_replenishment": {"0500 Tech": 0, "0600 Tech": 25, "Packager": 75, "IV Room": 0},
         },
@@ -49,13 +50,14 @@ TEMPLATE_DEFAULTS = {
             {"role": "IV Room", "start": "07:00", "end": "15:30", "available_min": 450},
         ],
         "allocations": {
-            "standard_pyxis_activity": {"0500 Tech": 85, "0600 Tech": 15, "Packager": 0, "IV Room": 0},
-            "special_unit_activity": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
-            "urgent_delivery_orders": {"0500 Tech": 20, "0600 Tech": 50, "Packager": 30, "IV Room": 0},
-            "routine_delivery_orders": {"0500 Tech": 30, "0600 Tech": 35, "Packager": 35, "IV Room": 0},
-            "transfer_discharge_orders": {"0500 Tech": 30, "0600 Tech": 45, "Packager": 25, "IV Room": 0},
+            "scheduled_pyxis_route": {"0500 Tech": 85, "0600 Tech": 15, "Packager": 0, "IV Room": 0},
+            "special_unit_pyxis_route": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
+            "patient_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
+            "stockout_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
+            "transfer_discharge_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
+            "routine_patient_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
             "return_processing": {"0500 Tech": 10, "0600 Tech": 90, "Packager": 0, "IV Room": 0},
-            "cartfill_batch_delivery": {"0500 Tech": 0, "0600 Tech": 50, "Packager": 50, "IV Room": 0},
+            "cartfill_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
             "packaging_support": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
             "code_cart_replenishment": {"0500 Tech": 10, "0600 Tech": 90, "Packager": 0, "IV Room": 0},
         },
@@ -69,13 +71,14 @@ TEMPLATE_DEFAULTS = {
             {"role": "IV Room", "start": "07:00", "end": "15:30", "available_min": 450},
         ],
         "allocations": {
-            "standard_pyxis_activity": {"0500 Tech": 50, "0600 Tech": 50, "0700 Delivery": 0, "1430 Delivery": 0, "IV Room": 0},
-            "special_unit_activity": {"0500 Tech": 20, "0600 Tech": 80, "0700 Delivery": 0, "1430 Delivery": 0, "IV Room": 0},
-            "urgent_delivery_orders": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 70, "1430 Delivery": 30, "IV Room": 0},
-            "routine_delivery_orders": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 60, "1430 Delivery": 40, "IV Room": 0},
-            "transfer_discharge_orders": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 65, "1430 Delivery": 35, "IV Room": 0},
+            "scheduled_pyxis_route": {"0500 Tech": 50, "0600 Tech": 50, "0700 Delivery": 0, "1430 Delivery": 0, "IV Room": 0},
+            "special_unit_pyxis_route": {"0500 Tech": 20, "0600 Tech": 80, "0700 Delivery": 0, "1430 Delivery": 0, "IV Room": 0},
+            "patient_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 70, "1430 Delivery": 30, "IV Room": 0},
+            "stockout_delivery": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 70, "1430 Delivery": 30, "IV Room": 0},
+            "transfer_discharge_delivery": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 65, "1430 Delivery": 35, "IV Room": 0},
+            "routine_patient_delivery": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 70, "1430 Delivery": 30, "IV Room": 0},
             "return_processing": {"0500 Tech": 35, "0600 Tech": 65, "0700 Delivery": 0, "1430 Delivery": 0, "IV Room": 0},
-            "cartfill_batch_delivery": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 25, "1430 Delivery": 75, "IV Room": 0},
+            "cartfill_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 25, "1430 Delivery": 75, "IV Room": 0},
             "packaging_support": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 10, "1430 Delivery": 20, "IV Room": 70},
             "code_cart_replenishment": {"0500 Tech": 0, "0600 Tech": 0, "0700 Delivery": 80, "1430 Delivery": 20, "IV Room": 0},
         },
@@ -91,7 +94,7 @@ TEMPLATE_DEFAULTS = {
             {"role": "1430 Pyxis", "start": "14:30", "end": "23:00", "available_min": 450},
         ],
         "allocations": {
-            "standard_pyxis_activity": {
+            "scheduled_pyxis_route": {
                 "1430 Delivery": 0,
                 "2100 Overnight A": 0,
                 "2100 Overnight B": 0,
@@ -100,7 +103,7 @@ TEMPLATE_DEFAULTS = {
                 "0700 Delivery": 0,
                 "1430 Pyxis": 30,
             },
-            "special_unit_activity": {
+            "special_unit_pyxis_route": {
                 "1430 Delivery": 0,
                 "2100 Overnight A": 0,
                 "2100 Overnight B": 0,
@@ -109,7 +112,7 @@ TEMPLATE_DEFAULTS = {
                 "0700 Delivery": 0,
                 "1430 Pyxis": 15,
             },
-            "urgent_delivery_orders": {
+            "patient_priority_delivery": {
                 "1430 Delivery": 55,
                 "2100 Overnight A": 10,
                 "2100 Overnight B": 10,
@@ -118,7 +121,16 @@ TEMPLATE_DEFAULTS = {
                 "0700 Delivery": 25,
                 "1430 Pyxis": 0,
             },
-            "routine_delivery_orders": {
+            "stockout_delivery": {
+                "1430 Delivery": 55,
+                "2100 Overnight A": 10,
+                "2100 Overnight B": 10,
+                "0500 Tech": 0,
+                "0600 Tech": 0,
+                "0700 Delivery": 25,
+                "1430 Pyxis": 0,
+            },
+            "transfer_discharge_delivery": {
                 "1430 Delivery": 45,
                 "2100 Overnight A": 5,
                 "2100 Overnight B": 5,
@@ -127,7 +139,7 @@ TEMPLATE_DEFAULTS = {
                 "0700 Delivery": 45,
                 "1430 Pyxis": 0,
             },
-            "transfer_discharge_orders": {
+            "routine_patient_delivery": {
                 "1430 Delivery": 50,
                 "2100 Overnight A": 10,
                 "2100 Overnight B": 10,
@@ -145,7 +157,7 @@ TEMPLATE_DEFAULTS = {
                 "0700 Delivery": 0,
                 "1430 Pyxis": 15,
             },
-            "cartfill_batch_delivery": {
+            "cartfill_priority_delivery": {
                 "1430 Delivery": 45,
                 "2100 Overnight A": 15,
                 "2100 Overnight B": 15,
@@ -177,37 +189,40 @@ TEMPLATE_DEFAULTS = {
 }
 
 TASK_LABELS = {
-    "standard_pyxis_activity": "Standard Pyxis Activity",
-    "special_unit_activity": "Special Unit Activity",
-    "urgent_delivery_orders": "Urgent Delivery Orders",
-    "routine_delivery_orders": "Routine Delivery Orders",
-    "transfer_discharge_orders": "Transfers / Discharges",
+    "scheduled_pyxis_route": "Scheduled Pyxis Route Work",
+    "special_unit_pyxis_route": "Special-Unit Pyxis Route Work",
+    "patient_priority_delivery": "Patient Priority Delivery",
+    "stockout_delivery": "Stockout Delivery",
+    "transfer_discharge_delivery": "Transfer / Discharge Delivery",
+    "routine_patient_delivery": "Routine Patient Delivery",
     "return_processing": "Return Processing",
-    "cartfill_batch_delivery": "Cartfill / Batch Delivery",
+    "cartfill_priority_delivery": "Cartfill Priority Delivery",
     "packaging_support": "Packaging Support",
     "code_cart_replenishment": "Code Cart / Tray Replenishment",
 }
 
 TASK_DEFAULT_MINUTES = {
-    "standard_pyxis_activity": 1.8,
-    "special_unit_activity": 2.3,
-    "urgent_delivery_orders": 6.0,
-    "routine_delivery_orders": 4.0,
-    "transfer_discharge_orders": 5.5,
+    "scheduled_pyxis_route": 1.8,
+    "special_unit_pyxis_route": 2.3,
+    "patient_priority_delivery": 6.0,
+    "stockout_delivery": 5.5,
+    "transfer_discharge_delivery": 5.5,
+    "routine_patient_delivery": 4.0,
     "return_processing": 3.0,
-    "cartfill_batch_delivery": 4.5,
+    "cartfill_priority_delivery": 4.5,
     "packaging_support": 8.0,
     "code_cart_replenishment": 12.0,
 }
 
 TASK_DEFAULT_PEAK = {
-    "standard_pyxis_activity": 1.20,
-    "special_unit_activity": 1.25,
-    "urgent_delivery_orders": 1.40,
-    "routine_delivery_orders": 1.20,
-    "transfer_discharge_orders": 1.30,
+    "scheduled_pyxis_route": 1.20,
+    "special_unit_pyxis_route": 1.25,
+    "patient_priority_delivery": 1.40,
+    "stockout_delivery": 1.35,
+    "transfer_discharge_delivery": 1.30,
+    "routine_patient_delivery": 1.20,
     "return_processing": 1.15,
-    "cartfill_batch_delivery": 1.35,
+    "cartfill_priority_delivery": 1.35,
     "packaging_support": 1.10,
     "code_cart_replenishment": 1.15,
 }
@@ -262,12 +277,12 @@ def build_task_frames(df_events, df_pharm):
         special_mask = events["device_norm"].isin(SPECIAL_UNITS)
         active_mask = ~events["event_norm"].str.contains("verify", case=False, na=False)
 
-        task_frames["special_unit_activity"] = events[special_mask & active_mask].copy()
-        task_frames["standard_pyxis_activity"] = events[~special_mask & ~return_mask & active_mask].copy()
+        task_frames["special_unit_pyxis_route"] = events[special_mask & active_mask].copy()
+        task_frames["scheduled_pyxis_route"] = events[~special_mask & ~return_mask & active_mask].copy()
         task_frames["return_processing_events"] = events[return_mask].copy()
     else:
-        task_frames["special_unit_activity"] = pd.DataFrame(columns=["dt"])
-        task_frames["standard_pyxis_activity"] = pd.DataFrame(columns=["dt"])
+        task_frames["special_unit_pyxis_route"] = pd.DataFrame(columns=["dt"])
+        task_frames["scheduled_pyxis_route"] = pd.DataFrame(columns=["dt"])
         task_frames["return_processing_events"] = pd.DataFrame(columns=["dt"])
 
     if not pharm.empty:
@@ -276,30 +291,33 @@ def build_task_frames(df_events, df_pharm):
         pharm["priority_norm"] = pharm["priority"].fillna("").astype(str).str.upper()
         pharm["dest_norm"] = pharm["destination"].fillna("").astype(str).str.upper()
 
-        urgent_mask = pharm["priority_norm"].str.contains("STAT|CRITICAL|STOCK ?OUT", case=False, na=False)
+        patient_priority_mask = pharm["priority_norm"].str.contains("STAT|CRITICAL|URGENT|PRIORITY", case=False, na=False)
+        stockout_mask = pharm["priority_norm"].str.contains(r"STOCK\s*OUT|STOCKOUT", case=False, na=False)
         transfer_mask = (
             pharm["priority_norm"].str.contains("TRANSFER|DISCHARGE", case=False, na=False)
             | pharm["dest_norm"].str.contains("TRANSFER|DISCHARGE", case=False, na=False)
         )
-        batch_mask = (
+        cartfill_mask = (
             pharm["priority_norm"].str.contains("CARTFILL|BATCH", case=False, na=False)
             | pharm["dest_norm"].str.contains("CARTFILL|BATCH", case=False, na=False)
         )
         return_mask = pharm["priority_norm"].str.contains("RETURN|RESTOCK|INSTANT|INVENTORY", case=False, na=False)
         special_mask = pharm["dest_norm"].isin(SPECIAL_UNITS)
 
-        task_frames["urgent_delivery_orders"] = pharm[urgent_mask | special_mask].copy()
-        task_frames["transfer_discharge_orders"] = pharm[transfer_mask].copy()
-        task_frames["cartfill_batch_delivery"] = pharm[batch_mask].copy()
+        task_frames["patient_priority_delivery"] = pharm[patient_priority_mask & ~stockout_mask & ~transfer_mask & ~cartfill_mask & ~special_mask].copy()
+        task_frames["stockout_delivery"] = pharm[stockout_mask].copy()
+        task_frames["transfer_discharge_delivery"] = pharm[transfer_mask].copy()
+        task_frames["cartfill_priority_delivery"] = pharm[cartfill_mask].copy()
 
-        remaining_mask = ~(urgent_mask | transfer_mask | batch_mask | return_mask)
-        task_frames["routine_delivery_orders"] = pharm[remaining_mask].copy()
+        remaining_mask = ~(patient_priority_mask | stockout_mask | transfer_mask | cartfill_mask | return_mask | special_mask)
+        task_frames["routine_patient_delivery"] = pharm[remaining_mask].copy()
         task_frames["return_processing_pharm"] = pharm[return_mask].copy()
     else:
-        task_frames["urgent_delivery_orders"] = pd.DataFrame(columns=["dt"])
-        task_frames["transfer_discharge_orders"] = pd.DataFrame(columns=["dt"])
-        task_frames["cartfill_batch_delivery"] = pd.DataFrame(columns=["dt"])
-        task_frames["routine_delivery_orders"] = pd.DataFrame(columns=["dt"])
+        task_frames["patient_priority_delivery"] = pd.DataFrame(columns=["dt"])
+        task_frames["stockout_delivery"] = pd.DataFrame(columns=["dt"])
+        task_frames["transfer_discharge_delivery"] = pd.DataFrame(columns=["dt"])
+        task_frames["cartfill_priority_delivery"] = pd.DataFrame(columns=["dt"])
+        task_frames["routine_patient_delivery"] = pd.DataFrame(columns=["dt"])
         task_frames["return_processing_pharm"] = pd.DataFrame(columns=["dt"])
 
     combined_return = pd.concat(
@@ -510,6 +528,10 @@ allocation_df = build_allocation_df(template_name)
 
 st.info(
     "Use the editors below to tune time assumptions and task shares. The simulator uses your selected date window as the historical sample."
+)
+st.caption(
+    "Task lanes are split into `Pyxis route work` versus `patient/cartfill delivery work`. "
+    "The starter templates assume `0500/0600` stay on Pyxis routes, while `0700/1430 Delivery` own patient-priority, stockout, transfer/discharge, and cartfill lanes."
 )
 
 if template_name == "1430 Delivery + 2 Overnights":
