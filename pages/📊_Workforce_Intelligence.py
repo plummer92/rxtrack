@@ -1,4 +1,4 @@
-from App import load_data, seconds_to_mmss
+from App import load_data, seconds_to_mmss, render_sidebar
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,6 +12,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 st.set_page_config(page_title="Workforce Intelligence", layout="wide")
+render_sidebar()
 st.header("📊 Workforce Intelligence Scorecard")
 st.caption("Executive-level technician performance analytics.")
 
@@ -173,3 +174,9 @@ else:
         file_name="workforce_scorecard.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+
+
+
+

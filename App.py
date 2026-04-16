@@ -588,9 +588,81 @@ def get_present_dates(min_dt, max_dt):
     return set()
 
 
+def apply_global_styles():
+    st.markdown("""
+        <style>
+        [data-testid="stSidebarNav"] { display: none; }
+        .block-container { padding-top: 1.35rem; padding-bottom: 2rem; }
+        [data-testid="stSidebar"] {
+            background:
+                radial-gradient(circle at top right, rgba(34, 197, 94, 0.15), transparent 30%),
+                linear-gradient(180deg, #f8fafc 0%, #eef6f0 100%);
+            border-right: 1px solid rgba(15, 23, 42, 0.08);
+        }
+        .rx-shell {
+            background: linear-gradient(135deg, #0f172a 0%, #1f2937 100%);
+            color: white;
+            padding: 16px 18px;
+            border-radius: 16px;
+            margin-bottom: 14px;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
+        }
+        .rx-shell h2 {
+            margin: 0 0 4px 0;
+            font-size: 1.25rem;
+            font-weight: 800;
+        }
+        .rx-shell p {
+            margin: 0;
+            color: rgba(255,255,255,0.78);
+            font-size: 0.88rem;
+            line-height: 1.35;
+        }
+        .rx-nav-label {
+            font-size: 0.72rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: #475569;
+            margin: 14px 0 6px 0;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+
+def render_page_links():
+    st.markdown('<div class="rx-nav-label">Core</div>', unsafe_allow_html=True)
+    st.page_link("App.py", label="Overview Hub", icon="🏠")
+    st.page_link("pages/🧪_Workflow_Experiments.py", label="Workflow Experiments", icon="🧪")
+    st.page_link("pages/🧭_Pilot_Monitor.py", label="Pilot Monitor", icon="🧭")
+    st.page_link("pages/⚖️_Workload_Capacity_Simulator.py", label="Capacity Simulator", icon="⚖️")
+
+    st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
+    st.page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
+    st.page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
+    st.page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
+    st.page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
+
+    st.markdown('<div class="rx-nav-label">Performance</div>', unsafe_allow_html=True)
+    st.page_link("pages/1_⏰_Tardies.py", label="Tardies", icon="⏰")
+    st.page_link("pages/2_🔍_Session_Explorer.py", label="Session Explorer", icon="🔍")
+    st.page_link("pages/📊_Workforce_Intelligence.py", label="Workforce Intelligence", icon="📊")
+    st.page_link("pages/📥_Pends_Analyzer.py", label="Pends Analyzer", icon="📥")
+    st.page_link("pages/🚨_discrepancy_deep_dive.py", label="Discrepancy Deep Dive", icon="🚨")
+
+    st.markdown('<div class="rx-nav-label">Tools</div>', unsafe_allow_html=True)
+    st.page_link("pages/📊_Cycle_Count_Integrity.py", label="Cycle Count Integrity", icon="📊")
+    st.page_link("pages/📋_Carousel_Drop_Tracker.py", label="Carousel Drop Tracker", icon="📋")
+    st.page_link("pages/_🔍_MedLookup.py", label="Med Lookup", icon="🔍")
+    st.page_link("pages/_🧠_RxBrain.py", label="RxBrain", icon="🧠")
+    st.page_link("pages/🗄️_db_health.py", label="Database Health", icon="🗄️")
+    st.page_link("pages/Admin_Master_Mapping.py", label="Admin & Mapping", icon="⚙️")
+
+
 # --- SHARED SIDEBAR RENDERER ---
 def render_sidebar():
     """Call this at the top of any page to always show the date range sidebar."""
+    apply_global_styles()
     n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
 
     if 'start_date' not in st.session_state:
@@ -599,12 +671,24 @@ def render_sidebar():
         st.session_state.end_date = max_db
 
     with st.sidebar:
-        st.image("https://img.icons8.com/color/96/caduceus.png", width=60)
-        st.title("RxTrack v13.4")
-        st.caption("Pharmacy Workflow Intelligence")
+        st.markdown("""
+            <div class="rx-shell">
+                <h2>RxTrack</h2>
+                <p>Operations, analytics, staffing pilots, and workflow testing in one place.</p>
+            </div>
+        """, unsafe_allow_html=True)
+        render_page_links()
 
-        st.markdown("### 📅 Analysis Window")
-        filter_mode = st.radio("Filter Mode", ["Range", "Week", "Day"], horizontal=True, label_visibility="collapsed", key="rxtrack_sidebar_filter_mode")
+        st.divider()
+        st.markdown("### Analysis Window")
+
+        filter_mode = st.radio(
+            "Filter Mode",
+            ["Range", "Week", "Day"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="rxtrack_sidebar_filter_mode",
+        )
 
         if filter_mode == "Range":
             date_range = st.slider(
@@ -617,18 +701,28 @@ def render_sidebar():
             st.session_state.start_date, st.session_state.end_date = date_range
 
         elif filter_mode == "Week":
-            week_start = st.date_input("Select Week Start:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
+            week_start = st.date_input(
+                "Select Week Start:",
+                value=st.session_state.start_date,
+                min_value=min_db,
+                max_value=max_db,
+            )
             st.session_state.start_date = week_start
             st.session_state.end_date = week_start + timedelta(days=6)
 
         else:
-            single_day = st.date_input("Select Day:", value=st.session_state.start_date, min_value=min_db, max_value=max_db)
+            single_day = st.date_input(
+                "Select Day:",
+                value=st.session_state.start_date,
+                min_value=min_db,
+                max_value=max_db,
+            )
             st.session_state.start_date = single_day
             st.session_state.end_date = single_day
 
         st.divider()
 
-        with st.expander("💾 Database Status", expanded=False):
+        with st.expander("Database Status", expanded=False):
             c1, c2 = st.columns(2)
             c1.metric("Pyxis Events", f"{n_events:,}")
             c2.metric("Pharm Orders", f"{n_pharm:,}")
@@ -1157,3 +1251,4 @@ if _is_main:
         if not df_events.empty:
             loads = df_events[df_events['event_type'].str.contains('load|unload', case=False, na=False)]
             st.dataframe(loads[['dt', 'user_name', 'device', 'event_type', 'med_desc', 'qty']], use_container_width=True)
+

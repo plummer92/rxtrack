@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from App import load_data, seconds_to_mmss
+from App import load_data, seconds_to_mmss, render_sidebar
 
 st.set_page_config(page_title="Pharmacy Workflow", page_icon="🏥", layout="wide")
+render_sidebar()
 
 # Title and Description
 st.header("🏥 Central Pharmacy Workflow & Stockout Intelligence")
@@ -374,3 +375,6 @@ else:
                     )
             else:
                 st.info("No completed replenishment cycles found in this date range.")
+
+
+
