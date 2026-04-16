@@ -64,6 +64,23 @@ def db_cursor():
 def execute_statement(sql, params, batch=False, table_name="Data"):
     """Executes INSERT/UPDATE statements."""
     try:
+        def _sql_safe(value):
+            # Convert pandas / numpy missing values to true SQL NULLs before psycopg2 sees them.
+            if pd.isna(value):
+                return None
+            return value
+
+        def _normalize_params(payload):
+            if batch:
+                return [
+                    {k: _sql_safe(v) for k, v in row.items()}
+                    for row in payload
+                ]
+            if isinstance(payload, dict):
+                return {k: _sql_safe(v) for k, v in payload.items()}
+            return payload
+
+        params = _normalize_params(params)
         with db_cursor() as (conn, cur):
             if batch:
                 execute_batch(cur, sql, params, page_size=2000)
@@ -277,8 +294,11 @@ def clean_dataframe(df):
     df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
     for c in ["qty", "discrepancy_qty", "beginning_qty", "ending_qty"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype('float32')
-    df["dt"] = df["dt"].astype(str)
-    df["resolution_dt"] = df["resolution_dt"].astype(str).replace(['NaT', 'nan', 'None', ''], None)
+    # Leave timestamps as Python datetimes for psycopg2 and convert missing values to SQL NULL.
+    df["discrepancy_reason"] = df["discrepancy_reason"].where(pd.notna(df["discrepancy_reason"]), None)
+    df["resolution_dt"] = df["resolution_dt"].where(pd.notna(df["resolution_dt"]), None)
+    df = df.astype(object)
+    df = df.where(pd.notna(df), None)
     df["pk"] = df.apply(generate_pk, axis=1)
     return df[required + ["pk"]]
 
@@ -634,10 +654,9 @@ def render_sidebar():
 
 
 # --- MAIN APP LOGIC ---
-# Only runs when App.py is the active Streamlit page.
-# When other pages import App.py, they only get the functions above (including render_sidebar).
-import sys as _sys
-_is_main = any(s.endswith('App.py') for s in _sys.argv)
+# Only runs when App.py is the active Streamlit entrypoint.
+# When other pages import App.py, they should only get the shared helpers above.
+_is_main = (__name__ == "__main__")
 
 if _is_main:
     # Apply page config and CSS only when running as main page
