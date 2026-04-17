@@ -1,7 +1,10 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from App import engine, load_admin_users, _DEFAULT_ADMIN_USERS
+from App import engine, load_admin_users, _DEFAULT_ADMIN_USERS, render_sidebar_chrome
+
+st.set_page_config(page_title="Admin & Mapping", page_icon="⚙️", layout="wide")
+render_sidebar_chrome()
 
 st.header("📥 Master Carousel Mapping Upload")
 st.caption("Upload Item Location Report to update master carousel assignments.")

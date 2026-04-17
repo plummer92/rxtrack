@@ -692,6 +692,20 @@ def render_page_links():
     st.page_link("pages/Admin_Master_Mapping.py", label="Admin & Mapping", icon="⚙️")
 
 
+def render_sidebar_chrome():
+    """Use this on pages that need the shared nav styling without the date filters."""
+    apply_global_styles()
+    with st.sidebar:
+        st.markdown("""
+            <div class="rx-shell">
+                <h2>RxTrack</h2>
+                <p>Operations, analytics, staffing pilots, and workflow testing in one place.</p>
+            </div>
+        """, unsafe_allow_html=True)
+        render_page_links()
+        st.divider()
+
+
 # --- SHARED SIDEBAR RENDERER ---
 def render_sidebar():
     """Call this at the top of any page to always show the date range sidebar."""

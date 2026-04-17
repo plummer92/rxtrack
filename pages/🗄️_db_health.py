@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
 from sqlalchemy import text
-from App import engine
+from App import engine, render_sidebar_chrome
 
 st.set_page_config(
     page_title="DB Health",
     page_icon="🗄️",
     layout="wide"
 )
+render_sidebar_chrome()
 
 st.header("🗄️ Database Health")
 st.caption("Row counts, date coverage, upload gaps, and data quality signals across every table.")
