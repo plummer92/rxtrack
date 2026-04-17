@@ -6,6 +6,9 @@ import streamlit as st
 
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 
 SPECIAL_UNITS = {
     "SJSEMS",
@@ -549,13 +552,13 @@ if hasattr(App, "render_page_intro"):
         "Test historical workload against proposed staffing models so role design decisions stay inside the same modern RxTrack shell.",
         kicker="Core",
     )
-    App.record_ui_debug_event("Capacity Simulator", "shared_intro_loaded")
-    App.render_ui_debugger("Capacity Simulator", intro_mode="shared")
+    _debug_event("Capacity Simulator", "shared_intro_loaded")
+    _debug_panel("Capacity Simulator", intro_mode="shared")
 else:
     st.header("⚖️ Workload Capacity Simulator")
     st.caption("Test historical workload against proposed staffing models.")
-    App.record_ui_debug_event("Capacity Simulator", "fallback_header_used")
-    App.render_ui_debugger("Capacity Simulator", intro_mode="fallback")
+    _debug_event("Capacity Simulator", "fallback_header_used")
+    _debug_panel("Capacity Simulator", intro_mode="fallback")
 
 with st.spinner("Loading historical workload signals..."):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
@@ -791,3 +794,4 @@ st.markdown(
     - For planning, aim for most roles to stay below roughly `85%` busy-day utilization so there is room for interruptions and real-life pharmacy noise.
     """
 )
+

@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Med Audit Trail", page_icon="🔍", layout="wide")
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()
@@ -11,13 +14,19 @@ else:
 engine = App.engine
 normalize_name = App.normalize_name
 
-App.render_page_intro(
-    "Advanced Medication Audit",
-    "Deep-dive into specific medication history with technician and device filtering while keeping the new RxTrack page shell.",
-    kicker="Tools",
-)
-App.record_ui_debug_event("Med Lookup", "shared_intro_loaded")
-App.render_ui_debugger("Med Lookup", intro_mode="shared")
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Advanced Medication Audit",
+        "Deep-dive into specific medication history with technician and device filtering while keeping the new RxTrack page shell.",
+        kicker="Tools",
+    )
+    _debug_event("Med Lookup", "shared_intro_loaded")
+    _debug_panel("Med Lookup", intro_mode="shared")
+else:
+    st.header("🔍 Advanced Medication Audit")
+    st.caption("Deep-dive into specific medication history with technician and device filtering.")
+    _debug_event("Med Lookup", "fallback_header_used")
+    _debug_panel("Med Lookup", intro_mode="fallback")
 
 # -------------------------------------------------
 # 1️⃣ Load Medication List (Cached)
@@ -168,3 +177,4 @@ if not gaps.empty:
     )
 else:
     st.success("✅ No inventory discrepancies detected for selected filters.")
+

@@ -5,6 +5,9 @@ import plotly.express as px
 from sqlalchemy import text
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Session Explorer", page_icon="🔍", layout="wide")
 
 load_data = App.load_data
@@ -20,13 +23,13 @@ if hasattr(App, "render_page_intro"):
         "Analyze chronological work blocks across Pyxis and pharmacy systems in the same navigation shell as the overview.",
         kicker="Performance",
     )
-    App.record_ui_debug_event("Session Explorer", "shared_intro_loaded")
-    App.render_ui_debugger("Session Explorer", intro_mode="shared")
+    _debug_event("Session Explorer", "shared_intro_loaded")
+    _debug_panel("Session Explorer", intro_mode="shared")
 else:
     st.header("🔍 Unified Session Explorer")
     st.caption("Analyze chronological work blocks across Pyxis and pharmacy systems.")
-    App.record_ui_debug_event("Session Explorer", "fallback_header_used")
-    App.render_ui_debugger("Session Explorer", intro_mode="fallback")
+    _debug_event("Session Explorer", "fallback_header_used")
+    _debug_panel("Session Explorer", intro_mode="fallback")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA LOADERS
@@ -469,3 +472,4 @@ with tab2:
     )
 
     st.caption(f"{len(log_view):,} events shown.")
+

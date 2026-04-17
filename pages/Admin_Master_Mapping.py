@@ -3,6 +3,9 @@ import pandas as pd
 from sqlalchemy import text
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Admin & Mapping", page_icon="⚙️", layout="wide")
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()
@@ -13,13 +16,19 @@ engine = App.engine
 load_admin_users = App.load_admin_users
 _DEFAULT_ADMIN_USERS = App._DEFAULT_ADMIN_USERS
 
-App.render_page_intro(
-    "Master Carousel Mapping Upload",
-    "Manage operational mapping, cycle count variance inputs, and admin access from the shared control surface.",
-    kicker="Tools",
-)
-App.record_ui_debug_event("Admin & Mapping", "shared_intro_loaded")
-App.render_ui_debugger("Admin & Mapping", intro_mode="shared")
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Master Carousel Mapping Upload",
+        "Manage operational mapping, cycle count variance inputs, and admin access from the shared control surface.",
+        kicker="Tools",
+    )
+    _debug_event("Admin & Mapping", "shared_intro_loaded")
+    _debug_panel("Admin & Mapping", intro_mode="shared")
+else:
+    st.header("📥 Master Carousel Mapping Upload")
+    st.caption("Manage operational mapping, cycle count variance inputs, and admin access from the shared control surface.")
+    _debug_event("Admin & Mapping", "fallback_header_used")
+    _debug_panel("Admin & Mapping", intro_mode="fallback")
 
 uploaded_file = st.file_uploader(
     "Upload Item Location Report CSV",
@@ -348,3 +357,4 @@ with col_right:
                 st.rerun()
             except Exception as e:
                 st.error(f"❌ Failed to add user: {e}")
+

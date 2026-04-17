@@ -5,6 +5,9 @@ import plotly.express as px
 from sqlalchemy import text
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="RxBrain", page_icon="🧠", layout="wide")
 
 engine = App.engine
@@ -17,13 +20,13 @@ if hasattr(App, "render_page_intro"):
         "Surface operational trends, outliers, and risk signals for the selected analysis window.",
         kicker="Tools",
     )
-    App.record_ui_debug_event("RxBrain", "shared_intro_loaded")
-    App.render_ui_debugger("RxBrain", intro_mode="shared")
+    _debug_event("RxBrain", "shared_intro_loaded")
+    _debug_panel("RxBrain", intro_mode="shared")
 else:
     st.header("🧠 RxTrack Intelligence Engine")
     st.caption("Surface operational trends, outliers, and risk signals for the selected analysis window.")
-    App.record_ui_debug_event("RxBrain", "fallback_header_used")
-    App.render_ui_debugger("RxBrain", intro_mode="fallback")
+    _debug_event("RxBrain", "fallback_header_used")
+    _debug_panel("RxBrain", intro_mode="fallback")
 
 @st.cache_data(ttl=600)
 def load_all_data(start, end):
@@ -300,3 +303,4 @@ with tab4:
             .sort_values("tx", ascending=False)
         )
         st.dataframe(ah_summary, use_container_width=True)
+

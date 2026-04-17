@@ -8,6 +8,9 @@ from datetime import date
 from sqlalchemy import text
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
     buf = io.BytesIO()
@@ -35,13 +38,13 @@ if hasattr(App, "render_page_intro"):
         f"Risk-scored cycle count compliance across a {COMPLIANCE_DAYS}-day window with technician accountability and carousel coverage.",
         kicker="Tools",
     )
-    App.record_ui_debug_event("Cycle Count Integrity", "shared_intro_loaded")
-    App.render_ui_debugger("Cycle Count Integrity", intro_mode="shared")
+    _debug_event("Cycle Count Integrity", "shared_intro_loaded")
+    _debug_panel("Cycle Count Integrity", intro_mode="shared")
 else:
     st.header("📊 Cycle Count Integrity Dashboard")
     st.caption(f"Risk-scored cycle count compliance across a {COMPLIANCE_DAYS}-day window.")
-    App.record_ui_debug_event("Cycle Count Integrity", "fallback_header_used")
-    App.render_ui_debugger("Cycle Count Integrity", intro_mode="fallback")
+    _debug_event("Cycle Count Integrity", "fallback_header_used")
+    _debug_panel("Cycle Count Integrity", intro_mode="fallback")
 
 # ─────────────────────────────────────────────────────
 # DATA LOADERS
@@ -594,3 +597,4 @@ with tab5:
         },
         hide_index=True
     )
+

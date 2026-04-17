@@ -5,6 +5,9 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import text
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Daily Command", page_icon="🎯", layout="wide")
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()
@@ -13,13 +16,19 @@ else:
 
 engine = App.engine
 
-App.render_page_intro(
-    "Daily Command",
-    f"Today is {date.today().strftime('%A, %B %d %Y')}. Run the day from one shared command center instead of the legacy page shell.",
-    kicker="Operations",
-)
-App.record_ui_debug_event("Daily Command", "shared_intro_loaded")
-App.render_ui_debugger("Daily Command", intro_mode="shared")
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Daily Command",
+        f"Today is {date.today().strftime('%A, %B %d %Y')}. Run the day from one shared command center instead of the legacy page shell.",
+        kicker="Operations",
+    )
+    _debug_event("Daily Command", "shared_intro_loaded")
+    _debug_panel("Daily Command", intro_mode="shared")
+else:
+    st.header("🎯 Daily Command")
+    st.caption(f"Today is {date.today().strftime('%A, %B %d %Y')}.")
+    _debug_event("Daily Command", "fallback_header_used")
+    _debug_panel("Daily Command", intro_mode="fallback")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -447,3 +456,4 @@ with st.expander("📋 Full Follow-Up Log", expanded=False):
                 "notes":          st.column_config.TextColumn("Notes"),
             }
         )
+

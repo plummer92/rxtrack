@@ -8,6 +8,9 @@ from datetime import date, timedelta
 from sqlalchemy import text
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Carousel Drop Tracker", page_icon="📋", layout="wide")
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()
@@ -16,13 +19,19 @@ else:
 
 engine = App.engine
 
-App.render_page_intro(
-    "Carousel Drop Tracker",
-    "Track quantity loaded per Pyxis device at each scheduled carousel drop with the same updated shell used on the overview page.",
-    kicker="Tools",
-)
-App.record_ui_debug_event("Carousel Drop Tracker", "shared_intro_loaded")
-App.render_ui_debugger("Carousel Drop Tracker", intro_mode="shared")
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Carousel Drop Tracker",
+        "Track quantity loaded per Pyxis device at each scheduled carousel drop with the same updated shell used on the overview page.",
+        kicker="Tools",
+    )
+    _debug_event("Carousel Drop Tracker", "shared_intro_loaded")
+    _debug_panel("Carousel Drop Tracker", intro_mode="shared")
+else:
+    st.header("📋 Carousel Drop Tracker")
+    st.caption("Track quantity loaded per Pyxis device at each scheduled carousel drop.")
+    _debug_event("Carousel Drop Tracker", "fallback_header_used")
+    _debug_panel("Carousel Drop Tracker", intro_mode="fallback")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SCHEDULE DATA
@@ -980,3 +989,4 @@ with st.expander("🛠️ Diagnostic: Verify Event Types Being Captured", expand
                 f"**Pyxis Pull lines captured:** {len(df_pulls):,} lines across "
                 f"{df_pulls['destination'].nunique()} devices"
             )
+

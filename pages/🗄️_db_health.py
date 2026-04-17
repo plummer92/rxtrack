@@ -4,6 +4,9 @@ from datetime import date, timedelta
 from sqlalchemy import text
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(
     page_title="DB Health",
     page_icon="🗄️",
@@ -16,13 +19,19 @@ else:
 
 engine = App.engine
 
-App.render_page_intro(
-    "Database Health",
-    "Review row counts, date coverage, upload gaps, and quality signals across every table from the updated control shell.",
-    kicker="Tools",
-)
-App.record_ui_debug_event("DB Health", "shared_intro_loaded")
-App.render_ui_debugger("DB Health", intro_mode="shared")
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Database Health",
+        "Review row counts, date coverage, upload gaps, and quality signals across every table from the updated control shell.",
+        kicker="Tools",
+    )
+    _debug_event("DB Health", "shared_intro_loaded")
+    _debug_panel("DB Health", intro_mode="shared")
+else:
+    st.header("🗄️ Database Health")
+    st.caption("Review row counts, date coverage, upload gaps, and quality signals across every table.")
+    _debug_event("DB Health", "fallback_header_used")
+    _debug_panel("DB Health", intro_mode="fallback")
 
 today = date.today()
 
@@ -389,3 +398,4 @@ for table, date_col, label in date_tables:
             mini_html += "</tr>"
         mini_html += "</table>"
         st.markdown(mini_html, unsafe_allow_html=True)
+

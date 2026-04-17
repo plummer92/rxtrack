@@ -4,6 +4,9 @@ import numpy as np
 import plotly.express as px
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Pharmacy Workflow", page_icon="🏥", layout="wide")
 load_data = App.load_data
 seconds_to_mmss = App.seconds_to_mmss
@@ -17,13 +20,13 @@ if hasattr(App, "render_page_intro"):
         "Analyze stockout frequency, destination pressure, and carousel behavior in the same modern shell as the overview hub.",
         kicker="Operations",
     )
-    App.record_ui_debug_event("Pharmacy Workflow", "shared_intro_loaded")
-    App.render_ui_debugger("Pharmacy Workflow", intro_mode="shared")
+    _debug_event("Pharmacy Workflow", "shared_intro_loaded")
+    _debug_panel("Pharmacy Workflow", intro_mode="shared")
 else:
     st.header("🏥 Central Pharmacy Workflow & Stockout Intelligence")
     st.caption("Analyze stockout frequency, destination pressure, and carousel behavior.")
-    App.record_ui_debug_event("Pharmacy Workflow", "fallback_header_used")
-    App.render_ui_debugger("Pharmacy Workflow", intro_mode="fallback")
+    _debug_event("Pharmacy Workflow", "fallback_header_used")
+    _debug_panel("Pharmacy Workflow", intro_mode="fallback")
 
 if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")
@@ -389,6 +392,7 @@ else:
                     )
             else:
                 st.info("No completed replenishment cycles found in this date range.")
+
 
 
 

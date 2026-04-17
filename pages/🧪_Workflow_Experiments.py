@@ -5,6 +5,9 @@ import streamlit as st
 
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 
 NAME_MAPPINGS = {
     "phi": "ali",
@@ -309,13 +312,13 @@ if hasattr(App, "render_page_intro"):
         "Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.",
         kicker="Core",
     )
-    App.record_ui_debug_event("Workflow Experiments", "shared_intro_loaded")
-    App.render_ui_debugger("Workflow Experiments", intro_mode="shared")
+    _debug_event("Workflow Experiments", "shared_intro_loaded")
+    _debug_panel("Workflow Experiments", intro_mode="shared")
 else:
     st.header("🧪 Workflow Experiments")
     st.caption("Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.")
-    App.record_ui_debug_event("Workflow Experiments", "fallback_header_used")
-    App.render_ui_debugger("Workflow Experiments", intro_mode="fallback")
+    _debug_event("Workflow Experiments", "fallback_header_used")
+    _debug_panel("Workflow Experiments", intro_mode="fallback")
 
 with st.spinner("Loading experiment data..."):
     df_events, _, df_pharm, df_sched, df_att = load_data(start_date, end_date)
@@ -663,3 +666,4 @@ with st.expander("Experiment Design Notes", expanded=False):
         - Exports are raw comparison tables so we can review ideas together before making workflow changes.
         """
     )
+

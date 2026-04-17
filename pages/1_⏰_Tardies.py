@@ -6,6 +6,9 @@ from datetime import timedelta
 # Importing shared logic and admin list from your Hub
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Tardy Analytics", page_icon="⏰", layout="wide")
 render_sidebar = App.render_sidebar
 load_data = App.load_data
@@ -20,12 +23,12 @@ if hasattr(App, "render_page_intro"):
         "Identify delay patterns, frequent offenders, and shift reliability without leaving the shared RxTrack shell.",
         kicker="Performance",
     )
-    App.record_ui_debug_event("Tardies", "shared_intro_loaded")
-    App.render_ui_debugger("Tardies", intro_mode="shared")
+    _debug_event("Tardies", "shared_intro_loaded")
+    _debug_panel("Tardies", intro_mode="shared")
 else:
     st.header("⏰ Tardiness & Attendance Analytics")
-    App.record_ui_debug_event("Tardies", "fallback_header_used")
-    App.render_ui_debugger("Tardies", intro_mode="fallback")
+    _debug_event("Tardies", "fallback_header_used")
+    _debug_panel("Tardies", intro_mode="fallback")
 
 # Leadership Filter: Define significant tardiness
 grace_period = st.sidebar.slider(
@@ -121,6 +124,7 @@ else:
             st.success("🎉 All staff arrived within the grace period for this window.")
     else:
         st.warning("Please ensure Schedule and Attendance files are uploaded to the Hub.")
+
 
 
 

@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 st.set_page_config(page_title="Return Reconciliation", page_icon="🔄", layout="wide")
 
 load_data = App.load_data
@@ -16,13 +19,13 @@ if hasattr(App, "render_page_intro"):
         "Validate Pyxis unload workflow against pharmacy return and restock activity without dropping back into the old page layout.",
         kicker="Operations",
     )
-    App.record_ui_debug_event("Return Reconciliation", "shared_intro_loaded")
-    App.render_ui_debugger("Return Reconciliation", intro_mode="shared")
+    _debug_event("Return Reconciliation", "shared_intro_loaded")
+    _debug_panel("Return Reconciliation", intro_mode="shared")
 else:
     st.header("🔄 Closed-Loop Return Integrity Engine")
     st.caption("Validate Pyxis unload workflow against pharmacy return and restock activity.")
-    App.record_ui_debug_event("Return Reconciliation", "fallback_header_used")
-    App.render_ui_debugger("Return Reconciliation", intro_mode="fallback")
+    _debug_event("Return Reconciliation", "fallback_header_used")
+    _debug_panel("Return Reconciliation", intro_mode="fallback")
 
 with st.spinner("Loading data..."):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
@@ -272,3 +275,4 @@ with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation (
     else:
         cols = [c for c in ["dt", "date", "user_name", "device", "med_desc", "qty", "event_type"] if c in unload_eject.columns]
         st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], use_container_width=True)
+

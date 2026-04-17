@@ -7,6 +7,9 @@ import streamlit as st
 
 import App
 
+_debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
+_debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
+
 
 def to_csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8")
@@ -237,13 +240,13 @@ if hasattr(App, "render_page_intro"):
         "Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.",
         kicker="Core",
     )
-    App.record_ui_debug_event("Pilot Monitor", "shared_intro_loaded")
-    App.render_ui_debugger("Pilot Monitor", intro_mode="shared")
+    _debug_event("Pilot Monitor", "shared_intro_loaded")
+    _debug_panel("Pilot Monitor", intro_mode="shared")
 else:
     st.header("🧭 Pilot Monitor")
     st.caption("Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.")
-    App.record_ui_debug_event("Pilot Monitor", "fallback_header_used")
-    App.render_ui_debugger("Pilot Monitor", intro_mode="fallback")
+    _debug_event("Pilot Monitor", "fallback_header_used")
+    _debug_panel("Pilot Monitor", intro_mode="fallback")
 
 default_pilot_start = global_start
 default_pilot_end = global_end
@@ -528,3 +531,4 @@ st.markdown(
     - The "Worsening Meds" tab helps separate broad process strain from a few noisy medications.
     """
 )
+
