@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from App import load_admin_users, load_data, render_sidebar, seconds_to_mmss, render_page_intro
+import App
 
 
 NAME_MAPPINGS = {
@@ -296,13 +296,22 @@ def summarize_group(df, group_col, metrics):
 
 st.set_page_config(page_title="Workflow Experiments", page_icon="🧪", layout="wide")
 
+load_admin_users = App.load_admin_users
+load_data = App.load_data
+render_sidebar = App.render_sidebar
+seconds_to_mmss = App.seconds_to_mmss
+
 start_date, end_date = render_sidebar()
 
-render_page_intro(
-    "Workflow Experiments",
-    "Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.",
-    kicker="Core",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Workflow Experiments",
+        "Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.",
+        kicker="Core",
+    )
+else:
+    st.header("🧪 Workflow Experiments")
+    st.caption("Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.")
 
 with st.spinner("Loading experiment data..."):
     df_events, _, df_pharm, df_sched, df_att = load_data(start_date, end_date)

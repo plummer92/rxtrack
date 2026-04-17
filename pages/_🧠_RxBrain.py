@@ -3,16 +3,23 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from sqlalchemy import text
-from App import engine, render_sidebar, render_page_intro
+import App
 
 st.set_page_config(page_title="RxBrain", page_icon="🧠", layout="wide")
 
+engine = App.engine
+render_sidebar = App.render_sidebar
+
 start_date, end_date = render_sidebar()
-render_page_intro(
-    "RxTrack Intelligence Engine",
-    "Surface operational trends, outliers, and risk signals for the selected analysis window.",
-    kicker="Tools",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "RxTrack Intelligence Engine",
+        "Surface operational trends, outliers, and risk signals for the selected analysis window.",
+        kicker="Tools",
+    )
+else:
+    st.header("🧠 RxTrack Intelligence Engine")
+    st.caption("Surface operational trends, outliers, and risk signals for the selected analysis window.")
 
 @st.cache_data(ttl=600)
 def load_all_data(start, end):

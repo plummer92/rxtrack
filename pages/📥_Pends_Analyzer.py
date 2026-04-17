@@ -4,7 +4,7 @@ import numpy as np
 import plotly.express as px
 import io
 from sqlalchemy import text
-from App import engine, render_sidebar, render_page_intro
+import App
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -23,13 +23,20 @@ st.set_page_config(
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
 
+engine = App.engine
+render_sidebar = App.render_sidebar
+
 start_date, end_date = render_sidebar()
 
-render_page_intro(
-    "Pends Analyzer",
-    "Audit who pended medications, what par levels they set, and whether they made them standard stock.",
-    kicker="Performance",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Pends Analyzer",
+        "Audit who pended medications, what par levels they set, and whether they made them standard stock.",
+        kicker="Performance",
+    )
+else:
+    st.header("📥 Pends Analyzer")
+    st.caption("Audit who pended medications, what par levels they set, and whether they made them standard stock.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 1 — DATA LOADERS

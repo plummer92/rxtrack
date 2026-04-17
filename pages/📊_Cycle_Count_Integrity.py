@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import io
 from datetime import date
 from sqlalchemy import text
-from App import load_data, engine, render_sidebar, render_page_intro
+import App
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -21,15 +21,23 @@ st.set_page_config(
     layout="wide"
 )
 
+load_data = App.load_data
+engine = App.engine
+render_sidebar = App.render_sidebar
+
 start_date, end_date = render_sidebar()
 
 COMPLIANCE_DAYS = 84  # Every med must be cycle counted within this window
 
-render_page_intro(
-    "Cycle Count Integrity Dashboard",
-    f"Risk-scored cycle count compliance across a {COMPLIANCE_DAYS}-day window with technician accountability and carousel coverage.",
-    kicker="Tools",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Cycle Count Integrity Dashboard",
+        f"Risk-scored cycle count compliance across a {COMPLIANCE_DAYS}-day window with technician accountability and carousel coverage.",
+        kicker="Tools",
+    )
+else:
+    st.header("📊 Cycle Count Integrity Dashboard")
+    st.caption(f"Risk-scored cycle count compliance across a {COMPLIANCE_DAYS}-day window.")
 
 # ─────────────────────────────────────────────────────
 # DATA LOADERS

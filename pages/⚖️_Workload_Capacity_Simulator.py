@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from App import load_data, render_sidebar, render_page_intro
+import App
 
 
 SPECIAL_UNITS = {
@@ -538,13 +538,20 @@ def build_role_task_breakdown(role_name, role_df, assumptions_df, allocation_df,
 
 st.set_page_config(page_title="Workload Capacity Simulator", page_icon="⚖️", layout="wide")
 
+load_data = App.load_data
+render_sidebar = App.render_sidebar
+
 start_date, end_date = render_sidebar()
 
-render_page_intro(
-    "Workload Capacity Simulator",
-    "Test historical workload against proposed staffing models so role design decisions stay inside the same modern RxTrack shell.",
-    kicker="Core",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Workload Capacity Simulator",
+        "Test historical workload against proposed staffing models so role design decisions stay inside the same modern RxTrack shell.",
+        kicker="Core",
+    )
+else:
+    st.header("⚖️ Workload Capacity Simulator")
+    st.caption("Test historical workload against proposed staffing models.")
 
 with st.spinner("Loading historical workload signals..."):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)

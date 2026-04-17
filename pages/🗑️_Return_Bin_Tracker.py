@@ -5,16 +5,23 @@ import plotly.express as px
 import io
 from datetime import date, timedelta
 from sqlalchemy import text
-from App import engine, render_sidebar, render_page_intro
+import App
 
 st.set_page_config(page_title="Return Bin Tracker", page_icon="🗑️", layout="wide")
 
+engine = App.engine
+render_sidebar = App.render_sidebar
+
 start_date, end_date = render_sidebar()
-render_page_intro(
-    "Return Bin Tracker",
-    "Monitor empty-return-bin events per Pyxis device with visibility into coverage, recency, and operational gaps.",
-    kicker="Operations",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Return Bin Tracker",
+        "Monitor empty-return-bin events per Pyxis device with visibility into coverage, recency, and operational gaps.",
+        kicker="Operations",
+    )
+else:
+    st.header("🗑️ Return Bin Tracker")
+    st.caption("Monitor empty-return-bin events per Pyxis device with visibility into coverage, recency, and operational gaps.")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:

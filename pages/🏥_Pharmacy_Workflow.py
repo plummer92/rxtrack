@@ -2,16 +2,24 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from App import load_data, seconds_to_mmss, render_sidebar, render_page_intro
+import App
 
 st.set_page_config(page_title="Pharmacy Workflow", page_icon="🏥", layout="wide")
+load_data = App.load_data
+seconds_to_mmss = App.seconds_to_mmss
+render_sidebar = App.render_sidebar
+
 render_sidebar()
 
-render_page_intro(
-    "Central Pharmacy Workflow & Stockout Intelligence",
-    "Analyze stockout frequency, destination pressure, and carousel behavior in the same modern shell as the overview hub.",
-    kicker="Operations",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Central Pharmacy Workflow & Stockout Intelligence",
+        "Analyze stockout frequency, destination pressure, and carousel behavior in the same modern shell as the overview hub.",
+        kicker="Operations",
+    )
+else:
+    st.header("🏥 Central Pharmacy Workflow & Stockout Intelligence")
+    st.caption("Analyze stockout frequency, destination pressure, and carousel behavior.")
 
 if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")

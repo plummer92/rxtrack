@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from App import load_data, render_sidebar, engine, render_page_intro
+import App
 
 
 def to_csv_bytes(df):
@@ -225,13 +225,21 @@ def metric_delta(current, baseline, suffix=""):
 
 st.set_page_config(page_title="Pilot Monitor", page_icon="🧭", layout="wide")
 
+load_data = App.load_data
+render_sidebar = App.render_sidebar
+engine = App.engine
+
 global_start, global_end = render_sidebar()
 
-render_page_intro(
-    "Pilot Monitor",
-    "Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.",
-    kicker="Core",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Pilot Monitor",
+        "Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.",
+        kicker="Core",
+    )
+else:
+    st.header("🧭 Pilot Monitor")
+    st.caption("Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.")
 
 default_pilot_start = global_start
 default_pilot_end = global_end

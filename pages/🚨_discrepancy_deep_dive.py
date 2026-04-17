@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 from sqlalchemy import text
-from App import engine, render_sidebar, render_page_intro
+import App
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -24,13 +24,20 @@ st.set_page_config(
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
 
+engine = App.engine
+render_sidebar = App.render_sidebar
+
 start_date, end_date = render_sidebar()
 
-render_page_intro(
-    "Discrepancy Deep Dive",
-    "Count errors, dollar risk, and likely-cause attribution by device and medication without dropping back into the old interface.",
-    kicker="Performance",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Discrepancy Deep Dive",
+        "Count errors, dollar risk, and likely-cause attribution by device and medication without dropping back into the old interface.",
+        kicker="Performance",
+    )
+else:
+    st.header("🚨 Discrepancy Deep Dive")
+    st.caption("Count errors, dollar risk, and likely-cause attribution by device and medication.")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 1 — DATA LOADERS

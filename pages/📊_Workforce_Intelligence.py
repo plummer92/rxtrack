@@ -1,4 +1,4 @@
-from App import load_data, seconds_to_mmss, render_sidebar, render_page_intro
+import App
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,12 +12,20 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 st.set_page_config(page_title="Workforce Intelligence", layout="wide")
+load_data = App.load_data
+seconds_to_mmss = App.seconds_to_mmss
+render_sidebar = App.render_sidebar
+
 render_sidebar()
-render_page_intro(
-    "Workforce Intelligence Scorecard",
-    "Executive-level technician performance analytics presented in the unified RxTrack interface.",
-    kicker="Performance",
-)
+if hasattr(App, "render_page_intro"):
+    App.render_page_intro(
+        "Workforce Intelligence Scorecard",
+        "Executive-level technician performance analytics presented in the unified RxTrack interface.",
+        kicker="Performance",
+    )
+else:
+    st.header("📊 Workforce Intelligence Scorecard")
+    st.caption("Executive-level technician performance analytics.")
 
 if 'start_date' not in st.session_state:
     st.info("👈 Select a date range on Overview first.")
