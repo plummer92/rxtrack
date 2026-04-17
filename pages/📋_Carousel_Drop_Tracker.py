@@ -585,12 +585,15 @@ def _format_duration(minutes):
 def build_drop_timing_summary(drop, sel_date, df_pulls, df_refills):
     start_min = drop["win_start"][0] * 60 + drop["win_start"][1]
     end_min = drop["win_end"][0] * 60 + drop["win_end"][1]
+    scheduled_parts = drop["time"].split(":")
+    scheduled_min = int(scheduled_parts[0]) * 60 + int(scheduled_parts[1])
     refill_end_tuple = drop.get("refill_win_end", drop["win_end"])
     refill_end_min = refill_end_tuple[0] * 60 + refill_end_tuple[1]
     scheduled_ts = pd.Timestamp(f"{sel_date} {drop['time']}")
 
     pull_win = _time_mask(df_pulls, start_min, end_min)
-    refill_win = _time_mask(df_refills, start_min, refill_end_min)
+    # Refill timing should start at the scheduled drop time, not the earlier pull-prep window.
+    refill_win = _time_mask(df_refills, scheduled_min, refill_end_min)
 
     device_rows = []
     device_plan = (
