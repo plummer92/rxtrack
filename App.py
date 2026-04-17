@@ -659,6 +659,46 @@ def apply_global_styles():
             color: #93c5fd;
             margin: 14px 0 6px 0;
         }
+        .rx-page-hero {
+            background:
+                radial-gradient(circle at top right, rgba(59, 130, 246, 0.2), transparent 24%),
+                linear-gradient(135deg, #ffffff 0%, #f8fbff 48%, #eef6ff 100%);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 22px;
+            padding: 1.3rem 1.4rem;
+            margin: 0.15rem 0 1.1rem 0;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
+        }
+        .rx-page-kicker {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            font-size: 0.74rem;
+            font-weight: 800;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: #2563eb;
+            background: rgba(37, 99, 235, 0.08);
+            border: 1px solid rgba(37, 99, 235, 0.12);
+            border-radius: 999px;
+            padding: 0.34rem 0.6rem;
+            margin-bottom: 0.85rem;
+        }
+        .rx-page-title {
+            margin: 0;
+            color: #0f172a;
+            font-size: clamp(1.8rem, 3vw, 2.5rem);
+            line-height: 1.05;
+            font-weight: 900;
+            letter-spacing: -0.03em;
+        }
+        .rx-page-subtitle {
+            margin: 0.65rem 0 0 0;
+            color: #475569;
+            max-width: 72ch;
+            font-size: 1rem;
+            line-height: 1.6;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -704,6 +744,22 @@ def render_sidebar_chrome():
         """, unsafe_allow_html=True)
         render_page_links()
         st.divider()
+
+
+def render_page_intro(title, subtitle=None, kicker="Operations Intelligence"):
+    """Shared page header so every section matches the new RxTrack shell."""
+    apply_global_styles()
+    subtitle_html = f'<p class="rx-page-subtitle">{subtitle}</p>' if subtitle else ""
+    st.markdown(
+        f"""
+        <section class="rx-page-hero">
+            <div class="rx-page-kicker">{kicker}</div>
+            <h1 class="rx-page-title">{title}</h1>
+            {subtitle_html}
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # --- SHARED SIDEBAR RENDERER ---

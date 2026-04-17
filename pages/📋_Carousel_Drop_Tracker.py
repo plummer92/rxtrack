@@ -16,8 +16,11 @@ else:
 
 engine = App.engine
 
-st.header("📋 Carousel Drop Tracker")
-st.caption("Track quantity loaded per Pyxis device at each scheduled carousel drop. Select a date to see that day's drops.")
+App.render_page_intro(
+    "Carousel Drop Tracker",
+    "Track quantity loaded per Pyxis device at each scheduled carousel drop with the same updated shell used on the overview page.",
+    kicker="Tools",
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SCHEDULE DATA

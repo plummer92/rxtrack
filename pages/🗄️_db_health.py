@@ -16,8 +16,11 @@ else:
 
 engine = App.engine
 
-st.header("🗄️ Database Health")
-st.caption("Row counts, date coverage, upload gaps, and data quality signals across every table.")
+App.render_page_intro(
+    "Database Health",
+    "Review row counts, date coverage, upload gaps, and quality signals across every table from the updated control shell.",
+    kicker="Tools",
+)
 
 today = date.today()
 

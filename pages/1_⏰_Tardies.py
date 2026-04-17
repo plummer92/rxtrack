@@ -4,11 +4,15 @@ import numpy as np
 import plotly.express as px
 from datetime import timedelta
 # Importing shared logic and admin list from your Hub
-from App import load_data, normalize_name, parse_shift_start, load_admin_users, render_sidebar
+from App import load_data, normalize_name, parse_shift_start, load_admin_users, render_sidebar, render_page_intro
 
 st.set_page_config(page_title="Tardy Analytics", page_icon="⏰", layout="wide")
 render_sidebar()
-st.header("⏰ Tardiness & Attendance Analytics")
+render_page_intro(
+    "Tardiness & Attendance Analytics",
+    "Identify delay patterns, frequent offenders, and shift reliability without leaving the shared RxTrack shell.",
+    kicker="Performance",
+)
 
 # Leadership Filter: Define significant tardiness
 grace_period = st.sidebar.slider(

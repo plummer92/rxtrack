@@ -3,14 +3,16 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from sqlalchemy import text
-from App import load_data, seconds_to_mmss, render_sidebar, normalize_name, engine
+from App import load_data, seconds_to_mmss, render_sidebar, normalize_name, engine, render_page_intro
 
 st.set_page_config(page_title="Session Explorer", page_icon="🔍", layout="wide")
 
 start_date, end_date = render_sidebar()
-
-st.header("🔍 Unified Session Explorer")
-st.caption("Analyzing chronological work blocks across Pyxis and Pharmacy systems.")
+render_page_intro(
+    "Unified Session Explorer",
+    "Analyze chronological work blocks across Pyxis and pharmacy systems in the same navigation shell as the overview.",
+    kicker="Performance",
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA LOADERS

@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 from sqlalchemy import text
-from App import engine, render_sidebar
+from App import engine, render_sidebar, render_page_intro
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -26,11 +26,10 @@ st.set_page_config(
 
 start_date, end_date = render_sidebar()
 
-st.header("🚨 Discrepancy Deep Dive")
-st.caption(
-    "Count errors, dollar risk, and likely-cause attribution by device and medication. "
-    "The 'Likely Cause' is the person who did the most recent transaction on that "
-    "med+device before the discrepancy was logged — not the person who found it."
+render_page_intro(
+    "Discrepancy Deep Dive",
+    "Count errors, dollar risk, and likely-cause attribution by device and medication without dropping back into the old interface.",
+    kicker="Performance",
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════

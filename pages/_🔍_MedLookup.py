@@ -11,8 +11,11 @@ else:
 engine = App.engine
 normalize_name = App.normalize_name
 
-st.header("🔍 Advanced Medication Audit")
-st.caption("Deep-dive into specific medication history with technician and device filtering.")
+App.render_page_intro(
+    "Advanced Medication Audit",
+    "Deep-dive into specific medication history with technician and device filtering while keeping the new RxTrack page shell.",
+    kicker="Tools",
+)
 
 # -------------------------------------------------
 # 1️⃣ Load Medication List (Cached)

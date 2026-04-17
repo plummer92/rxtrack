@@ -1,14 +1,16 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from App import load_data, render_sidebar, engine
+from App import load_data, render_sidebar, engine, render_page_intro
 
 st.set_page_config(page_title="Return Reconciliation", page_icon="🔄", layout="wide")
 
 start_date, end_date = render_sidebar()
-
-st.header("🔄 Closed-Loop Return Integrity Engine")
-st.caption("Validating Pyxis unload workflow against Pharmacy return/restock activity.")
+render_page_intro(
+    "Closed-Loop Return Integrity Engine",
+    "Validate Pyxis unload workflow against pharmacy return and restock activity without dropping back into the old page layout.",
+    kicker="Operations",
+)
 
 with st.spinner("Loading data..."):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)

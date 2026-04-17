@@ -13,8 +13,11 @@ engine = App.engine
 load_admin_users = App.load_admin_users
 _DEFAULT_ADMIN_USERS = App._DEFAULT_ADMIN_USERS
 
-st.header("📥 Master Carousel Mapping Upload")
-st.caption("Upload Item Location Report to update master carousel assignments.")
+App.render_page_intro(
+    "Master Carousel Mapping Upload",
+    "Manage operational mapping, cycle count variance inputs, and admin access from the shared control surface.",
+    kicker="Tools",
+)
 
 uploaded_file = st.file_uploader(
     "Upload Item Location Report CSV",

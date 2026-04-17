@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from App import load_data, render_sidebar
+from App import load_data, render_sidebar, render_page_intro
 
 
 SPECIAL_UNITS = {
@@ -540,9 +540,10 @@ st.set_page_config(page_title="Workload Capacity Simulator", page_icon="⚖️",
 
 start_date, end_date = render_sidebar()
 
-st.header("⚖️ Workload Capacity Simulator")
-st.caption(
-    "Test historical workload against proposed staffing models. Use this to see whether a role design fits inside a safe shift capacity before changing operations."
+render_page_intro(
+    "Workload Capacity Simulator",
+    "Test historical workload against proposed staffing models so role design decisions stay inside the same modern RxTrack shell.",
+    kicker="Core",
 )
 
 with st.spinner("Loading historical workload signals..."):

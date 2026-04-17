@@ -13,8 +13,11 @@ else:
 
 engine = App.engine
 
-st.header("🎯 Daily Command")
-st.caption(f"Today is **{date.today().strftime('%A, %B %d %Y')}**")
+App.render_page_intro(
+    "Daily Command",
+    f"Today is {date.today().strftime('%A, %B %d %Y')}. Run the day from one shared command center instead of the legacy page shell.",
+    kicker="Operations",
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS

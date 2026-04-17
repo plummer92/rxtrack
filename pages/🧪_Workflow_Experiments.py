@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from App import load_admin_users, load_data, render_sidebar, seconds_to_mmss
+from App import load_admin_users, load_data, render_sidebar, seconds_to_mmss, render_page_intro
 
 
 NAME_MAPPINGS = {
@@ -298,9 +298,10 @@ st.set_page_config(page_title="Workflow Experiments", page_icon="🧪", layout="
 
 start_date, end_date = render_sidebar()
 
-st.header("🧪 Workflow Experiments")
-st.caption(
-    "Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load."
+render_page_intro(
+    "Workflow Experiments",
+    "Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.",
+    kicker="Core",
 )
 
 with st.spinner("Loading experiment data..."):

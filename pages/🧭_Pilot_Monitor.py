@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from App import load_data, render_sidebar, engine
+from App import load_data, render_sidebar, engine, render_page_intro
 
 
 def to_csv_bytes(df):
@@ -227,8 +227,11 @@ st.set_page_config(page_title="Pilot Monitor", page_icon="🧭", layout="wide")
 
 global_start, global_end = render_sidebar()
 
-st.header("🧭 Pilot Monitor")
-st.caption("Baseline vs pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.")
+render_page_intro(
+    "Pilot Monitor",
+    "Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.",
+    kicker="Core",
+)
 
 default_pilot_start = global_start
 default_pilot_end = global_end
