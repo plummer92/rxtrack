@@ -582,18 +582,25 @@ def _format_duration(minutes):
     return f"{mins}m"
 
 
+def _average_gap_minutes(df):
+    if df.empty or len(df) < 2:
+        return np.nan
+    ordered = df.sort_values("dt")
+    gaps = ordered["dt"].diff().dt.total_seconds().div(60).dropna()
+    if gaps.empty:
+        return np.nan
+    return gaps.mean()
+
+
 def build_drop_timing_summary(drop, sel_date, df_pulls, df_refills):
     start_min = drop["win_start"][0] * 60 + drop["win_start"][1]
     end_min = drop["win_end"][0] * 60 + drop["win_end"][1]
-    scheduled_parts = drop["time"].split(":")
-    scheduled_min = int(scheduled_parts[0]) * 60 + int(scheduled_parts[1])
     refill_end_tuple = drop.get("refill_win_end", drop["win_end"])
     refill_end_min = refill_end_tuple[0] * 60 + refill_end_tuple[1]
     scheduled_ts = pd.Timestamp(f"{sel_date} {drop['time']}")
 
     pull_win = _time_mask(df_pulls, start_min, end_min)
-    # Refill timing should start at the scheduled drop time, not the earlier pull-prep window.
-    refill_win = _time_mask(df_refills, scheduled_min, refill_end_min)
+    refill_win = _time_mask(df_refills, start_min, refill_end_min)
 
     device_rows = []
     device_plan = (
@@ -605,18 +612,19 @@ def build_drop_timing_summary(drop, sel_date, df_pulls, df_refills):
         device_pulls = pull_win[pull_win["destination"] == device] if not pull_win.empty else pd.DataFrame()
         device_refills = refill_win[refill_win["device"] == device] if not refill_win.empty else pd.DataFrame()
 
-        first_refill = device_refills["dt"].min() if not device_refills.empty else pd.NaT
-        last_refill = device_refills["dt"].max() if not device_refills.empty else pd.NaT
-        completion_minutes = (
-            max((last_refill - scheduled_ts).total_seconds() / 60, 0)
-            if pd.notna(last_refill)
+        first_pull = device_pulls["dt"].min() if not device_pulls.empty else pd.NaT
+        last_pull = device_pulls["dt"].max() if not device_pulls.empty else pd.NaT
+        pull_completion_minutes = (
+            max((last_pull - scheduled_ts).total_seconds() / 60, 0)
+            if pd.notna(last_pull)
             else np.nan
         )
-        active_span_minutes = (
-            max((last_refill - first_refill).total_seconds() / 60, 0)
-            if pd.notna(first_refill) and pd.notna(last_refill)
+        pull_span_minutes = (
+            max((last_pull - first_pull).total_seconds() / 60, 0)
+            if pd.notna(first_pull) and pd.notna(last_pull)
             else np.nan
         )
+        avg_pull_gap_minutes = _average_gap_minutes(device_pulls)
 
         device_rows.append(
             {
@@ -628,52 +636,59 @@ def build_drop_timing_summary(drop, sel_date, df_pulls, df_refills):
                 "loaded_qty": float(device_refills["qty"].sum()) if not device_refills.empty else 0.0,
                 "refill_lines": int(device_refills["pk"].count()) if not device_refills.empty else 0,
                 "meds_loaded": int(device_refills["med_id"].nunique()) if not device_refills.empty else 0,
-                "first_refill": first_refill,
-                "last_refill": last_refill,
-                "completion_minutes": completion_minutes,
-                "active_span_minutes": active_span_minutes,
-                "completion_display": _format_duration(completion_minutes),
-                "active_span_display": _format_duration(active_span_minutes),
-                "first_refill_display": _format_clock(first_refill),
-                "last_refill_display": _format_clock(last_refill),
-                "status": "Loaded" if not device_refills.empty else "No refill activity",
+                "first_pull": first_pull,
+                "last_pull": last_pull,
+                "pull_completion_minutes": pull_completion_minutes,
+                "pull_span_minutes": pull_span_minutes,
+                "avg_pull_gap_minutes": avg_pull_gap_minutes,
+                "pull_completion_display": _format_duration(pull_completion_minutes),
+                "pull_span_display": _format_duration(pull_span_minutes),
+                "avg_pull_gap_display": _format_duration(avg_pull_gap_minutes),
+                "first_pull_display": _format_clock(first_pull),
+                "last_pull_display": _format_clock(last_pull),
+                "status": "Pulled" if not device_pulls.empty else "No pull activity",
             }
         )
 
     detail_df = pd.DataFrame(device_rows).sort_values(
-        ["loaded_qty", "completion_minutes"], ascending=[False, True], na_position="last"
+        ["pull_qty", "pull_completion_minutes"], ascending=[False, True], na_position="last"
     )
-    active_df = detail_df[detail_df["refill_lines"] > 0].copy()
-    first_refill = active_df["first_refill"].min() if not active_df.empty else pd.NaT
-    last_refill = active_df["last_refill"].max() if not active_df.empty else pd.NaT
-    completion_minutes = (
-        max((last_refill - scheduled_ts).total_seconds() / 60, 0)
-        if pd.notna(last_refill)
+    active_pull_df = detail_df[detail_df["pull_lines"] > 0].copy()
+    active_refill_df = detail_df[detail_df["refill_lines"] > 0].copy()
+    first_pull = active_pull_df["first_pull"].min() if not active_pull_df.empty else pd.NaT
+    last_pull = active_pull_df["last_pull"].max() if not active_pull_df.empty else pd.NaT
+    pull_completion_minutes = (
+        max((last_pull - scheduled_ts).total_seconds() / 60, 0)
+        if pd.notna(last_pull)
         else np.nan
     )
-    active_span_minutes = (
-        max((last_refill - first_refill).total_seconds() / 60, 0)
-        if pd.notna(first_refill) and pd.notna(last_refill)
+    pull_span_minutes = (
+        max((last_pull - first_pull).total_seconds() / 60, 0)
+        if pd.notna(first_pull) and pd.notna(last_pull)
         else np.nan
     )
+    avg_pull_gap_minutes = _average_gap_minutes(pull_win)
 
     summary = {
         "Drop": drop["label"],
         "Scheduled": drop["time"],
         "Scheduled Devices": len(detail_df),
-        "Devices Loaded": int((detail_df["refill_lines"] > 0).sum()),
+        "Devices Loaded": int((detail_df["pull_lines"] > 0).sum()),
         "Full Drop Devices": int((detail_df["drop_type"] == "Full Drop").sum()),
         "Stockout Devices": int((detail_df["drop_type"] == "Stockouts Only").sum()),
         "Units Loaded": float(detail_df["loaded_qty"].sum()),
         "Pull Demand": float(detail_df["pull_qty"].sum()),
+        "Pull Lines": int(detail_df["pull_lines"].sum()),
         "Refill Lines": int(detail_df["refill_lines"].sum()),
-        "Distinct Meds": int(active_df["meds_loaded"].sum()) if not active_df.empty else 0,
-        "First Refill": _format_clock(first_refill),
-        "Last Refill": _format_clock(last_refill),
-        "Completion": _format_duration(completion_minutes),
-        "Completion Minutes": completion_minutes,
-        "Active Span": _format_duration(active_span_minutes),
-        "Active Span Minutes": active_span_minutes,
+        "Distinct Meds": int(active_refill_df["meds_loaded"].sum()) if not active_refill_df.empty else 0,
+        "First Pull": _format_clock(first_pull),
+        "Last Pull": _format_clock(last_pull),
+        "Pull Completion": _format_duration(pull_completion_minutes),
+        "Pull Completion Minutes": pull_completion_minutes,
+        "Pull Span": _format_duration(pull_span_minutes),
+        "Pull Span Minutes": pull_span_minutes,
+        "Avg Pull Gap": _format_duration(avg_pull_gap_minutes),
+        "Avg Pull Gap Minutes": avg_pull_gap_minutes,
     }
     return summary, detail_df, pull_win, refill_win
 
@@ -692,26 +707,27 @@ for drop in schedule:
 summary_df = pd.DataFrame(drop_summaries)
 
 st.info(
-    "This stripped-down view answers two questions first: how many units were loaded on each drop, "
-    "and how long each drop took to finish based on refill activity."
+    "This stripped-down view answers two questions first: how much pull demand sits on each drop, "
+    "and how long the carousel pull portion took based on pull transactions."
 )
 st.caption(
-    "Completion is measured from the scheduled drop time to the last refill event recorded for devices in that drop window."
+    "Pull timing is measured from the scheduled drop time to the last pull transaction in that drop window. "
+    "Refill fields are left in as reference, but the timing clocks below are now pull-side only."
 )
 
 day_units = float(summary_df["Units Loaded"].sum()) if not summary_df.empty else 0.0
-day_refill_lines = int(summary_df["Refill Lines"].sum()) if not summary_df.empty else 0
+day_pull_lines = int(summary_df["Pull Lines"].sum()) if not summary_df.empty else 0
 drop_count = len(summary_df)
-avg_completion = summary_df["Completion Minutes"].dropna().mean() if not summary_df.empty else np.nan
+avg_completion = summary_df["Pull Completion Minutes"].dropna().mean() if not summary_df.empty else np.nan
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Drops Today", f"{drop_count}")
-k2.metric("Units Loaded", f"{day_units:,.0f}")
-k3.metric("Refill Lines", f"{day_refill_lines:,}")
-k4.metric("Avg Completion", _format_duration(avg_completion))
+k2.metric("Pull Demand", f"{float(summary_df['Pull Demand'].sum()) if not summary_df.empty else 0.0:,.0f}")
+k3.metric("Pull Lines", f"{day_pull_lines:,}")
+k4.metric("Avg Pull Completion", _format_duration(avg_completion))
 
-if summary_df.empty or day_refill_lines == 0:
-    st.warning("No refill activity was found for this date in Carousel Drop Tracker.")
+if summary_df.empty or day_pull_lines == 0:
+    st.warning("No pull activity was found for this date in Carousel Drop Tracker.")
 else:
     overview_tab, detail_tab, raw_tab = st.tabs(["Drop Overview", "Device Breakdown", "Raw Activity"])
 
@@ -723,13 +739,15 @@ else:
                 "Scheduled",
                 "Scheduled Devices",
                 "Devices Loaded",
-                "Units Loaded",
                 "Pull Demand",
+                "Pull Lines",
+                "Units Loaded",
                 "Refill Lines",
-                "First Refill",
-                "Last Refill",
-                "Completion",
-                "Active Span",
+                "First Pull",
+                "Last Pull",
+                "Pull Completion",
+                "Pull Span",
+                "Avg Pull Gap",
             ]
         ].copy()
         st.dataframe(
@@ -747,22 +765,22 @@ else:
             units_fig = px.bar(
                 summary_df,
                 x="Drop",
-                y="Units Loaded",
-                text="Units Loaded",
-                title="Units Loaded by Drop",
+                y="Pull Demand",
+                text="Pull Demand",
+                title="Pull Demand by Drop",
                 color="Drop",
             )
             units_fig.update_traces(texttemplate="%{y:.0f}", textposition="outside")
             units_fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=60, b=0))
             st.plotly_chart(units_fig, width="stretch")
         with c2:
-            completion_chart = summary_df.dropna(subset=["Completion Minutes"]).copy()
+            completion_chart = summary_df.dropna(subset=["Pull Completion Minutes"]).copy()
             completion_fig = px.bar(
                 completion_chart,
                 x="Drop",
-                y="Completion Minutes",
-                text=completion_chart["Completion"].tolist(),
-                title="Completion Time by Drop",
+                y="Pull Completion Minutes",
+                text=completion_chart["Pull Completion"].tolist(),
+                title="Pull Completion Time by Drop",
                 color="Drop",
             )
             completion_fig.update_traces(textposition="outside")
@@ -781,14 +799,14 @@ else:
         selected_detail = drop_details[selected_drop].copy()
 
         d1, d2, d3, d4 = st.columns(4)
-        d1.metric("Units Loaded", f"{selected_summary['Units Loaded']:,.0f}")
+        d1.metric("Pull Demand", f"{selected_summary['Pull Demand']:,.0f}")
         d2.metric("Devices Loaded", f"{int(selected_summary['Devices Loaded'])}")
-        d3.metric("Completion", selected_summary["Completion"])
-        d4.metric("Active Span", selected_summary["Active Span"])
+        d3.metric("Pull Completion", selected_summary["Pull Completion"])
+        d4.metric("Pull Span", selected_summary["Pull Span"])
 
         st.caption(
-            f"{selected_drop} started at {selected_summary['Scheduled']} and last showed refill activity at "
-            f"{selected_summary['Last Refill']}."
+            f"{selected_drop} started at {selected_summary['Scheduled']} and its last pull transaction was "
+            f"{selected_summary['Last Pull']}."
         )
 
         area_options = sorted(selected_detail["area"].unique())
@@ -807,14 +825,15 @@ else:
                 "area",
                 "drop_type",
                 "status",
+                "pull_qty",
+                "pull_lines",
+                "first_pull_display",
+                "last_pull_display",
+                "pull_completion_display",
+                "pull_span_display",
+                "avg_pull_gap_display",
                 "loaded_qty",
                 "refill_lines",
-                "meds_loaded",
-                "first_refill_display",
-                "last_refill_display",
-                "completion_display",
-                "active_span_display",
-                "pull_qty",
             ]
         ].rename(
             columns={
@@ -822,14 +841,15 @@ else:
                 "area": "Area",
                 "drop_type": "Drop Type",
                 "status": "Status",
+                "pull_qty": "Pull Demand",
+                "pull_lines": "Pull Lines",
+                "first_pull_display": "First Pull",
+                "last_pull_display": "Last Pull",
+                "pull_completion_display": "Pull Completion",
+                "pull_span_display": "Pull Span",
+                "avg_pull_gap_display": "Avg Pull Gap",
                 "loaded_qty": "Units Loaded",
                 "refill_lines": "Refill Lines",
-                "meds_loaded": "Distinct Meds",
-                "first_refill_display": "First Refill",
-                "last_refill_display": "Last Refill",
-                "completion_display": "Completion",
-                "active_span_display": "Active Span",
-                "pull_qty": "Pull Demand",
             }
         )
         st.dataframe(
@@ -842,16 +862,16 @@ else:
             },
         )
 
-        device_chart_df = selected_detail[selected_detail["loaded_qty"] > 0].nlargest(15, "loaded_qty")
+        device_chart_df = selected_detail[selected_detail["pull_qty"] > 0].nlargest(15, "pull_qty")
         if not device_chart_df.empty:
             device_fig = px.bar(
-                device_chart_df.sort_values("loaded_qty"),
+                device_chart_df.sort_values("pull_qty"),
                 y="device",
-                x="loaded_qty",
+                x="pull_qty",
                 orientation="h",
                 color="area",
-                text="loaded_qty",
-                title=f"{selected_drop}: Top Devices by Units Loaded",
+                text="pull_qty",
+                title=f"{selected_drop}: Top Devices by Pull Demand",
                 color_discrete_map=AREA_COLOR,
             )
             device_fig.update_traces(texttemplate="%{x:.0f}", textposition="outside")
