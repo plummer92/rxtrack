@@ -35,9 +35,13 @@ if hasattr(App, "render_page_intro"):
         "Count errors, dollar risk, and likely-cause attribution by device and medication without dropping back into the old interface.",
         kicker="Performance",
     )
+    App.record_ui_debug_event("Discrepancy Deep Dive", "shared_intro_loaded")
+    App.render_ui_debugger("Discrepancy Deep Dive", intro_mode="shared")
 else:
     st.header("🚨 Discrepancy Deep Dive")
     st.caption("Count errors, dollar risk, and likely-cause attribution by device and medication.")
+    App.record_ui_debug_event("Discrepancy Deep Dive", "fallback_header_used")
+    App.render_ui_debugger("Discrepancy Deep Dive", intro_mode="fallback")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 1 — DATA LOADERS

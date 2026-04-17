@@ -34,9 +34,13 @@ if hasattr(App, "render_page_intro"):
         "Audit who pended medications, what par levels they set, and whether they made them standard stock.",
         kicker="Performance",
     )
+    App.record_ui_debug_event("Pends Analyzer", "shared_intro_loaded")
+    App.render_ui_debugger("Pends Analyzer", intro_mode="shared")
 else:
     st.header("📥 Pends Analyzer")
     st.caption("Audit who pended medications, what par levels they set, and whether they made them standard stock.")
+    App.record_ui_debug_event("Pends Analyzer", "fallback_header_used")
+    App.render_ui_debugger("Pends Analyzer", intro_mode="fallback")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 1 — DATA LOADERS

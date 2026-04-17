@@ -309,9 +309,13 @@ if hasattr(App, "render_page_intro"):
         "Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.",
         kicker="Core",
     )
+    App.record_ui_debug_event("Workflow Experiments", "shared_intro_loaded")
+    App.render_ui_debugger("Workflow Experiments", intro_mode="shared")
 else:
     st.header("🧪 Workflow Experiments")
     st.caption("Read-only hypothesis testing across session efficiency, tardiness, pharmacy rhythm, and device load.")
+    App.record_ui_debug_event("Workflow Experiments", "fallback_header_used")
+    App.render_ui_debugger("Workflow Experiments", intro_mode="fallback")
 
 with st.spinner("Loading experiment data..."):
     df_events, _, df_pharm, df_sched, df_att = load_data(start_date, end_date)

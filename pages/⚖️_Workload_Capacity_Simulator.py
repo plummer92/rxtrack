@@ -549,9 +549,13 @@ if hasattr(App, "render_page_intro"):
         "Test historical workload against proposed staffing models so role design decisions stay inside the same modern RxTrack shell.",
         kicker="Core",
     )
+    App.record_ui_debug_event("Capacity Simulator", "shared_intro_loaded")
+    App.render_ui_debugger("Capacity Simulator", intro_mode="shared")
 else:
     st.header("⚖️ Workload Capacity Simulator")
     st.caption("Test historical workload against proposed staffing models.")
+    App.record_ui_debug_event("Capacity Simulator", "fallback_header_used")
+    App.render_ui_debugger("Capacity Simulator", intro_mode="fallback")
 
 with st.spinner("Loading historical workload signals..."):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)

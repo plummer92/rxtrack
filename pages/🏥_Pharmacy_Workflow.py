@@ -17,9 +17,13 @@ if hasattr(App, "render_page_intro"):
         "Analyze stockout frequency, destination pressure, and carousel behavior in the same modern shell as the overview hub.",
         kicker="Operations",
     )
+    App.record_ui_debug_event("Pharmacy Workflow", "shared_intro_loaded")
+    App.render_ui_debugger("Pharmacy Workflow", intro_mode="shared")
 else:
     st.header("🏥 Central Pharmacy Workflow & Stockout Intelligence")
     st.caption("Analyze stockout frequency, destination pressure, and carousel behavior.")
+    App.record_ui_debug_event("Pharmacy Workflow", "fallback_header_used")
+    App.render_ui_debugger("Pharmacy Workflow", intro_mode="fallback")
 
 if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")

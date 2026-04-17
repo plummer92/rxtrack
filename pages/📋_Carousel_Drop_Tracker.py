@@ -21,6 +21,8 @@ App.render_page_intro(
     "Track quantity loaded per Pyxis device at each scheduled carousel drop with the same updated shell used on the overview page.",
     kicker="Tools",
 )
+App.record_ui_debug_event("Carousel Drop Tracker", "shared_intro_loaded")
+App.render_ui_debugger("Carousel Drop Tracker", intro_mode="shared")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SCHEDULE DATA

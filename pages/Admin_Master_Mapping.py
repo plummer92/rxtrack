@@ -18,6 +18,8 @@ App.render_page_intro(
     "Manage operational mapping, cycle count variance inputs, and admin access from the shared control surface.",
     kicker="Tools",
 )
+App.record_ui_debug_event("Admin & Mapping", "shared_intro_loaded")
+App.render_ui_debugger("Admin & Mapping", intro_mode="shared")
 
 uploaded_file = st.file_uploader(
     "Upload Item Location Report CSV",

@@ -23,9 +23,13 @@ if hasattr(App, "render_page_intro"):
         "Executive-level technician performance analytics presented in the unified RxTrack interface.",
         kicker="Performance",
     )
+    App.record_ui_debug_event("Workforce Intelligence", "shared_intro_loaded")
+    App.render_ui_debugger("Workforce Intelligence", intro_mode="shared")
 else:
     st.header("📊 Workforce Intelligence Scorecard")
     st.caption("Executive-level technician performance analytics.")
+    App.record_ui_debug_event("Workforce Intelligence", "fallback_header_used")
+    App.render_ui_debugger("Workforce Intelligence", intro_mode="fallback")
 
 if 'start_date' not in st.session_state:
     st.info("👈 Select a date range on Overview first.")

@@ -20,6 +20,7 @@ import re
 import contextlib
 import io
 import warnings
+import json
 
 from sqlalchemy import create_engine
 import os
@@ -760,6 +761,49 @@ def render_page_intro(title, subtitle=None, kicker="Operations Intelligence"):
         """,
         unsafe_allow_html=True,
     )
+
+
+def ui_debug_enabled():
+    try:
+        qp = st.query_params
+        return str(qp.get("ui_debug", "0")).lower() in {"1", "true", "yes", "on"}
+    except Exception:
+        return False
+
+
+def record_ui_debug_event(page_name, event, **details):
+    if not ui_debug_enabled():
+        return
+    history = st.session_state.setdefault("_ui_debug_history", [])
+    history.append(
+        {
+            "page": page_name,
+            "event": event,
+            "details": details,
+        }
+    )
+    st.session_state["_ui_debug_history"] = history[-25:]
+
+
+def render_ui_debugger(page_name, intro_mode=None, extra=None):
+    if not ui_debug_enabled():
+        return
+    history = st.session_state.get("_ui_debug_history", [])
+    payload = {
+        "page": page_name,
+        "intro_mode": intro_mode,
+        "has_render_sidebar_chrome": "render_sidebar_chrome" in globals(),
+        "has_render_page_intro": "render_page_intro" in globals(),
+        "history_size": len(history),
+    }
+    if extra:
+        payload.update(extra)
+    with st.sidebar.expander("UI Debugger", expanded=True):
+        st.code(json.dumps(payload, indent=2), language="json")
+        if history:
+            st.caption("Recent UI events")
+            for item in reversed(history[-8:]):
+                st.write(f"- {item['page']}: {item['event']} {item['details']}")
 
 
 # --- SHARED SIDEBAR RENDERER ---

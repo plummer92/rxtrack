@@ -16,6 +16,8 @@ App.render_page_intro(
     "Deep-dive into specific medication history with technician and device filtering while keeping the new RxTrack page shell.",
     kicker="Tools",
 )
+App.record_ui_debug_event("Med Lookup", "shared_intro_loaded")
+App.render_ui_debugger("Med Lookup", intro_mode="shared")
 
 # -------------------------------------------------
 # 1️⃣ Load Medication List (Cached)

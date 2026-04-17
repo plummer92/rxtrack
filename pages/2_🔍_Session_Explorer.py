@@ -20,9 +20,13 @@ if hasattr(App, "render_page_intro"):
         "Analyze chronological work blocks across Pyxis and pharmacy systems in the same navigation shell as the overview.",
         kicker="Performance",
     )
+    App.record_ui_debug_event("Session Explorer", "shared_intro_loaded")
+    App.render_ui_debugger("Session Explorer", intro_mode="shared")
 else:
     st.header("🔍 Unified Session Explorer")
     st.caption("Analyze chronological work blocks across Pyxis and pharmacy systems.")
+    App.record_ui_debug_event("Session Explorer", "fallback_header_used")
+    App.render_ui_debugger("Session Explorer", intro_mode="fallback")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA LOADERS

@@ -17,9 +17,13 @@ if hasattr(App, "render_page_intro"):
         "Surface operational trends, outliers, and risk signals for the selected analysis window.",
         kicker="Tools",
     )
+    App.record_ui_debug_event("RxBrain", "shared_intro_loaded")
+    App.render_ui_debugger("RxBrain", intro_mode="shared")
 else:
     st.header("🧠 RxTrack Intelligence Engine")
     st.caption("Surface operational trends, outliers, and risk signals for the selected analysis window.")
+    App.record_ui_debug_event("RxBrain", "fallback_header_used")
+    App.render_ui_debugger("RxBrain", intro_mode="fallback")
 
 @st.cache_data(ttl=600)
 def load_all_data(start, end):

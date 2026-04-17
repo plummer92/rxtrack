@@ -21,6 +21,8 @@ App.render_page_intro(
     "Review row counts, date coverage, upload gaps, and quality signals across every table from the updated control shell.",
     kicker="Tools",
 )
+App.record_ui_debug_event("DB Health", "shared_intro_loaded")
+App.render_ui_debugger("DB Health", intro_mode="shared")
 
 today = date.today()
 

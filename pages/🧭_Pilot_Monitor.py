@@ -237,9 +237,13 @@ if hasattr(App, "render_page_intro"):
         "Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.",
         kicker="Core",
     )
+    App.record_ui_debug_event("Pilot Monitor", "shared_intro_loaded")
+    App.render_ui_debugger("Pilot Monitor", intro_mode="shared")
 else:
     st.header("🧭 Pilot Monitor")
     st.caption("Baseline versus pilot comparison for the 0500/0600 workflow redesign, with returns reconciliation as a stress signal.")
+    App.record_ui_debug_event("Pilot Monitor", "fallback_header_used")
+    App.render_ui_debugger("Pilot Monitor", intro_mode="fallback")
 
 default_pilot_start = global_start
 default_pilot_end = global_end

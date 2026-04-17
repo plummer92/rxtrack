@@ -16,9 +16,13 @@ if hasattr(App, "render_page_intro"):
         "Validate Pyxis unload workflow against pharmacy return and restock activity without dropping back into the old page layout.",
         kicker="Operations",
     )
+    App.record_ui_debug_event("Return Reconciliation", "shared_intro_loaded")
+    App.render_ui_debugger("Return Reconciliation", intro_mode="shared")
 else:
     st.header("🔄 Closed-Loop Return Integrity Engine")
     st.caption("Validate Pyxis unload workflow against pharmacy return and restock activity.")
+    App.record_ui_debug_event("Return Reconciliation", "fallback_header_used")
+    App.render_ui_debugger("Return Reconciliation", intro_mode="fallback")
 
 with st.spinner("Loading data..."):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)

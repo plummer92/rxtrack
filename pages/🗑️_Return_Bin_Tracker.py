@@ -19,9 +19,13 @@ if hasattr(App, "render_page_intro"):
         "Monitor empty-return-bin events per Pyxis device with visibility into coverage, recency, and operational gaps.",
         kicker="Operations",
     )
+    App.record_ui_debug_event("Return Bin Tracker", "shared_intro_loaded")
+    App.render_ui_debugger("Return Bin Tracker", intro_mode="shared")
 else:
     st.header("🗑️ Return Bin Tracker")
     st.caption("Monitor empty-return-bin events per Pyxis device with visibility into coverage, recency, and operational gaps.")
+    App.record_ui_debug_event("Return Bin Tracker", "fallback_header_used")
+    App.render_ui_debugger("Return Bin Tracker", intro_mode="fallback")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:

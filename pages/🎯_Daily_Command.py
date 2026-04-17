@@ -18,6 +18,8 @@ App.render_page_intro(
     f"Today is {date.today().strftime('%A, %B %d %Y')}. Run the day from one shared command center instead of the legacy page shell.",
     kicker="Operations",
 )
+App.record_ui_debug_event("Daily Command", "shared_intro_loaded")
+App.render_ui_debugger("Daily Command", intro_mode="shared")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS

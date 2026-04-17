@@ -20,8 +20,12 @@ if hasattr(App, "render_page_intro"):
         "Identify delay patterns, frequent offenders, and shift reliability without leaving the shared RxTrack shell.",
         kicker="Performance",
     )
+    App.record_ui_debug_event("Tardies", "shared_intro_loaded")
+    App.render_ui_debugger("Tardies", intro_mode="shared")
 else:
     st.header("⏰ Tardiness & Attendance Analytics")
+    App.record_ui_debug_event("Tardies", "fallback_header_used")
+    App.render_ui_debugger("Tardies", intro_mode="fallback")
 
 # Leadership Filter: Define significant tardiness
 grace_period = st.sidebar.slider(

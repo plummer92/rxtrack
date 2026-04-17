@@ -35,9 +35,13 @@ if hasattr(App, "render_page_intro"):
         f"Risk-scored cycle count compliance across a {COMPLIANCE_DAYS}-day window with technician accountability and carousel coverage.",
         kicker="Tools",
     )
+    App.record_ui_debug_event("Cycle Count Integrity", "shared_intro_loaded")
+    App.render_ui_debugger("Cycle Count Integrity", intro_mode="shared")
 else:
     st.header("📊 Cycle Count Integrity Dashboard")
     st.caption(f"Risk-scored cycle count compliance across a {COMPLIANCE_DAYS}-day window.")
+    App.record_ui_debug_event("Cycle Count Integrity", "fallback_header_used")
+    App.render_ui_debugger("Cycle Count Integrity", intro_mode="fallback")
 
 # ─────────────────────────────────────────────────────
 # DATA LOADERS
