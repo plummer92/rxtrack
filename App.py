@@ -595,9 +595,42 @@ def apply_global_styles():
         .block-container { padding-top: 1.35rem; padding-bottom: 2rem; }
         [data-testid="stSidebar"] {
             background:
-                radial-gradient(circle at top right, rgba(34, 197, 94, 0.15), transparent 30%),
-                linear-gradient(180deg, #f8fafc 0%, #eef6f0 100%);
-            border-right: 1px solid rgba(15, 23, 42, 0.08);
+                radial-gradient(circle at top right, rgba(34, 197, 94, 0.12), transparent 24%),
+                linear-gradient(180deg, #0f172a 0%, #111827 45%, #17212f 100%);
+            border-right: 1px solid rgba(148, 163, 184, 0.16);
+        }
+        [data-testid="stSidebar"] * {
+            color: #e5eef8;
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stRadio label,
+        [data-testid="stSidebar"] .stSelectbox label,
+        [data-testid="stSidebar"] .stDateInput label,
+        [data-testid="stSidebar"] .stSlider label,
+        [data-testid="stSidebar"] .stFileUploader label,
+        [data-testid="stSidebar"] .stCaptionContainer,
+        [data-testid="stSidebar"] small {
+            color: #dbe7f3 !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] a,
+        [data-testid="stSidebar"] [data-testid="stPageLink-NavLink"] {
+            color: #f8fafc !important;
+        }
+        [data-testid="stSidebar"] [data-testid="stPageLink-NavLink"] {
+            border-radius: 12px;
+            padding: 0.2rem 0.35rem;
+        }
+        [data-testid="stSidebar"] [data-testid="stPageLink-NavLink"]:hover {
+            background: rgba(148, 163, 184, 0.12);
+        }
+        [data-testid="stSidebar"] .stSelectbox > div > div,
+        [data-testid="stSidebar"] .stDateInput > div > div,
+        [data-testid="stSidebar"] .stFileUploader > div,
+        [data-testid="stSidebar"] .stMultiSelect > div > div {
+            background: rgba(15, 23, 42, 0.72);
+            border-color: rgba(148, 163, 184, 0.28);
+            color: #f8fafc;
         }
         .rx-shell {
             background: linear-gradient(135deg, #0f172a 0%, #1f2937 100%);
@@ -623,7 +656,7 @@ def apply_global_styles():
             font-weight: 800;
             text-transform: uppercase;
             letter-spacing: 0.08em;
-            color: #475569;
+            color: #93c5fd;
             margin: 14px 0 6px 0;
         }
         </style>
