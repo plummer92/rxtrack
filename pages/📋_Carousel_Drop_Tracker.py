@@ -12,10 +12,12 @@ _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: Non
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
 st.set_page_config(page_title="Carousel Drop Tracker", page_icon="ðŸ“‹", layout="wide")
-if hasattr(App, "render_sidebar_chrome"):
-    App.render_sidebar_chrome()
+if hasattr(App, "render_sidebar"):
+    start_date, end_date = App.render_sidebar()
 else:
-    App.render_sidebar()
+    App.render_sidebar_chrome()
+    start_date = date.today() - timedelta(days=14)
+    end_date = date.today()
 
 engine = App.engine
 
@@ -349,13 +351,82 @@ def load_all_events_for_date(sel_date):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_available_drop_dates(start_date, end_date):
+    """Return dates in the selected window that have either refill or pull activity."""
+    try:
+        sql = text("""
+            WITH refill_days AS (
+                SELECT DISTINCT dt::date AS activity_date
+                FROM events
+                WHERE dt::date BETWEEN :start_date AND :end_date
+                  AND event_type = 'Refill'
+                  AND UPPER(med_id) != 'PATCAS'
+            ),
+            pull_days AS (
+                SELECT DISTINCT dt::date AS activity_date
+                FROM pharmacy_orders
+                WHERE dt::date BETWEEN :start_date AND :end_date
+                  AND priority ILIKE '%pyxis%pull%'
+            )
+            SELECT DISTINCT activity_date
+            FROM (
+                SELECT activity_date FROM refill_days
+                UNION
+                SELECT activity_date FROM pull_days
+            ) days
+            ORDER BY activity_date
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={"start_date": str(start_date), "end_date": str(end_date)},
+            )
+        if df.empty:
+            return []
+        return [pd.to_datetime(value).date() for value in df["activity_date"].tolist()]
+    except Exception as e:
+        st.error(f"[load_available_drop_dates] {e}")
+        return []
+
+
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 # DATE SELECTOR
 # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
+available_dates = load_available_drop_dates(start_date, end_date)
+default_sel_date = available_dates[-1] if available_dates else end_date
+
+if "carousel_selected_date" not in st.session_state:
+    st.session_state.carousel_selected_date = default_sel_date
+elif st.session_state.carousel_selected_date not in available_dates and available_dates:
+    st.session_state.carousel_selected_date = default_sel_date
+elif not available_dates:
+    st.session_state.carousel_selected_date = end_date
+
 with st.sidebar:
     st.markdown("### ðŸ“… Select Drop Date")
-    sel_date = st.date_input("Date", value=date.today(), key="cdt_date")
+    st.caption(f"Window: **{start_date.strftime('%m/%d/%Y')}** to **{end_date.strftime('%m/%d/%Y')}**")
+    if available_dates:
+        sel_date = st.selectbox(
+            "Date",
+            options=available_dates,
+            index=available_dates.index(st.session_state.carousel_selected_date),
+            key="cdt_date",
+            format_func=lambda value: value.strftime("%m/%d/%Y (%A)"),
+        )
+        st.session_state.carousel_selected_date = sel_date
+    else:
+        sel_date = st.date_input(
+            "Date",
+            value=st.session_state.carousel_selected_date,
+            min_value=start_date,
+            max_value=end_date,
+            key="cdt_date_empty",
+        )
+        st.session_state.carousel_selected_date = sel_date
+        st.warning("No drop activity found in the selected window.")
     st.caption(f"Day: **{sel_date.strftime('%A')}**")
     is_weekend = sel_date.weekday() >= 5
     st.info("Sa-Su schedule active." if is_weekend else "M-F schedule active." +
