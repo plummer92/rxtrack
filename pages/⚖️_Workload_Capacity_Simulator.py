@@ -30,13 +30,13 @@ TEMPLATE_DEFAULTS = {
             {"role": "IV Room", "start": "07:00", "end": "15:30", "available_min": 450},
         ],
         "allocations": {
-            "scheduled_pyxis_route": {"0500 Tech": 50, "0600 Tech": 50, "Packager": 0, "IV Room": 0},
-            "special_unit_pyxis_route": {"0500 Tech": 40, "0600 Tech": 60, "Packager": 0, "IV Room": 0},
+            "scheduled_pyxis_route": {"0500 Tech": 45, "0600 Tech": 55, "Packager": 0, "IV Room": 0},
+            "special_unit_pyxis_route": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
             "patient_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 60, "IV Room": 0},
             "stockout_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 70, "IV Room": 0},
             "transfer_discharge_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 60, "IV Room": 0},
             "routine_patient_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 70, "IV Room": 0},
-            "return_processing": {"0500 Tech": 55, "0600 Tech": 45, "Packager": 0, "IV Room": 0},
+            "return_processing": {"0500 Tech": 50, "0600 Tech": 50, "Packager": 0, "IV Room": 0},
             "cartfill_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 80, "IV Room": 0},
             "packaging_support": {"0500 Tech": 0, "0600 Tech": 10, "Packager": 90, "IV Room": 0},
             "code_cart_replenishment": {"0500 Tech": 0, "0600 Tech": 25, "Packager": 75, "IV Room": 0},
@@ -50,16 +50,16 @@ TEMPLATE_DEFAULTS = {
             {"role": "IV Room", "start": "07:00", "end": "15:30", "available_min": 450},
         ],
         "allocations": {
-            "scheduled_pyxis_route": {"0500 Tech": 85, "0600 Tech": 15, "Packager": 0, "IV Room": 0},
-            "special_unit_pyxis_route": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
+            "scheduled_pyxis_route": {"0500 Tech": 100, "0600 Tech": 0, "Packager": 0, "IV Room": 0},
+            "special_unit_pyxis_route": {"0500 Tech": 100, "0600 Tech": 0, "Packager": 0, "IV Room": 0},
             "patient_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
             "stockout_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
             "transfer_discharge_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
             "routine_patient_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
-            "return_processing": {"0500 Tech": 10, "0600 Tech": 90, "Packager": 0, "IV Room": 0},
+            "return_processing": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
             "cartfill_priority_delivery": {"0500 Tech": 0, "0600 Tech": 0, "Packager": 100, "IV Room": 0},
             "packaging_support": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
-            "code_cart_replenishment": {"0500 Tech": 10, "0600 Tech": 90, "Packager": 0, "IV Room": 0},
+            "code_cart_replenishment": {"0500 Tech": 0, "0600 Tech": 100, "Packager": 0, "IV Room": 0},
         },
     },
     "0700/1430 Delivery Lane": {
@@ -408,6 +408,43 @@ def build_role_df(template_name):
     return pd.DataFrame(TEMPLATE_DEFAULTS[template_name]["roles"])
 
 
+def build_template_snapshot(template_name, task_frames):
+    role_df = build_role_df(template_name)
+    assumptions_df = build_assumptions(task_frames)
+    allocation_df = build_allocation_df(template_name)
+    capacity_df, _ = summarize_role_capacity(role_df, assumptions_df, allocation_df, task_frames)
+    return capacity_df
+
+
+def build_delta_df(baseline_df, scenario_df):
+    merge_cols = ["Role", "Average Day Min", "Busy Day Min", "Average Util %", "Busy Util %", "Peak Hour Util %"]
+    baseline = baseline_df[merge_cols].rename(
+        columns={
+            "Average Day Min": "Baseline Avg Min",
+            "Busy Day Min": "Baseline Busy Min",
+            "Average Util %": "Baseline Avg Util %",
+            "Busy Util %": "Baseline Busy Util %",
+            "Peak Hour Util %": "Baseline Peak Util %",
+        }
+    )
+    scenario = scenario_df[merge_cols].rename(
+        columns={
+            "Average Day Min": "Scenario Avg Min",
+            "Busy Day Min": "Scenario Busy Min",
+            "Average Util %": "Scenario Avg Util %",
+            "Busy Util %": "Scenario Busy Util %",
+            "Peak Hour Util %": "Scenario Peak Util %",
+        }
+    )
+    delta = baseline.merge(scenario, on="Role", how="outer").fillna(0)
+    delta["Avg Min Delta"] = delta["Scenario Avg Min"] - delta["Baseline Avg Min"]
+    delta["Busy Min Delta"] = delta["Scenario Busy Min"] - delta["Baseline Busy Min"]
+    delta["Avg Util Delta %"] = delta["Scenario Avg Util %"] - delta["Baseline Avg Util %"]
+    delta["Busy Util Delta %"] = delta["Scenario Busy Util %"] - delta["Baseline Busy Util %"]
+    delta["Peak Util Delta %"] = delta["Scenario Peak Util %"] - delta["Baseline Peak Util %"]
+    return delta
+
+
 def summarize_role_capacity(role_df, assumptions_df, allocation_df, task_frames):
     assumption_lookup = assumptions_df.set_index("task_key").to_dict("index")
     allocation_lookup = allocation_df.set_index("task_key")
@@ -512,6 +549,7 @@ with st.spinner("Loading historical workload signals..."):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
 
 task_frames = build_task_frames(df_events, df_pharm)
+baseline_capacity_df = build_template_snapshot("Current State", task_frames)
 
 with st.sidebar:
     st.divider()
@@ -539,6 +577,11 @@ if template_name == "1430 Delivery + 2 Overnights":
         "Starting assumption for this template: `0700 Delivery` and `1430 Delivery` own the non-Pyxis lane, "
         "`2100 Overnight A/B` absorb most overnight packaging-style work plus part of returns, and the "
         "`0500/0600/1430 Pyxis` team stays focused on scheduled Pyxis-side work."
+    )
+elif template_name == "0500/0600 Redesign":
+    st.caption(
+        "Starting assumption for this template: `0500 Tech` absorbs all current `0600` delivery routes, "
+        "`0600 Tech` shifts into returns and packaging/support, and `0500 Tech` no longer spends afternoon time returning meds to carousel."
     )
 
 with st.expander("1. Role Setup", expanded=True):
@@ -603,6 +646,7 @@ with st.expander("3. Task Allocation by Role", expanded=True):
     st.caption("A task can be split across roles. If total assigned is under 100%, that portion of work is effectively unstaffed in the scenario.")
 
 capacity_df, unassigned_minutes = summarize_role_capacity(edited_roles, edited_assumptions, edited_allocations, task_frames)
+delta_df = build_delta_df(baseline_capacity_df, capacity_df)
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Historical Days Loaded", f"{len(pd.date_range(start_date, end_date)):,}")
@@ -625,6 +669,41 @@ st.dataframe(
         "Peak Hour Util %": st.column_config.NumberColumn(format="%.1f"),
     },
 )
+
+if template_name != "Current State":
+    st.subheader("Current vs Proposed")
+    st.caption(
+        "This compares the selected scenario against the built-in `Current State` template so you can see exactly how many minutes move between roles."
+    )
+    st.dataframe(
+        delta_df,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Baseline Avg Min": st.column_config.NumberColumn(format="%.1f"),
+            "Scenario Avg Min": st.column_config.NumberColumn(format="%.1f"),
+            "Avg Min Delta": st.column_config.NumberColumn(format="%+.1f"),
+            "Baseline Busy Min": st.column_config.NumberColumn(format="%.1f"),
+            "Scenario Busy Min": st.column_config.NumberColumn(format="%.1f"),
+            "Busy Min Delta": st.column_config.NumberColumn(format="%+.1f"),
+            "Baseline Avg Util %": st.column_config.NumberColumn(format="%.1f"),
+            "Scenario Avg Util %": st.column_config.NumberColumn(format="%.1f"),
+            "Avg Util Delta %": st.column_config.NumberColumn(format="%+.1f"),
+            "Baseline Busy Util %": st.column_config.NumberColumn(format="%.1f"),
+            "Scenario Busy Util %": st.column_config.NumberColumn(format="%.1f"),
+            "Busy Util Delta %": st.column_config.NumberColumn(format="%+.1f"),
+            "Baseline Peak Util %": st.column_config.NumberColumn(format="%.1f"),
+            "Scenario Peak Util %": st.column_config.NumberColumn(format="%.1f"),
+            "Peak Util Delta %": st.column_config.NumberColumn(format="%+.1f"),
+        },
+    )
+
+    focus_roles = delta_df[delta_df["Role"].isin(["0500 Tech", "0600 Tech"])].copy()
+    if not focus_roles.empty:
+        st.caption(
+            "For your current test, focus on `Avg Min Delta` and `Busy Min Delta` for `0500 Tech` and `0600 Tech`. "
+            "A positive number means that role's day gets longer than it is today."
+        )
 
 tab1, tab2, tab3 = st.tabs(["Role Breakdown", "Observed Signals", "Exports"])
 
