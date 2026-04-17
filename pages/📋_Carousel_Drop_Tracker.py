@@ -693,6 +693,26 @@ def build_drop_timing_summary(drop, sel_date, df_pulls, df_refills):
     return summary, detail_df, pull_win, refill_win
 
 
+@st.cache_data(ttl=300)
+def build_window_trend_df(date_values):
+    trend_rows = []
+    for sel_day in date_values:
+        pulls = load_pyxis_pulls(sel_day)
+        refills = load_refills(sel_day)
+        for drop in get_schedule(sel_day):
+            summary, _, _, _ = build_drop_timing_summary(drop, sel_day, pulls, refills)
+            trend_rows.append(
+                {
+                    "Date": sel_day,
+                    "Weekday": pd.Timestamp(sel_day).strftime("%A"),
+                    **summary,
+                }
+            )
+    if not trend_rows:
+        return pd.DataFrame()
+    return pd.DataFrame(trend_rows)
+
+
 drop_summaries = []
 drop_details = {}
 drop_pull_windows = {}
@@ -705,6 +725,7 @@ for drop in schedule:
     drop_refill_windows[drop["label"]] = refill_win
 
 summary_df = pd.DataFrame(drop_summaries)
+trend_df = build_window_trend_df(tuple(available_dates))
 
 st.info(
     "This stripped-down view answers two questions first: how much pull demand sits on each drop, "
@@ -729,7 +750,7 @@ k4.metric("Avg Pull Completion", _format_duration(avg_completion))
 if summary_df.empty or day_pull_lines == 0:
     st.warning("No pull activity was found for this date in Carousel Drop Tracker.")
 else:
-    overview_tab, detail_tab, raw_tab = st.tabs(["Drop Overview", "Device Breakdown", "Raw Activity"])
+    overview_tab, trend_tab, detail_tab, raw_tab = st.tabs(["Drop Overview", "Across Days", "Device Breakdown", "Raw Activity"])
 
     with overview_tab:
         st.markdown("### Drop Overview")
@@ -786,6 +807,118 @@ else:
             completion_fig.update_traces(textposition="outside")
             completion_fig.update_layout(showlegend=False, margin=dict(l=0, r=0, t=60, b=0), yaxis_title="Minutes")
             st.plotly_chart(completion_fig, width="stretch")
+
+    with trend_tab:
+        st.markdown("### Across Days")
+        st.caption("Use this to spot high days, low days, and the typical median level across the selected window.")
+
+        if trend_df.empty:
+            st.info("No multi-day pull trend data was found in the selected window.")
+        else:
+            metric_options = {
+                "Pull Demand": "Pull Demand",
+                "Pull Completion": "Pull Completion Minutes",
+                "Pull Span": "Pull Span Minutes",
+                "Pull Lines": "Pull Lines",
+            }
+            selected_metric_label = st.radio(
+                "Trend metric",
+                options=list(metric_options.keys()),
+                horizontal=True,
+                key="carousel_trend_metric",
+            )
+            metric_col = metric_options[selected_metric_label]
+
+            trend_work = trend_df.copy()
+            trend_work["DateLabel"] = pd.to_datetime(trend_work["Date"]).dt.strftime("%m/%d")
+
+            daily_stats = (
+                trend_work.groupby("Date", as_index=False)[metric_col]
+                .agg(["max", "min", "median"])
+                .reset_index()
+                .rename(columns={"max": "Daily High", "min": "Daily Low", "median": "Daily Median"})
+            )
+            daily_stats["DateLabel"] = pd.to_datetime(daily_stats["Date"]).dt.strftime("%m/%d")
+
+            trend_table = trend_work.pivot_table(
+                index=["Date", "Weekday"],
+                columns="Drop",
+                values=metric_col,
+                aggfunc="sum",
+            ).reset_index()
+            trend_table = trend_table.merge(daily_stats[["Date", "Daily High", "Daily Low", "Daily Median"]], on="Date", how="left")
+            trend_table["Date"] = pd.to_datetime(trend_table["Date"]).dt.strftime("%m/%d/%Y")
+            st.dataframe(trend_table, hide_index=True, width="stretch")
+
+            trend_fig = go.Figure()
+            for drop_name in trend_work["Drop"].dropna().unique():
+                drop_slice = trend_work[trend_work["Drop"] == drop_name].sort_values("Date")
+                trend_fig.add_trace(
+                    go.Scatter(
+                        x=drop_slice["DateLabel"],
+                        y=drop_slice[metric_col],
+                        mode="lines+markers",
+                        name=drop_name,
+                    )
+                )
+
+            trend_fig.add_trace(
+                go.Scatter(
+                    x=daily_stats["DateLabel"],
+                    y=daily_stats["Daily Median"],
+                    mode="lines",
+                    name="Median",
+                    line=dict(color="#facc15", width=3, dash="dash"),
+                )
+            )
+            trend_fig.add_trace(
+                go.Scatter(
+                    x=daily_stats["DateLabel"],
+                    y=daily_stats["Daily High"],
+                    mode="lines",
+                    name="Daily High",
+                    line=dict(color="#22c55e", width=2, dash="dot"),
+                )
+            )
+            trend_fig.add_trace(
+                go.Scatter(
+                    x=daily_stats["DateLabel"],
+                    y=daily_stats["Daily Low"],
+                    mode="lines",
+                    name="Daily Low",
+                    line=dict(color="#ef4444", width=2, dash="dot"),
+                )
+            )
+            trend_fig.update_layout(
+                title=f"{selected_metric_label} Across Days",
+                xaxis_title="Date",
+                yaxis_title=selected_metric_label,
+                margin=dict(l=0, r=0, t=60, b=0),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(trend_fig, width="stretch")
+
+            high_row = trend_work.loc[trend_work[metric_col].idxmax()] if not trend_work.empty else None
+            low_row = trend_work.loc[trend_work[metric_col].idxmin()] if not trend_work.empty else None
+            median_value = trend_work[metric_col].median() if not trend_work.empty else np.nan
+
+            h1, h2, h3 = st.columns(3)
+            if high_row is not None:
+                h1.metric(
+                    "Highest Observed",
+                    f"{high_row[metric_col]:,.0f}" if selected_metric_label in {"Pull Demand", "Pull Lines"} else _format_duration(high_row[metric_col]),
+                    f"{high_row['Drop']} on {pd.Timestamp(high_row['Date']).strftime('%m/%d')}",
+                )
+            if low_row is not None:
+                h2.metric(
+                    "Lowest Observed",
+                    f"{low_row[metric_col]:,.0f}" if selected_metric_label in {"Pull Demand", "Pull Lines"} else _format_duration(low_row[metric_col]),
+                    f"{low_row['Drop']} on {pd.Timestamp(low_row['Date']).strftime('%m/%d')}",
+                )
+            h3.metric(
+                "Median Across Window",
+                f"{median_value:,.0f}" if selected_metric_label in {"Pull Demand", "Pull Lines"} else _format_duration(median_value),
+            )
 
     with detail_tab:
         st.markdown("### Device Breakdown")
