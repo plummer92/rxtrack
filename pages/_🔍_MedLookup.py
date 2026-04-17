@@ -1,9 +1,15 @@
 import streamlit as st
 import pandas as pd
-from App import engine, normalize_name, render_sidebar_chrome
+import App
 
 st.set_page_config(page_title="Med Audit Trail", page_icon="🔍", layout="wide")
-render_sidebar_chrome()
+if hasattr(App, "render_sidebar_chrome"):
+    App.render_sidebar_chrome()
+else:
+    App.render_sidebar()
+
+engine = App.engine
+normalize_name = App.normalize_name
 
 st.header("🔍 Advanced Medication Audit")
 st.caption("Deep-dive into specific medication history with technician and device filtering.")

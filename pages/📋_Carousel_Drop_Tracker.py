@@ -6,10 +6,15 @@ import plotly.graph_objects as go
 import io
 from datetime import date, timedelta
 from sqlalchemy import text
-from App import engine, render_sidebar_chrome
+import App
 
 st.set_page_config(page_title="Carousel Drop Tracker", page_icon="📋", layout="wide")
-render_sidebar_chrome()
+if hasattr(App, "render_sidebar_chrome"):
+    App.render_sidebar_chrome()
+else:
+    App.render_sidebar()
+
+engine = App.engine
 
 st.header("📋 Carousel Drop Tracker")
 st.caption("Track quantity loaded per Pyxis device at each scheduled carousel drop. Select a date to see that day's drops.")

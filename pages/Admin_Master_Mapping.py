@@ -1,10 +1,17 @@
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
-from App import engine, load_admin_users, _DEFAULT_ADMIN_USERS, render_sidebar_chrome
+import App
 
 st.set_page_config(page_title="Admin & Mapping", page_icon="⚙️", layout="wide")
-render_sidebar_chrome()
+if hasattr(App, "render_sidebar_chrome"):
+    App.render_sidebar_chrome()
+else:
+    App.render_sidebar()
+
+engine = App.engine
+load_admin_users = App.load_admin_users
+_DEFAULT_ADMIN_USERS = App._DEFAULT_ADMIN_USERS
 
 st.header("📥 Master Carousel Mapping Upload")
 st.caption("Upload Item Location Report to update master carousel assignments.")

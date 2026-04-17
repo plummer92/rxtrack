@@ -3,10 +3,15 @@ import pandas as pd
 import urllib.parse
 from datetime import date, datetime, timedelta
 from sqlalchemy import text
-from App import engine, render_sidebar_chrome
+import App
 
 st.set_page_config(page_title="Daily Command", page_icon="🎯", layout="wide")
-render_sidebar_chrome()
+if hasattr(App, "render_sidebar_chrome"):
+    App.render_sidebar_chrome()
+else:
+    App.render_sidebar()
+
+engine = App.engine
 
 st.header("🎯 Daily Command")
 st.caption(f"Today is **{date.today().strftime('%A, %B %d %Y')}**")
