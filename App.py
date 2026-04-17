@@ -745,6 +745,7 @@ def render_sidebar_chrome():
         """, unsafe_allow_html=True)
         render_page_links()
         st.divider()
+        render_ui_debug_toggle()
 
 
 def render_page_intro(title, subtitle=None, kicker="Operations Intelligence"):
@@ -764,11 +765,21 @@ def render_page_intro(title, subtitle=None, kicker="Operations Intelligence"):
 
 
 def ui_debug_enabled():
+    query_enabled = False
     try:
         qp = st.query_params
-        return str(qp.get("ui_debug", "0")).lower() in {"1", "true", "yes", "on"}
+        query_enabled = str(qp.get("ui_debug", "0")).lower() in {"1", "true", "yes", "on"}
     except Exception:
-        return False
+        query_enabled = False
+    if query_enabled:
+        st.session_state["_ui_debug_enabled"] = True
+    return bool(st.session_state.get("_ui_debug_enabled", False))
+
+
+def render_ui_debug_toggle():
+    current = ui_debug_enabled()
+    enabled = st.toggle("UI Debug Mode", value=current, key="rxtrack_ui_debug_toggle")
+    st.session_state["_ui_debug_enabled"] = enabled
 
 
 def record_ui_debug_event(page_name, event, **details):
@@ -827,6 +838,7 @@ def render_sidebar():
         render_page_links()
 
         st.divider()
+        render_ui_debug_toggle()
         st.markdown("### Analysis Window")
 
         filter_mode = st.radio(
