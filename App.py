@@ -1144,7 +1144,7 @@ if _is_main:
         u_type = st.selectbox("File Type:", [
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
-            "IV Room Workload"
+            "IV Room Workload", "IV Room Batching"
         ])
         uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
         if uploaded and st.button(f"Process {u_type}"):
@@ -1218,7 +1218,7 @@ if _is_main:
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Detailed Inventory")
 
-                elif u_type == "IV Room Workload":
+                elif u_type in {"IV Room Workload", "IV Room Batching"}:
                     clean = clean_iv_room_report(raw)
                     sql = """INSERT INTO iv_room_workload
                              (pk, facility_name, order_lot_number, compound_type, num_preparations, dose_number,
@@ -1230,7 +1230,7 @@ if _is_main:
                                      %(prepare_tat_minutes)s, %(prepared_by)s, %(approved_by)s,
                                      %(secondary_approved_by)s)
                              ON CONFLICT (pk) DO NOTHING;"""
-                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="IV Room Workload")
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name=u_type)
 
                 # 3. Success & Refresh
                 if clean is not None:

@@ -22,7 +22,7 @@ start_date, end_date = render_sidebar()
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "IV Room Workload",
-        "Track sterile compounding demand, STAT pressure, technician throughput, and preparation turnaround in the same RxTrack shell.",
+        "Track patient-order and batch compounding demand, STAT pressure, technician throughput, and preparation turnaround in the same RxTrack shell.",
         kicker="Operations",
     )
     _debug_event("IV Room", "shared_intro_loaded")
@@ -37,7 +37,7 @@ with st.spinner("Loading IV room workload..."):
     df_iv = load_iv_room_data(start_date, end_date)
 
 if df_iv.empty:
-    st.info("No IV room workload found for this date range. Upload an `IV Room Workload` file from the sidebar to get started.")
+    st.info("No IV room workload found for this date range. Upload an `IV Room Workload` or `IV Room Batching` file from the sidebar to get started.")
     st.stop()
 
 work = df_iv.copy()
@@ -47,15 +47,20 @@ work["completed_on"] = pd.to_datetime(work["completed_on"], errors="coerce")
 work["prepare_tat_minutes"] = pd.to_numeric(work["prepare_tat_minutes"], errors="coerce")
 work["num_preparations"] = pd.to_numeric(work["num_preparations"], errors="coerce").fillna(0)
 work["priority_name"] = work["priority_name"].fillna("").astype(str).str.strip()
+work["compound_type"] = work["compound_type"].fillna("Unspecified").astype(str).str.strip().replace("", "Unspecified")
 work["prepared_by"] = work["prepared_by"].fillna("Unassigned").astype(str).str.strip()
 work["approved_by"] = work["approved_by"].fillna("Unassigned").astype(str).str.strip()
 
 facility_options = sorted(work["facility_name"].dropna().unique().tolist())
 selected_facilities = st.multiselect("Facility", facility_options, default=facility_options)
+compound_options = sorted(work["compound_type"].dropna().unique().tolist())
+selected_compounds = st.multiselect("Compound Type", compound_options, default=compound_options)
 
 filtered = work.copy()
 if selected_facilities:
     filtered = filtered[filtered["facility_name"].isin(selected_facilities)]
+if selected_compounds:
+    filtered = filtered[filtered["compound_type"].isin(selected_compounds)]
 
 if filtered.empty:
     st.warning("No IV room records match the current filters.")
@@ -220,9 +225,58 @@ with tat_col:
         fig_tat.update_layout(height=360)
         st.plotly_chart(fig_tat, use_container_width=True)
 
+mix_col, batch_col = st.columns(2)
+
+with mix_col:
+    st.subheader("Compound Type Mix")
+    compound_mix = (
+        filtered.groupby("compound_type", as_index=False)
+        .agg(
+            iv_orders=("pk", "count"),
+            preparations=("num_preparations", "sum"),
+        )
+        .sort_values("preparations", ascending=False)
+    )
+    fig_mix = px.bar(
+        compound_mix,
+        x="compound_type",
+        y="preparations",
+        hover_data=["iv_orders"],
+        labels={"compound_type": "", "preparations": "Preparations"},
+        color="compound_type",
+    )
+    fig_mix.update_layout(height=340, showlegend=False)
+    st.plotly_chart(fig_mix, width="stretch")
+
+with batch_col:
+    st.subheader("Batching Summary")
+    batch_only = filtered[filtered["compound_type"].str.upper().eq("BATCH")].copy()
+    if batch_only.empty:
+        st.info("No batch records are in the current filter window.")
+    else:
+        batch_summary = (
+            batch_only.groupby("drug_name", as_index=False)
+            .agg(
+                batch_orders=("pk", "count"),
+                batch_preparations=("num_preparations", "sum"),
+                median_tat=("prepare_tat_minutes", "median"),
+            )
+            .sort_values(["batch_preparations", "batch_orders"], ascending=False)
+            .head(12)
+        )
+        st.dataframe(
+            batch_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "batch_preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+                "median_tat": st.column_config.NumberColumn("Median TAT (min)", format="%.1f"),
+            },
+        )
+
 st.subheader("IV Room Summary Table")
 summary = (
-    filtered.groupby("prepared_by", as_index=False)
+    filtered.groupby(["prepared_by", "compound_type"], as_index=False)
     .agg(
         iv_orders=("pk", "count"),
         preparations=("num_preparations", "sum"),
