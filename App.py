@@ -126,6 +126,24 @@ def init_db():
             pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT,
             unit_cost FLOAT, current_count FLOAT, pocket_location TEXT
         );""",
+        """CREATE TABLE IF NOT EXISTS iv_room_workload (
+            pk TEXT PRIMARY KEY,
+            facility_name TEXT,
+            order_lot_number TEXT,
+            compound_type TEXT,
+            num_preparations FLOAT,
+            dose_number TEXT,
+            drug_name TEXT,
+            order_date DATE,
+            ordered_time TEXT,
+            order_dt TIMESTAMP,
+            completed_on TIMESTAMP,
+            priority_name TEXT,
+            prepare_tat_minutes FLOAT,
+            prepared_by TEXT,
+            approved_by TEXT,
+            secondary_approved_by TEXT
+        );""",
         """CREATE TABLE IF NOT EXISTS admin_users (
             username TEXT PRIMARY KEY,
             display_name TEXT,
@@ -473,6 +491,70 @@ def clean_detailed_inventory(df):
     df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
     return df[required + ['pk']]
 
+
+def clean_iv_room_report(df):
+    df = df.copy()
+    colmap = {
+        "Facility Name": "facility_name",
+        "Order/LOT Number": "order_lot_number",
+        "Compound Type": "compound_type",
+        "# of Preparations": "num_preparations",
+        "Dose Number": "dose_number",
+        "Drug Name": "drug_name",
+        "Order Date": "order_date",
+        "Ordered Time": "ordered_time",
+        "Completed On": "completed_on",
+        "Priority Name": "priority_name",
+        "Prepare TAT Minutes": "prepare_tat_minutes",
+        "Prepared By": "prepared_by",
+        "Approved By": "approved_by",
+        "Secondary Approved By": "secondary_approved_by",
+    }
+    df.rename(columns=colmap, inplace=True)
+
+    required = list(colmap.values())
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    for col in ["facility_name", "order_lot_number", "compound_type", "dose_number", "drug_name",
+                "ordered_time", "priority_name", "prepared_by", "approved_by", "secondary_approved_by"]:
+        df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].replace({"": None, "nan": None, "None": None})
+
+    df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce").dt.date
+    df["ordered_time"] = df["ordered_time"].astype(str).str.strip()
+    df["ordered_time"] = df["ordered_time"].replace({"": None, "nan": None, "None": None})
+    df["order_dt"] = pd.to_datetime(
+        df["order_date"].astype(str) + " " + df["ordered_time"].fillna("00:00"),
+        errors="coerce",
+    )
+
+    df["completed_on"] = pd.to_datetime(df["completed_on"], errors="coerce")
+    df["num_preparations"] = pd.to_numeric(df["num_preparations"], errors="coerce").fillna(1)
+    df["prepare_tat_minutes"] = pd.to_numeric(df["prepare_tat_minutes"], errors="coerce")
+
+    df.dropna(subset=["order_date"], inplace=True)
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join(
+                [
+                    str(row.get("facility_name") or ""),
+                    str(row.get("order_lot_number") or ""),
+                    str(row.get("drug_name") or ""),
+                    str(row.get("order_date") or ""),
+                    str(row.get("ordered_time") or ""),
+                    str(row.get("dose_number") or ""),
+                ]
+            ).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+
+    df = df.astype(object)
+    df = df.where(pd.notna(df), None)
+    return df[required + ["order_dt", "pk"]]
+
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
@@ -549,6 +631,41 @@ def load_data(start_date, end_date):
 
     return df, results["config"], results["pharm"], results["schedule"], results["attendance"]
 
+
+@st.cache_data(ttl=300)
+def load_iv_room_data(start_date, end_date):
+    query = """
+        SELECT
+            pk,
+            facility_name,
+            order_lot_number,
+            compound_type,
+            num_preparations,
+            dose_number,
+            drug_name,
+            order_date,
+            ordered_time,
+            order_dt,
+            completed_on,
+            priority_name,
+            prepare_tat_minutes,
+            prepared_by,
+            approved_by,
+            secondary_approved_by
+        FROM iv_room_workload
+        WHERE order_date BETWEEN %s AND %s
+        ORDER BY order_dt, order_lot_number
+    """
+    try:
+        with db_cursor() as (conn, cur):
+            df = pd.read_sql(query, conn, params=(start_date, end_date))
+        for col in ["order_date", "order_dt", "completed_on"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 def get_stats_range():
     sql = """
         WITH all_dates AS (
@@ -559,6 +676,8 @@ def get_stats_range():
             SELECT dt as d FROM staff_schedule WHERE dt IS NOT NULL
             UNION ALL
             SELECT dt_date as d FROM attendance_punches WHERE dt_date IS NOT NULL
+            UNION ALL
+            SELECT order_date as d FROM iv_room_workload WHERE order_date IS NOT NULL
         )
         SELECT 
             (SELECT COUNT(*) FROM events),
@@ -713,6 +832,7 @@ def render_page_links():
 
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
     st.page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
+    st.page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
     st.page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
     st.page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
     st.page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
@@ -1013,7 +1133,8 @@ if _is_main:
         st.subheader("📤 Ingest Data")
         u_type = st.selectbox("File Type:", [
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
-            "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking"
+            "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
+            "IV Room Workload"
         ])
         uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
         if uploaded and st.button(f"Process {u_type}"):
@@ -1086,6 +1207,20 @@ if _is_main:
                                      %(unit_cost)s, %(current_count)s, %(pocket_location)s)
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Detailed Inventory")
+
+                elif u_type == "IV Room Workload":
+                    clean = clean_iv_room_report(raw)
+                    sql = """INSERT INTO iv_room_workload
+                             (pk, facility_name, order_lot_number, compound_type, num_preparations, dose_number,
+                              drug_name, order_date, ordered_time, order_dt, completed_on, priority_name,
+                              prepare_tat_minutes, prepared_by, approved_by, secondary_approved_by)
+                             VALUES (%(pk)s, %(facility_name)s, %(order_lot_number)s, %(compound_type)s,
+                                     %(num_preparations)s, %(dose_number)s, %(drug_name)s, %(order_date)s,
+                                     %(ordered_time)s, %(order_dt)s, %(completed_on)s, %(priority_name)s,
+                                     %(prepare_tat_minutes)s, %(prepared_by)s, %(approved_by)s,
+                                     %(secondary_approved_by)s)
+                             ON CONFLICT (pk) DO NOTHING;"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="IV Room Workload")
 
                 # 3. Success & Refresh
                 if clean is not None:
