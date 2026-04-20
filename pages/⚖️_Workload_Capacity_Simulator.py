@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 
 import App
+from ops_simulator import build_recommendations, build_workload_plan, calculate_workload_summary
 
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
@@ -539,7 +540,7 @@ def build_role_task_breakdown(role_name, role_df, assumptions_df, allocation_df,
     return pd.DataFrame(rows).sort_values("Busy Day Min", ascending=False)
 
 
-st.set_page_config(page_title="Workload Capacity Simulator", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="RxTrack Ops Simulator", page_icon="⚖️", layout="wide")
 
 load_data = App.load_data
 render_sidebar = App.render_sidebar
@@ -548,15 +549,15 @@ start_date, end_date = render_sidebar()
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
-        "Workload Capacity Simulator",
-        "Test historical workload against proposed staffing models so role design decisions stay inside the same modern RxTrack shell.",
-        kicker="Core",
+        "RxTrack Ops Simulator",
+        "Model workload, staffing capacity, and delay risk from real historical pharmacy signals without leaving the existing RxTrack shell.",
+        kicker="Core Simulation",
     )
     _debug_event("Capacity Simulator", "shared_intro_loaded")
     _debug_panel("Capacity Simulator", intro_mode="shared")
 else:
-    st.header("⚖️ Workload Capacity Simulator")
-    st.caption("Test historical workload against proposed staffing models.")
+    st.header("⚖️ RxTrack Ops Simulator")
+    st.caption("Model workload, staffed capacity, and delay risk from historical pharmacy operations signals.")
     _debug_event("Capacity Simulator", "fallback_header_used")
     _debug_panel("Capacity Simulator", intro_mode="fallback")
 
@@ -574,17 +575,38 @@ with st.sidebar:
         index=0,
         help="Start with a predefined staffing model, then edit role times and allocation shares below.",
     )
+    demand_basis = st.radio(
+        "Demand Basis",
+        options=["Historical Average", "Historical Busy"],
+        horizontal=False,
+        help="Choose whether the simulator should size workload from a normal day or a heavier historical day.",
+    )
+    demand_multiplier = st.slider(
+        "Demand Multiplier",
+        min_value=0.5,
+        max_value=2.0,
+        value=1.0,
+        step=0.05,
+        help="Scale expected workload up or down without overwriting the underlying historical assumptions.",
+    )
+    reserve_pct = st.slider(
+        "Capacity Reserve %",
+        min_value=0,
+        max_value=30,
+        value=10,
+        step=5,
+        help="Protect a portion of staffed capacity for interruptions, breaks, handoffs, and real-life pharmacy noise.",
+    )
 
 role_df = build_role_df(template_name)
 assumptions_df = build_assumptions(task_frames)
 allocation_df = build_allocation_df(template_name)
 
 st.info(
-    "Use the editors below to tune time assumptions and task shares. The simulator uses your selected date window as the historical sample."
+    "This Phase 1 simulator uses your selected date window to prefill task volume assumptions, then compares modeled workload against staffed capacity."
 )
 st.caption(
-    "Task lanes are split into `Pyxis route work` versus `patient/cartfill delivery work`. "
-    "The starter templates assume `0500/0600` stay on Pyxis routes, while `0700/1430 Delivery` own patient-priority, stockout, transfer/discharge, and cartfill lanes."
+    "Use the scenario controls in the sidebar for quick what-if testing, then refine the role setup and task assumptions below when you want a more exact model."
 )
 
 if template_name == "1430 Delivery + 2 Overnights":
@@ -662,12 +684,81 @@ with st.expander("3. Task Allocation by Role", expanded=True):
 
 capacity_df, unassigned_minutes = summarize_role_capacity(edited_roles, edited_assumptions, edited_allocations, task_frames)
 delta_df = build_delta_df(baseline_capacity_df, capacity_df)
+demand_mode = "busy" if demand_basis == "Historical Busy" else "avg"
+workload_df = build_workload_plan(
+    edited_assumptions,
+    demand_basis=demand_mode,
+    demand_multiplier=demand_multiplier,
+)
+workload_summary = calculate_workload_summary(
+    workload_df,
+    edited_roles,
+    reserve_pct=reserve_pct / 100.0,
+)
+recommendations_df = build_recommendations(
+    workload_summary,
+    capacity_df,
+    workload_df,
+    unassigned_minutes=unassigned_minutes,
+)
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Historical Days Loaded", f"{len(pd.date_range(start_date, end_date)):,}")
-c2.metric("Roles Simulated", f"{len(edited_roles):,}")
-c3.metric("Red Roles", int((capacity_df["Status"] == "Red").sum()))
-c4.metric("Unassigned Avg-Day Minutes", f"{unassigned_minutes:.1f}")
+st.subheader("Shift Workload Summary")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Modeled Workload Min", f"{workload_summary['total_workload_min']:.1f}")
+c2.metric("Usable Capacity Min", f"{workload_summary['effective_capacity_min']:.1f}")
+c3.metric("Utilization", f"{workload_summary['utilization_pct']:.1f}%")
+c4.metric(
+    "Over / Under Min",
+    f"{workload_summary['overload_min'] - workload_summary['underload_min']:+.1f}",
+)
+c5.metric("Delay Risk", workload_summary["delay_risk"])
+
+summary_col, rec_col = st.columns([1.2, 1])
+with summary_col:
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Historical Days Loaded": len(pd.date_range(start_date, end_date)),
+                    "Staffed Roles": workload_summary["staffed_roles"],
+                    "Nominal Capacity Min": workload_summary["nominal_capacity_min"],
+                    "Reserve %": workload_summary["reserve_pct"] * 100,
+                    "Projected Backlog Min": workload_summary["overload_min"],
+                    "Projected Slack Min": workload_summary["underload_min"],
+                    "Red Roles": int((capacity_df["Status"] == "Red").sum()),
+                    "Unassigned Avg-Day Min": unassigned_minutes,
+                }
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "Nominal Capacity Min": st.column_config.NumberColumn(format="%.1f"),
+            "Reserve %": st.column_config.NumberColumn(format="%.0f"),
+            "Projected Backlog Min": st.column_config.NumberColumn(format="%.1f"),
+            "Projected Slack Min": st.column_config.NumberColumn(format="%.1f"),
+            "Unassigned Avg-Day Min": st.column_config.NumberColumn(format="%.1f"),
+        },
+    )
+with rec_col:
+    st.markdown("##### Transparent Recommendations")
+    st.dataframe(recommendations_df, width="stretch", hide_index=True)
+
+st.subheader("Workflow Load Drivers")
+st.dataframe(
+    workload_df,
+    width="stretch",
+    hide_index=True,
+    column_config={
+        "Scenario Units / Day": st.column_config.NumberColumn(format="%.1f"),
+        "Minutes / Unit": st.column_config.NumberColumn(format="%.2f"),
+        "Scenario Workload Min": st.column_config.NumberColumn(format="%.1f"),
+        "Workload Share %": st.column_config.NumberColumn(format="%.1f"),
+    },
+)
+st.caption(
+    "This table is the Phase 1 workload engine: historical activity prefills the task volumes, your edited minutes-per-unit drive labor demand, and the selected reserve protects usable staffing capacity."
+)
 
 st.subheader("Capacity Summary")
 st.dataframe(

@@ -709,7 +709,7 @@ def render_page_links():
     st.page_link("App.py", label="Overview Hub", icon="🏠")
     st.page_link("pages/🧪_Workflow_Experiments.py", label="Workflow Experiments", icon="🧪")
     st.page_link("pages/🧭_Pilot_Monitor.py", label="Pilot Monitor", icon="🧭")
-    st.page_link("pages/⚖️_Workload_Capacity_Simulator.py", label="Capacity Simulator", icon="⚖️")
+    st.page_link("pages/⚖️_Workload_Capacity_Simulator.py", label="Ops Simulator", icon="⚖️")
 
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
     st.page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
