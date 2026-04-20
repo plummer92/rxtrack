@@ -34,6 +34,20 @@ engine = create_engine(
 
 _DEFAULT_ADMIN_USERS = {"emily", "joe", "krista"}
 
+# Shared name normalization aliases used across the multipage app.
+NAME_MAPPINGS = {
+    "phi": "ali", "ho": "ali", "rebekah": "bekah",
+    "nugent": "kathy", "kathleen": "kathy",
+    "spain": "dee", "deloris": "dee",
+    "jabusch": "dan", "daniel": "dan",
+    "nicholas": "nick"
+}
+
+AMBIGUOUS_NAMES = {
+    "melissa", "emily", "sarah", "megan", "erin", "kyle",
+    "jessica", "andy", "heather", "michelle", "taylor"
+}
+
 @st.cache_data(ttl=300)
 def load_admin_users():
     """Load admin usernames from DB. Falls back to defaults if table is empty or unavailable."""
@@ -667,31 +681,39 @@ def load_iv_room_data(start_date, end_date):
         return pd.DataFrame()
 
 def get_stats_range():
-    sql = """
-        WITH all_dates AS (
-            SELECT dt::date as d FROM events WHERE dt IS NOT NULL
-            UNION ALL
-            SELECT dt::date as d FROM pharmacy_orders WHERE dt IS NOT NULL
-            UNION ALL
-            SELECT dt as d FROM staff_schedule WHERE dt IS NOT NULL
-            UNION ALL
-            SELECT dt_date as d FROM attendance_punches WHERE dt_date IS NOT NULL
-            UNION ALL
-            SELECT order_date as d FROM iv_room_workload WHERE order_date IS NOT NULL
-        )
-        SELECT 
-            (SELECT COUNT(*) FROM events),
-            (SELECT COUNT(*) FROM pharmacy_orders),
-            (SELECT COUNT(*) FROM staff_schedule),
-            (SELECT COUNT(*) FROM attendance_punches),
-            MIN(d), MAX(d) 
-        FROM all_dates
-    """
-    with db_cursor() as (conn, cur):
-        cur.execute(sql)
-        row = cur.fetchone()
+    base_dates = [
+        "SELECT dt::date as d FROM events WHERE dt IS NOT NULL",
+        "SELECT dt::date as d FROM pharmacy_orders WHERE dt IS NOT NULL",
+        "SELECT dt as d FROM staff_schedule WHERE dt IS NOT NULL",
+        "SELECT dt_date as d FROM attendance_punches WHERE dt_date IS NOT NULL",
+    ]
+    try:
+        with db_cursor() as (conn, cur):
+            cur.execute("SELECT to_regclass('public.iv_room_workload')")
+            iv_exists = bool(cur.fetchone()[0])
+
+            all_dates = list(base_dates)
+            if iv_exists:
+                all_dates.append("SELECT order_date as d FROM iv_room_workload WHERE order_date IS NOT NULL")
+
+            sql = f"""
+                WITH all_dates AS (
+                    {' UNION ALL '.join(all_dates)}
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM events),
+                    (SELECT COUNT(*) FROM pharmacy_orders),
+                    (SELECT COUNT(*) FROM staff_schedule),
+                    (SELECT COUNT(*) FROM attendance_punches),
+                    MIN(d), MAX(d)
+                FROM all_dates
+            """
+            cur.execute(sql)
+            row = cur.fetchone()
         if row and row[4] and row[5]:
             return (row[0] or 0), (row[1] or 0), (row[2] or 0), (row[3] or 0), row[4], row[5]
+    except Exception:
+        return 0, 0, 0, 0, date.today(), date.today()
     return 0, 0, 0, 0, date.today(), date.today()
 
 def get_present_dates(min_dt, max_dt):
@@ -855,6 +877,7 @@ def render_page_links():
 
 def render_sidebar_chrome():
     """Use this on pages that need the shared nav styling without the date filters."""
+    init_db()
     apply_global_styles()
     with st.sidebar:
         st.markdown("""
@@ -940,6 +963,7 @@ def render_ui_debugger(page_name, intro_mode=None, extra=None):
 # --- SHARED SIDEBAR RENDERER ---
 def render_sidebar():
     """Call this at the top of any page to always show the date range sidebar."""
+    init_db()
     apply_global_styles()
     n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
 
@@ -1063,20 +1087,6 @@ if _is_main:
 
     ADMIN_USERS = load_admin_users()
 
-    # Nickname Mappings
-    NAME_MAPPINGS = {
-        "phi": "ali", "ho": "ali", "rebekah": "bekah",
-        "nugent": "kathy", "kathleen": "kathy",
-        "spain": "dee", "deloris": "dee",
-        "jabusch": "dan", "daniel": "dan",
-        "nicholas": "nick"     
-    }
-
-    AMBIGUOUS_NAMES = [
-        "melissa", "emily", "sarah", "megan", "erin", "kyle", 
-        "jessica", "andy", "heather", "michelle", "taylor"
-    ]
-
     # --- CUSTOM CSS ---
     st.markdown("""
         <style>
@@ -1144,10 +1154,10 @@ if _is_main:
                     raw = pd.read_excel(uploaded)
                 else:
                     try:
-                        raw = pd.read_csv(uploaded)
+                        raw = pd.read_csv(uploaded, low_memory=False)
                     except UnicodeDecodeError:
                         uploaded.seek(0)
-                        raw = pd.read_csv(uploaded, encoding='latin1')
+                        raw = pd.read_csv(uploaded, encoding='latin1', low_memory=False)
 
                 # 2. Route to correct SQL Table
                 clean = None 

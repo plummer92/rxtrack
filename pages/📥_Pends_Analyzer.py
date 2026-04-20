@@ -166,6 +166,9 @@ if standard_filter == "Standard Only":
 elif standard_filter == "Non-Standard Only":
     filtered = filtered[filtered["is_standard"] == False]
 
+# Tab 7 expects a pend-level event frame scoped to the active sidebar filters.
+df_pends = filtered.copy()
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 — EXECUTIVE METRICS
 # ═══════════════════════════════════════════════════════════════════════════════
