@@ -84,11 +84,13 @@ sessions = combined.groupby('session_id').agg({
     'user_name': 'first',
     'device': 'first',
     'source': 'first',
+    'event_type': 'first',
+    'med_desc': 'first',
     'dt': ['min', 'max'],
     'pk': 'count'
 }).reset_index()
 
-sessions.columns = ['session_id', 'User', 'Device', 'Source', 'Start', 'End', 'Tx Count']
+sessions.columns = ['session_id', 'User', 'Device', 'Source', 'Primary Event', 'Primary Med', 'Start', 'End', 'Tx Count']
 
 sessions['Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
 sessions['Duration'] = np.where(sessions['Duration'] < 10, 30, sessions['Duration'])
@@ -101,7 +103,7 @@ sessions['Walk Time'] = (sessions['Next Start'] - sessions['End']).dt.total_seco
 # TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2 = st.tabs(["🔍 Session View", "🕐 Shift Timeline"])
+tab1, tab2, tab3 = st.tabs(["🔍 Session View", "🕐 Shift Timeline", "🧭 Shift Work Map"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — SESSION VIEW (existing)
@@ -271,6 +273,99 @@ def load_day_events(sel_date):
     except Exception as e:
         st.error(f"[load_day_events] {e}")
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_day_pharmacy(sel_date):
+    """Load all pharmacy orders for a given date."""
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, destination, priority, med_desc, qty
+            FROM pharmacy_orders
+            WHERE dt::date = :d
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["destination"] = df["destination"].fillna("Unknown").astype(str).str.strip()
+        df["priority"] = df["priority"].fillna("Unknown").astype(str).str.strip()
+        return df
+    except Exception as e:
+        st.error(f"[load_day_pharmacy] {e}")
+        return pd.DataFrame()
+
+
+def build_unified_day_sessions(df_events_day, df_pharm_day):
+    px_df = df_events_day[["pk", "dt", "user_name", "device", "event_type", "med_desc", "qty", "match_key"]].copy() if not df_events_day.empty else pd.DataFrame()
+    if not px_df.empty:
+        px_df["source"] = "Pyxis"
+
+    ph_df = df_pharm_day[["pk", "dt", "user_name", "destination", "priority", "med_desc", "qty"]].copy() if not df_pharm_day.empty else pd.DataFrame()
+    if not ph_df.empty:
+        ph_df = ph_df.rename(columns={"destination": "device", "priority": "event_type"})
+        ph_df["source"] = "Pharmacy"
+        ph_df["match_key"] = ph_df["user_name"].apply(normalize_name)
+
+    day_combined = pd.concat([px_df, ph_df], ignore_index=True)
+    if day_combined.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    day_combined["dt"] = pd.to_datetime(day_combined["dt"], errors="coerce")
+    day_combined = day_combined.dropna(subset=["dt"]).sort_values(["match_key", "dt"]).reset_index(drop=True)
+
+    day_combined["prev_match_key"] = day_combined["match_key"].shift()
+    day_combined["prev_device"] = day_combined["device"].shift()
+    day_combined["prev_dt"] = day_combined["dt"].shift()
+    day_combined["gap"] = (day_combined["dt"] - day_combined["prev_dt"]).dt.total_seconds().fillna(0)
+    day_combined["is_new_session"] = np.where(
+        (day_combined["match_key"] != day_combined["prev_match_key"]) |
+        (day_combined["device"] != day_combined["prev_device"]) |
+        (day_combined["gap"] > 1200),
+        1, 0
+    )
+    day_combined["session_id"] = day_combined["is_new_session"].cumsum()
+
+    grouped = (
+        day_combined.groupby("session_id")
+        .agg(
+            tech_key=("match_key", "first"),
+            user_name=("user_name", "first"),
+            device=("device", "first"),
+            source=("source", "first"),
+            primary_event=("event_type", "first"),
+            primary_med=("med_desc", "first"),
+            start=("dt", "min"),
+            end=("dt", "max"),
+            tx_count=("pk", "count"),
+        )
+        .reset_index()
+    )
+    grouped["duration_sec"] = (grouped["end"] - grouped["start"]).dt.total_seconds()
+    grouped["duration_sec"] = np.where(grouped["duration_sec"] < 10, 30, grouped["duration_sec"])
+    grouped = grouped.sort_values(["tech_key", "start"]).reset_index(drop=True)
+    grouped["next_start"] = grouped.groupby("tech_key")["start"].shift(-1)
+    grouped["walk_sec"] = (grouped["next_start"] - grouped["end"]).dt.total_seconds()
+    grouped["walk_sec"] = grouped["walk_sec"].where(grouped["walk_sec"].gt(0), 0).fillna(0)
+    return day_combined, grouped
+
+
+def classify_work_type(source, device, event_type):
+    src = str(source or "").lower()
+    dev = str(device or "").lower()
+    evt = str(event_type or "").lower()
+
+    if src == "pharmacy":
+        return "Delivery / Pharmacy Queue"
+    if re.search(r"stockout|return|outdate|unload", evt):
+        return "Returns / Cleanup"
+    if re.search(r"refill|restock|load|replenish", evt):
+        return "Refill / Restock"
+    if re.search(r"count|inventory|cycle", evt):
+        return "Inventory / Counts"
+    if re.search(r"carousel|cubic|pack|central", dev):
+        return "Central Pharmacy / Carousel"
+    return "Pyxis Cabinet Work"
 
 
 with tab2:
@@ -472,4 +567,241 @@ with tab2:
     )
 
     st.caption(f"{len(log_view):,} events shown.")
+
+
+with tab3:
+    st.subheader("🧭 Shift Work Map")
+    st.caption(
+        "Map scheduled shift coverage to actual work blocks so the program can estimate what each shift did, how long it took, and how much time was spent walking between sessions."
+    )
+
+    work_date = st.date_input(
+        "Work Map Date",
+        value=end_date,
+        key="shift_work_map_date"
+    )
+
+    with st.spinner("Loading shift work map..."):
+        df_sched_work = load_shift_schedule(work_date)
+        df_events_work = load_day_events(work_date)
+        df_pharm_work = load_day_pharmacy(work_date)
+
+    if df_sched_work.empty:
+        st.warning("No schedule found for this date. Upload schedule data first.")
+        st.stop()
+
+    df_sched_work["match_key"] = df_sched_work["staff_name"].apply(normalize_name)
+    if not df_events_work.empty:
+        df_events_work["match_key"] = df_events_work["user_name"].apply(normalize_name)
+
+    work_shifts = sorted(df_sched_work["shift_type"].dropna().replace("", pd.NA).dropna().unique())
+    if not work_shifts:
+        st.warning("No shift types found for this date.")
+        st.stop()
+
+    wc1, wc2 = st.columns([1, 2])
+
+    with wc1:
+        selected_work_shifts = st.multiselect(
+            "Shift(s)",
+            options=work_shifts,
+            default=work_shifts[:1] if work_shifts else [],
+            key="shift_work_map_shifts",
+        )
+
+    if not selected_work_shifts:
+        st.info("Select at least one shift to continue.")
+        st.stop()
+
+    work_sched_filtered = df_sched_work[df_sched_work["shift_type"].isin(selected_work_shifts)].copy()
+    work_name_options = (
+        work_sched_filtered[["staff_name", "match_key"]]
+        .drop_duplicates("staff_name")
+        .sort_values("staff_name")
+    )
+
+    with wc2:
+        selected_work_names = st.multiselect(
+            "Staff (leave blank for all on shift)",
+            options=work_name_options["staff_name"].tolist(),
+            key="shift_work_map_names",
+        )
+
+    if selected_work_names:
+        active_work_keys = set(
+            work_name_options[work_name_options["staff_name"].isin(selected_work_names)]["match_key"]
+        )
+    else:
+        active_work_keys = set(work_sched_filtered["match_key"].unique())
+
+    day_stream, day_sessions = build_unified_day_sessions(df_events_work, df_pharm_work)
+    if day_stream.empty or day_sessions.empty:
+        st.warning("No Pyxis or pharmacy events were found for this date.")
+        st.stop()
+
+    active_sessions = day_sessions[day_sessions["tech_key"].isin(active_work_keys)].copy()
+    if active_sessions.empty:
+        st.warning("No work sessions matched the selected shift staff on this date.")
+        st.stop()
+
+    work_key_to_name = (
+        work_sched_filtered[["match_key", "staff_name"]]
+        .drop_duplicates("match_key")
+        .set_index("match_key")["staff_name"]
+        .to_dict()
+    )
+    active_sessions["tech_display"] = active_sessions["tech_key"].map(work_key_to_name).fillna(active_sessions["user_name"])
+    active_sessions["work_type"] = active_sessions.apply(
+        lambda row: classify_work_type(row["source"], row["device"], row["primary_event"]),
+        axis=1
+    )
+    active_sessions["long_gap_flag"] = active_sessions["walk_sec"] > 1200
+
+    total_active_sec = active_sessions["duration_sec"].sum()
+    total_walk_sec = active_sessions["walk_sec"].sum()
+    long_gap_count = int(active_sessions["long_gap_flag"].sum())
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Staff on Shift", len(active_work_keys))
+    m2.metric("Sessions", f"{len(active_sessions):,}")
+    m3.metric("Active Work Time", seconds_to_mmss(total_active_sec))
+    m4.metric("Walk Time", seconds_to_mmss(total_walk_sec))
+    m5.metric("Long Gaps >20m", long_gap_count)
+
+    roster = work_sched_filtered[["staff_name", "shift_type", "assignment_type", "note"]].drop_duplicates()
+    if selected_work_names:
+        roster = roster[roster["staff_name"].isin(selected_work_names)]
+
+    with st.expander("📋 Shift Roster", expanded=False):
+        st.dataframe(
+            roster.rename(columns={
+                "staff_name": "Name",
+                "shift_type": "Shift",
+                "assignment_type": "Assignment",
+                "note": "Note",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    tech_summary = (
+        active_sessions.groupby("tech_display", as_index=False)
+        .agg(
+            sessions=("session_id", "count"),
+            active_sec=("duration_sec", "sum"),
+            walk_sec=("walk_sec", "sum"),
+            devices=("device", "nunique"),
+        )
+        .sort_values("active_sec", ascending=False)
+    )
+    dominant_work = (
+        active_sessions.groupby(["tech_display", "work_type"])
+        .agg(active_sec=("duration_sec", "sum"))
+        .reset_index()
+        .sort_values(["tech_display", "active_sec"], ascending=[True, False])
+        .drop_duplicates("tech_display")
+        .rename(columns={"work_type": "dominant_work_type"})
+    )
+    tech_summary = tech_summary.merge(dominant_work[["tech_display", "dominant_work_type"]], on="tech_display", how="left")
+    tech_summary["active_time"] = tech_summary["active_sec"].apply(seconds_to_mmss)
+    tech_summary["walk_time"] = tech_summary["walk_sec"].apply(seconds_to_mmss)
+
+    work_type_summary = (
+        active_sessions.groupby("work_type", as_index=False)
+        .agg(
+            sessions=("session_id", "count"),
+            active_sec=("duration_sec", "sum"),
+            walk_sec=("walk_sec", "sum"),
+            techs=("tech_display", "nunique"),
+        )
+        .sort_values("active_sec", ascending=False)
+    )
+    work_type_summary["active_time"] = work_type_summary["active_sec"].apply(seconds_to_mmss)
+    work_type_summary["walk_time"] = work_type_summary["walk_sec"].apply(seconds_to_mmss)
+
+    st.divider()
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.subheader("Time by Technician")
+        st.dataframe(
+            tech_summary[["tech_display", "sessions", "devices", "active_time", "walk_time", "dominant_work_type"]].rename(columns={
+                "tech_display": "Technician",
+                "sessions": "Sessions",
+                "devices": "Devices",
+                "active_time": "Active Time",
+                "walk_time": "Walk Time",
+                "dominant_work_type": "Dominant Work Type",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with c2:
+        st.subheader("Time by Work Type")
+        st.dataframe(
+            work_type_summary[["work_type", "sessions", "techs", "active_time", "walk_time"]].rename(columns={
+                "work_type": "Work Type",
+                "sessions": "Sessions",
+                "techs": "Techs",
+                "active_time": "Active Time",
+                "walk_time": "Walk Time",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    chart1, chart2 = st.columns(2)
+    with chart1:
+        fig_tech = px.bar(
+            tech_summary,
+            x="tech_display",
+            y=["active_sec", "walk_sec"],
+            barmode="stack",
+            labels={"tech_display": "", "value": "Seconds", "variable": "Time Type"},
+        )
+        fig_tech.update_layout(height=360, xaxis_tickangle=-25)
+        st.plotly_chart(fig_tech, use_container_width=True)
+
+    with chart2:
+        fig_work = px.bar(
+            work_type_summary.sort_values("active_sec"),
+            x="active_sec",
+            y="work_type",
+            orientation="h",
+            labels={"active_sec": "Active Seconds", "work_type": ""},
+            color="active_sec",
+            color_continuous_scale="Blues",
+        )
+        fig_work.update_layout(height=360, coloraxis_showscale=False)
+        st.plotly_chart(fig_work, use_container_width=True)
+
+    st.divider()
+    st.subheader("Session Classification Detail")
+    active_sessions["active_time"] = active_sessions["duration_sec"].apply(seconds_to_mmss)
+    active_sessions["walk_time"] = active_sessions["walk_sec"].apply(seconds_to_mmss)
+    st.dataframe(
+        active_sessions[[
+            "tech_display", "source", "device", "primary_event", "primary_med",
+            "start", "end", "tx_count", "active_time", "walk_time", "work_type"
+        ]].rename(columns={
+            "tech_display": "Technician",
+            "source": "Source",
+            "device": "Device",
+            "primary_event": "Primary Event",
+            "primary_med": "Primary Med",
+            "start": "Start",
+            "end": "End",
+            "tx_count": "Tx Count",
+            "active_time": "Active Time",
+            "walk_time": "Walk Time",
+            "work_type": "Work Type",
+        }),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Start": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
+            "End": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
+        }
+    )
 
