@@ -980,6 +980,12 @@ def apply_global_styles():
         <style>
         [data-testid="stSidebarNav"] { display: none; }
         .block-container { padding-top: 1.35rem; padding-bottom: 2rem; }
+        [data-testid="stAppViewContainer"] {
+            background:
+                radial-gradient(circle at top left, rgba(56, 189, 248, 0.1), transparent 22%),
+                radial-gradient(circle at top right, rgba(16, 185, 129, 0.08), transparent 20%),
+                linear-gradient(180deg, #0b1220 0%, #111827 48%, #162131 100%);
+        }
         [data-testid="stSidebar"] {
             background:
                 radial-gradient(circle at top right, rgba(34, 197, 94, 0.12), transparent 24%),
@@ -1138,10 +1144,15 @@ def apply_global_styles():
             font-weight: 700;
         }
         h2, h3, [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 {
-            color: #0f172a;
+            color: #f8fafc;
         }
         .stCaption, [data-testid="stCaptionContainer"] {
-            color: #475569;
+            color: #cbd5e1;
+        }
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li,
+        [data-testid="stMarkdownContainer"] label {
+            color: #e2e8f0;
         }
         </style>
     """, unsafe_allow_html=True)
