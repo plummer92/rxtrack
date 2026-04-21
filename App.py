@@ -158,6 +158,38 @@ def init_db():
             approved_by TEXT,
             secondary_approved_by TEXT
         );""",
+        """CREATE TABLE IF NOT EXISTS overnight_iv_cartfill_orders (
+            pk TEXT PRIMARY KEY,
+            order_id TEXT,
+            order_medication TEXT,
+            ready_for_dispense_dt TIMESTAMP,
+            admin_given_dt TIMESTAMP,
+            prepared_dt TIMESTAMP,
+            prep_or_dispense_user TEXT,
+            pharmacy TEXT,
+            event_date DATE,
+            required_start_dt TIMESTAMP,
+            prep_lead_hours FLOAT,
+            hold_hours FLOAT,
+            is_sjs_cleanroom BOOLEAN
+        );""",
+        """CREATE TABLE IF NOT EXISTS overnight_iv_cartfill_windows (
+            pk TEXT PRIMARY KEY,
+            cartfill_name TEXT,
+            time_processed_raw TEXT,
+            doses_due TEXT,
+            pharmacy TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS overnight_iv_staffing_model (
+            pk TEXT PRIMARY KEY,
+            schedule_date DATE,
+            day_name TEXT,
+            shift_name TEXT,
+            weekend_shift_label TEXT,
+            assigned_staff TEXT,
+            is_weekend BOOLEAN,
+            is_placeholder BOOLEAN
+        );""",
         """CREATE TABLE IF NOT EXISTS admin_users (
             username TEXT PRIMARY KEY,
             display_name TEXT,
@@ -306,6 +338,13 @@ def parse_shift_start(date_obj, shift_str):
                 return None
 
     return None
+
+
+def excel_serial_to_datetime(series):
+    numeric = pd.to_numeric(series, errors="coerce")
+    converted = pd.Timestamp("1899-12-30") + pd.to_timedelta(numeric, unit="D")
+    fallback = pd.to_datetime(series, errors="coerce")
+    return converted.where(numeric.notna(), fallback)
 
 # --- DATA CLEANING ---
 def clean_dataframe(df):
@@ -569,6 +608,161 @@ def clean_iv_room_report(df):
     df = df.where(pd.notna(df), None)
     return df[required + ["order_dt", "pk"]]
 
+
+def clean_overnight_cartfill_workbook(uploaded):
+    uploaded.seek(0)
+    excel = pd.ExcelFile(uploaded)
+
+    orders = pd.DataFrame()
+    windows = pd.DataFrame()
+    staffing = pd.DataFrame()
+
+    if "Cartfill Data" in excel.sheet_names:
+        raw_orders = pd.read_excel(excel, sheet_name="Cartfill Data")
+        raw_orders = raw_orders.rename(columns={
+            "Order ID": "order_id",
+            "Order Medication": "order_medication",
+            "Ready for Dispense for Date & Time": "ready_for_dispense_dt",
+            "Admin Given Date & Time": "admin_given_dt",
+            "Prepared Date & Time": "prepared_dt",
+            "Prep or Dispense User": "prep_or_dispense_user",
+            "Pharmacy": "pharmacy",
+        }).copy()
+
+        required_cols = [
+            "order_id", "order_medication", "ready_for_dispense_dt", "admin_given_dt",
+            "prepared_dt", "prep_or_dispense_user", "pharmacy",
+        ]
+        for col in required_cols:
+            if col not in raw_orders.columns:
+                raw_orders[col] = None
+
+        for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt"]:
+            raw_orders[col] = excel_serial_to_datetime(raw_orders[col])
+
+        raw_orders["pharmacy"] = raw_orders["pharmacy"].fillna("").astype(str).str.strip()
+        raw_orders["prep_or_dispense_user"] = raw_orders["prep_or_dispense_user"].fillna("").astype(str).str.strip()
+        raw_orders["order_medication"] = raw_orders["order_medication"].fillna("").astype(str).str.strip()
+        raw_orders["order_id"] = raw_orders["order_id"].fillna("").astype(str).str.strip()
+
+        raw_orders["event_date"] = (
+            raw_orders["admin_given_dt"]
+            .fillna(raw_orders["ready_for_dispense_dt"])
+            .fillna(raw_orders["prepared_dt"])
+            .dt.date
+        )
+        raw_orders["required_start_dt"] = raw_orders["ready_for_dispense_dt"] - pd.Timedelta(hours=4)
+        raw_orders["prep_lead_hours"] = (
+            raw_orders["ready_for_dispense_dt"] - raw_orders["prepared_dt"]
+        ).dt.total_seconds() / 3600
+        raw_orders["hold_hours"] = (
+            raw_orders["admin_given_dt"] - raw_orders["prepared_dt"]
+        ).dt.total_seconds() / 3600
+        raw_orders["is_sjs_cleanroom"] = raw_orders["pharmacy"].str.upper().eq("SJS CLEANROOM")
+
+        raw_orders = raw_orders[
+            raw_orders["event_date"].notna() &
+            raw_orders["order_id"].ne("")
+        ].copy()
+
+        raw_orders["pk"] = raw_orders.apply(
+            lambda row: hashlib.sha256(
+                "|".join([
+                    str(row.get("order_id") or ""),
+                    str(row.get("ready_for_dispense_dt") or ""),
+                    str(row.get("admin_given_dt") or ""),
+                    str(row.get("prepared_dt") or ""),
+                    str(row.get("pharmacy") or ""),
+                ]).encode()
+            ).hexdigest(),
+            axis=1,
+        )
+        raw_orders = raw_orders.astype(object).where(pd.notna(raw_orders), None)
+        orders = raw_orders[[
+            "pk", "order_id", "order_medication", "ready_for_dispense_dt",
+            "admin_given_dt", "prepared_dt", "prep_or_dispense_user", "pharmacy",
+            "event_date", "required_start_dt", "prep_lead_hours", "hold_hours",
+            "is_sjs_cleanroom",
+        ]]
+
+    if "Cartfill times 04.2026" in excel.sheet_names:
+        raw_windows = pd.read_excel(excel, sheet_name="Cartfill times 04.2026")
+        raw_windows = raw_windows.rename(columns={
+            "Cartfill Name": "cartfill_name",
+            "Time Processed": "time_processed_raw",
+            "Doses Due": "doses_due",
+            "Pharmacy": "pharmacy",
+        }).copy()
+        for col in ["cartfill_name", "time_processed_raw", "doses_due", "pharmacy"]:
+            if col not in raw_windows.columns:
+                raw_windows[col] = None
+            raw_windows[col] = raw_windows[col].fillna("").astype(str).str.strip()
+
+        raw_windows = raw_windows[raw_windows["cartfill_name"].ne("")].copy()
+        raw_windows["pk"] = raw_windows.apply(
+            lambda row: hashlib.sha256(
+                "|".join([
+                    str(row.get("cartfill_name") or ""),
+                    str(row.get("time_processed_raw") or ""),
+                    str(row.get("doses_due") or ""),
+                    str(row.get("pharmacy") or ""),
+                ]).encode()
+            ).hexdigest(),
+            axis=1,
+        )
+        raw_windows = raw_windows.astype(object).where(pd.notna(raw_windows), None)
+        windows = raw_windows[["pk", "cartfill_name", "time_processed_raw", "doses_due", "pharmacy"]]
+
+    if "Schedule" in excel.sheet_names:
+        raw_schedule = pd.read_excel(excel, sheet_name="Schedule", header=None)
+        shift_headers = raw_schedule.iloc[0].tolist() if len(raw_schedule.index) > 0 else []
+        weekend_headers = raw_schedule.iloc[1].tolist() if len(raw_schedule.index) > 1 else []
+        rows = []
+        for idx in range(2, len(raw_schedule.index)):
+            row = raw_schedule.iloc[idx]
+            schedule_date = excel_serial_to_datetime(pd.Series([row.iloc[1]])).iloc[0]
+            day_name = None if pd.isna(row.iloc[2]) else str(row.iloc[2]).strip()
+            if pd.isna(schedule_date) and not day_name:
+                continue
+            for col_idx in range(3, min(len(row), len(shift_headers))):
+                shift_name = shift_headers[col_idx] if col_idx < len(shift_headers) else None
+                assigned_staff = row.iloc[col_idx]
+                if pd.isna(shift_name) or pd.isna(assigned_staff):
+                    continue
+                assigned_staff = str(assigned_staff).strip()
+                if not assigned_staff:
+                    continue
+                weekend_label = weekend_headers[col_idx] if col_idx < len(weekend_headers) else None
+                rows.append({
+                    "schedule_date": schedule_date.date() if pd.notna(schedule_date) else None,
+                    "day_name": day_name,
+                    "shift_name": str(shift_name).strip(),
+                    "weekend_shift_label": None if pd.isna(weekend_label) else str(weekend_label).strip(),
+                    "assigned_staff": assigned_staff,
+                    "is_weekend": str(day_name).lower() in {"saturday", "sunday"} if day_name else False,
+                    "is_placeholder": assigned_staff.lower() in {"x", "w"},
+                })
+        if rows:
+            staffing = pd.DataFrame(rows)
+            staffing["pk"] = staffing.apply(
+                lambda row: hashlib.sha256(
+                    "|".join([
+                        str(row.get("schedule_date") or ""),
+                        str(row.get("day_name") or ""),
+                        str(row.get("shift_name") or ""),
+                        str(row.get("assigned_staff") or ""),
+                    ]).encode()
+                ).hexdigest(),
+                axis=1,
+            )
+            staffing = staffing.astype(object).where(pd.notna(staffing), None)
+            staffing = staffing[[
+                "pk", "schedule_date", "day_name", "shift_name", "weekend_shift_label",
+                "assigned_staff", "is_weekend", "is_placeholder",
+            ]]
+
+    return {"orders": orders, "windows": windows, "staffing": staffing}
+
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
@@ -679,6 +873,58 @@ def load_iv_room_data(start_date, end_date):
         return df
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_overnight_cartfill_orders(start_date, end_date):
+    query = """
+        SELECT
+            pk,
+            order_id,
+            order_medication,
+            ready_for_dispense_dt,
+            admin_given_dt,
+            prepared_dt,
+            prep_or_dispense_user,
+            pharmacy,
+            event_date,
+            required_start_dt,
+            prep_lead_hours,
+            hold_hours,
+            is_sjs_cleanroom
+        FROM overnight_iv_cartfill_orders
+        WHERE event_date BETWEEN %s AND %s
+        ORDER BY COALESCE(admin_given_dt, ready_for_dispense_dt, prepared_dt)
+    """
+    try:
+        with db_cursor() as (conn, cur):
+            df = pd.read_sql(query, conn, params=(start_date, end_date))
+        for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def load_overnight_cartfill_context():
+    tables = {
+        "windows": "SELECT pk, cartfill_name, time_processed_raw, doses_due, pharmacy FROM overnight_iv_cartfill_windows",
+        "staffing": """SELECT pk, schedule_date, day_name, shift_name, weekend_shift_label,
+                              assigned_staff, is_weekend, is_placeholder
+                       FROM overnight_iv_staffing_model""",
+    }
+    results = {}
+    with db_cursor() as (conn, cur):
+        for key, sql in tables.items():
+            try:
+                results[key] = pd.read_sql(sql, conn)
+            except Exception:
+                results[key] = pd.DataFrame()
+    if "schedule_date" in results.get("staffing", pd.DataFrame()).columns:
+        results["staffing"]["schedule_date"] = pd.to_datetime(results["staffing"]["schedule_date"], errors="coerce")
+    return results.get("windows", pd.DataFrame()), results.get("staffing", pd.DataFrame())
 
 def get_stats_range():
     base_dates = [
@@ -855,6 +1101,7 @@ def render_page_links():
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
     st.page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
     st.page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
+    st.page_link("pages/🌙_IV_Overnight_Optimizer.py", label="IV Overnight Optimizer", icon="🌙")
     st.page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
     st.page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
     st.page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
@@ -1144,13 +1391,16 @@ if _is_main:
         u_type = st.selectbox("File Type:", [
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
-            "IV Room Workload", "IV Room Batching"
+            "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model"
         ])
         uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
         if uploaded and st.button(f"Process {u_type}"):
             try:
+                processed_count = 0
                 # 1. Load raw file
-                if uploaded.name.endswith('.xlsx'):
+                if u_type == "IV Overnight Cartfill Model":
+                    raw = None
+                elif uploaded.name.endswith('.xlsx'):
                     raw = pd.read_excel(uploaded)
                 else:
                     try:
@@ -1231,11 +1481,53 @@ if _is_main:
                                      %(secondary_approved_by)s)
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name=u_type)
+                    processed_count = len(clean)
+
+                elif u_type == "IV Overnight Cartfill Model":
+                    workbook = clean_overnight_cartfill_workbook(uploaded)
+                    orders = workbook.get("orders", pd.DataFrame())
+                    windows = workbook.get("windows", pd.DataFrame())
+                    staffing = workbook.get("staffing", pd.DataFrame())
+
+                    if not orders.empty:
+                        sql_orders = """INSERT INTO overnight_iv_cartfill_orders
+                                        (pk, order_id, order_medication, ready_for_dispense_dt, admin_given_dt,
+                                         prepared_dt, prep_or_dispense_user, pharmacy, event_date,
+                                         required_start_dt, prep_lead_hours, hold_hours, is_sjs_cleanroom)
+                                        VALUES (%(pk)s, %(order_id)s, %(order_medication)s, %(ready_for_dispense_dt)s,
+                                                %(admin_given_dt)s, %(prepared_dt)s, %(prep_or_dispense_user)s,
+                                                %(pharmacy)s, %(event_date)s, %(required_start_dt)s,
+                                                %(prep_lead_hours)s, %(hold_hours)s, %(is_sjs_cleanroom)s)
+                                        ON CONFLICT (pk) DO NOTHING;"""
+                        execute_statement(sql_orders, orders.to_dict("records"), batch=True, table_name="Overnight Cartfill Orders")
+                        processed_count += len(orders)
+
+                    if not windows.empty:
+                        sql_windows = """INSERT INTO overnight_iv_cartfill_windows
+                                         (pk, cartfill_name, time_processed_raw, doses_due, pharmacy)
+                                         VALUES (%(pk)s, %(cartfill_name)s, %(time_processed_raw)s,
+                                                 %(doses_due)s, %(pharmacy)s)
+                                         ON CONFLICT (pk) DO NOTHING;"""
+                        execute_statement(sql_windows, windows.to_dict("records"), batch=True, table_name="Overnight Cartfill Windows")
+                        processed_count += len(windows)
+
+                    if not staffing.empty:
+                        sql_staffing = """INSERT INTO overnight_iv_staffing_model
+                                          (pk, schedule_date, day_name, shift_name, weekend_shift_label,
+                                           assigned_staff, is_weekend, is_placeholder)
+                                          VALUES (%(pk)s, %(schedule_date)s, %(day_name)s, %(shift_name)s,
+                                                  %(weekend_shift_label)s, %(assigned_staff)s, %(is_weekend)s,
+                                                  %(is_placeholder)s)
+                                          ON CONFLICT (pk) DO NOTHING;"""
+                        execute_statement(sql_staffing, staffing.to_dict("records"), batch=True, table_name="Overnight Staffing Model")
+                        processed_count += len(staffing)
+
+                    clean = orders
 
                 # 3. Success & Refresh
                 if clean is not None:
                     st.cache_data.clear()
-                    st.success(f"Successfully uploaded {len(clean)} records!")
+                    st.success(f"Successfully uploaded {processed_count or len(clean)} records!")
                     st.rerun()
                 else:
                     st.warning("File type logic not yet implemented for this selection.")
