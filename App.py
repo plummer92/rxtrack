@@ -1098,34 +1098,38 @@ def apply_global_styles():
 
 
 def render_page_links():
+    def safe_page_link(path, label, icon):
+        if path == "App.py" or os.path.exists(path):
+            st.page_link(path, label=label, icon=icon)
+
     st.markdown('<div class="rx-nav-label">Core</div>', unsafe_allow_html=True)
-    st.page_link("App.py", label="Overview Hub", icon="🏠")
-    st.page_link("pages/🧪_Workflow_Experiments.py", label="Workflow Experiments", icon="🧪")
-    st.page_link("pages/🧭_Pilot_Monitor.py", label="Pilot Monitor", icon="🧭")
-    st.page_link("pages/⚖️_Workload_Capacity_Simulator.py", label="Ops Simulator", icon="⚖️")
+    safe_page_link("App.py", label="Overview Hub", icon="🏠")
+    safe_page_link("pages/🧪_Workflow_Experiments.py", label="Workflow Experiments", icon="🧪")
+    safe_page_link("pages/🧭_Pilot_Monitor.py", label="Pilot Monitor", icon="🧭")
+    safe_page_link("pages/⚖️_Workload_Capacity_Simulator.py", label="Ops Simulator", icon="⚖️")
 
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
-    st.page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
-    st.page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
-    st.page_link("pages/🌙_Cartfill_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
-    st.page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
-    st.page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
-    st.page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
+    safe_page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
+    safe_page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
+    safe_page_link("pages/🌙_Cartfill_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
+    safe_page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
+    safe_page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
+    safe_page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
 
     st.markdown('<div class="rx-nav-label">Performance</div>', unsafe_allow_html=True)
-    st.page_link("pages/1_⏰_Tardies.py", label="Tardies", icon="⏰")
-    st.page_link("pages/2_🔍_Session_Explorer.py", label="Session Explorer", icon="🔍")
-    st.page_link("pages/📊_Workforce_Intelligence.py", label="Workforce Intelligence", icon="📊")
-    st.page_link("pages/📥_Pends_Analyzer.py", label="Pends Analyzer", icon="📥")
-    st.page_link("pages/🚨_discrepancy_deep_dive.py", label="Discrepancy Deep Dive", icon="🚨")
+    safe_page_link("pages/1_⏰_Tardies.py", label="Tardies", icon="⏰")
+    safe_page_link("pages/2_🔍_Session_Explorer.py", label="Session Explorer", icon="🔍")
+    safe_page_link("pages/📊_Workforce_Intelligence.py", label="Workforce Intelligence", icon="📊")
+    safe_page_link("pages/📥_Pends_Analyzer.py", label="Pends Analyzer", icon="📥")
+    safe_page_link("pages/🚨_discrepancy_deep_dive.py", label="Discrepancy Deep Dive", icon="🚨")
 
     st.markdown('<div class="rx-nav-label">Tools</div>', unsafe_allow_html=True)
-    st.page_link("pages/📊_Cycle_Count_Integrity.py", label="Cycle Count Integrity", icon="📊")
-    st.page_link("pages/📋_Carousel_Drop_Tracker.py", label="Carousel Drop Tracker", icon="📋")
-    st.page_link("pages/_🔍_MedLookup.py", label="Med Lookup", icon="🔍")
-    st.page_link("pages/_🧠_RxBrain.py", label="RxBrain", icon="🧠")
-    st.page_link("pages/🗄️_db_health.py", label="Database Health", icon="🗄️")
-    st.page_link("pages/Admin_Master_Mapping.py", label="Admin & Mapping", icon="⚙️")
+    safe_page_link("pages/📊_Cycle_Count_Integrity.py", label="Cycle Count Integrity", icon="📊")
+    safe_page_link("pages/📋_Carousel_Drop_Tracker.py", label="Carousel Drop Tracker", icon="📋")
+    safe_page_link("pages/_🔍_MedLookup.py", label="Med Lookup", icon="🔍")
+    safe_page_link("pages/_🧠_RxBrain.py", label="RxBrain", icon="🧠")
+    safe_page_link("pages/🗄️_db_health.py", label="Database Health", icon="🗄️")
+    safe_page_link("pages/Admin_Master_Mapping.py", label="Admin & Mapping", icon="⚙️")
 
 
 def render_sidebar_chrome():
