@@ -22,6 +22,7 @@ engine = App.engine
 @st.cache_data(ttl=300)
 def load_shift_audit_profiles():
     try:
+        App.init_db()
         sql = text("""
             SELECT profile_name, page_name, shifts_json, selected_names_json, view_scope, active
             FROM shift_audit_profiles
@@ -41,6 +42,7 @@ def load_shift_audit_profiles():
 
 def save_shift_audit_profile(profile_name, shifts, selected_names, view_scope):
     try:
+        App.init_db()
         sql = text("""
             INSERT INTO shift_audit_profiles
                 (profile_name, page_name, shifts_json, selected_names_json, view_scope, active, updated_at)
