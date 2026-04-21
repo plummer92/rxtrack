@@ -341,10 +341,16 @@ def parse_shift_start(date_obj, shift_str):
 
 
 def excel_serial_to_datetime(series):
-    numeric = pd.to_numeric(series, errors="coerce")
-    converted = pd.Timestamp("1899-12-30") + pd.to_timedelta(numeric, unit="D")
     fallback = pd.to_datetime(series, errors="coerce")
-    return converted.where(numeric.notna(), fallback)
+    numeric = pd.to_numeric(series, errors="coerce")
+    plausible_excel_serial = numeric.between(1, 100000)
+    converted = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    if plausible_excel_serial.any():
+        converted.loc[plausible_excel_serial] = (
+            pd.Timestamp("1899-12-30")
+            + pd.to_timedelta(numeric.loc[plausible_excel_serial], unit="D")
+        )
+    return converted.where(plausible_excel_serial, fallback)
 
 # --- DATA CLEANING ---
 def clean_dataframe(df):
@@ -1101,7 +1107,7 @@ def render_page_links():
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
     st.page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
     st.page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
-    st.page_link("pages/🌙_IV_Overnight_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
+    st.page_link("pages/🌙_Cartfill_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
     st.page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
     st.page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
     st.page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
