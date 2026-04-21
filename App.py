@@ -941,16 +941,9 @@ def get_stats_range():
     ]
     try:
         with db_cursor() as (conn, cur):
-            cur.execute("SELECT to_regclass('public.iv_room_workload')")
-            iv_exists = bool(cur.fetchone()[0])
-
-            all_dates = list(base_dates)
-            if iv_exists:
-                all_dates.append("SELECT order_date as d FROM iv_room_workload WHERE order_date IS NOT NULL")
-
             sql = f"""
                 WITH all_dates AS (
-                    {' UNION ALL '.join(all_dates)}
+                    {' UNION ALL '.join(base_dates)}
                 )
                 SELECT
                     (SELECT COUNT(*) FROM events),
@@ -1092,6 +1085,33 @@ def apply_global_styles():
             max-width: 72ch;
             font-size: 1rem;
             line-height: 1.6;
+        }
+        [data-testid="stTabs"] [role="tablist"] {
+            gap: 0.45rem;
+        }
+        [data-testid="stTabs"] [role="tab"] {
+            background: #eef4fb;
+            border: 1px solid rgba(148, 163, 184, 0.42);
+            border-radius: 999px;
+            color: #334155;
+            font-weight: 700;
+            padding: 0.4rem 0.9rem;
+        }
+        [data-testid="stTabs"] [role="tab"]:hover {
+            background: #dbeafe;
+            color: #0f172a;
+        }
+        [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            background: linear-gradient(135deg, #0f766e 0%, #0f5f93 100%);
+            border-color: rgba(15, 118, 110, 0.6);
+            color: #ffffff;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+        }
+        h2, h3, [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 {
+            color: #0f172a;
+        }
+        .stCaption, [data-testid="stCaptionContainer"] {
+            color: #475569;
         }
         </style>
     """, unsafe_allow_html=True)
