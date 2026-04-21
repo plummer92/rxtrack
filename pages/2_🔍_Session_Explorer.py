@@ -176,7 +176,6 @@ tab1, tab2, tab3 = st.tabs(["🔍 Session View", "🕐 Shift Timeline", "🧭 Sh
 
 WORK_TYPE_ORDER = [
     "Carousel / 0400 Pull",
-    "Pyxis Delivery Refills",
     "Pyxis Outdates",
     "Returns / Carousel Putaway",
     "Pyxis Maintenance",
@@ -436,10 +435,6 @@ def classify_work_type(source, device, event_type):
         return "Carousel / 0400 Pull"
     if re.search(r"outdate", evt):
         return "Pyxis Outdates"
-    if re.search(r"stockout|return|outdate|unload", evt):
-        return "Pyxis Maintenance"
-    if re.search(r"refill|restock|load|replenish", evt):
-        return "Pyxis Delivery Refills"
     if re.search(r"carousel|cubic|pack|central", dev):
         return "Returns / Carousel Putaway"
     return "Pyxis Maintenance"
@@ -649,7 +644,7 @@ with tab2:
 with tab3:
     st.subheader("🧭 Shift Work Map")
     st.caption(
-        "Map scheduled shift coverage to the three biggest daily phases you described: carousel / 0400 pull first, Pyxis delivery second, then returns back into the carousel."
+        "Map scheduled shift coverage to the main daily phases you described: carousel / 0400 pull first, Pyxis machine work in the middle, then returns back into the carousel."
     )
 
     saved_profiles = load_shift_audit_profiles()

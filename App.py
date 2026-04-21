@@ -22,7 +22,7 @@ import io
 import warnings
 import json
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 import os
 
 
@@ -235,6 +235,24 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );""",
+        """CREATE TABLE IF NOT EXISTS shift_audit_results (
+            profile_name TEXT NOT NULL,
+            audit_date DATE NOT NULL,
+            shifts_json TEXT,
+            selected_names_json TEXT,
+            view_scope TEXT,
+            staff_on_shift INTEGER,
+            sessions INTEGER,
+            active_sec FLOAT,
+            walk_sec FLOAT,
+            long_gap_count INTEGER,
+            training_count INTEGER,
+            dominant_work_type TEXT,
+            work_type_json TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (profile_name, audit_date)
+        );""",
         """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;"""
     ]
     with db_cursor() as (conn, cur):
@@ -348,6 +366,353 @@ def parse_shift_start(date_obj, shift_str):
                 return None
 
     return None
+
+
+SHIFT_WORK_TYPE_ORDER = [
+    "Carousel / 0400 Pull",
+    "Pyxis Outdates",
+    "Returns / Carousel Putaway",
+    "Pyxis Maintenance",
+]
+
+
+@st.cache_data(ttl=300)
+def load_shift_audit_profiles(page_name="shift_work_map"):
+    try:
+        init_db()
+        sql = text("""
+            SELECT profile_name, page_name, shifts_json, selected_names_json, view_scope, active
+            FROM shift_audit_profiles
+            WHERE page_name = :page_name AND active = TRUE
+            ORDER BY profile_name
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"page_name": page_name})
+        if df.empty:
+            return pd.DataFrame(columns=["profile_name", "page_name", "shifts", "selected_names", "view_scope", "active"])
+        df["shifts"] = df["shifts_json"].apply(lambda x: json.loads(x) if pd.notna(x) and str(x).strip() else [])
+        df["selected_names"] = df["selected_names_json"].apply(lambda x: json.loads(x) if pd.notna(x) and str(x).strip() else [])
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["profile_name", "page_name", "shifts", "selected_names", "view_scope", "active"])
+
+
+@st.cache_data(ttl=300)
+def load_shift_schedule_for_date(sel_date):
+    try:
+        sql = text("""
+            SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note
+            FROM staff_schedule
+            WHERE dt = :d
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"]).dt.date
+        df["staff_name"] = df["staff_name"].fillna("Unknown").astype(str).str.strip()
+        df["shift_type"] = df["shift_type"].fillna("").astype(str).str.strip()
+        df["assignment_type"] = df["assignment_type"].fillna("").astype(str).str.strip()
+        df["match_key"] = df["staff_name"].apply(normalize_name)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_day_events_for_shift_audit(sel_date):
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, device, event_type, med_desc, qty
+            FROM events
+            WHERE dt::date = :d
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
+        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
+        df["match_key"] = df["user_name"].apply(normalize_name)
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_day_pharmacy_for_shift_audit(sel_date):
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, destination, priority, med_desc, qty
+            FROM pharmacy_orders
+            WHERE dt::date = :d
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["destination"] = df["destination"].fillna("Unknown").astype(str).str.strip()
+        df["priority"] = df["priority"].fillna("").astype(str).str.strip()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def classify_shift_work_type(source, device, event_type):
+    src = str(source or "").lower()
+    dev = str(device or "").lower()
+    evt = str(event_type or "").lower()
+
+    if src == "pharmacy":
+        return "Carousel / 0400 Pull"
+    if re.search(r"outdate", evt):
+        return "Pyxis Outdates"
+    if re.search(r"carousel|cubic|pack|central", dev):
+        return "Returns / Carousel Putaway"
+    return "Pyxis Maintenance"
+
+
+def build_shift_day_sessions(df_events_day, df_pharm_day):
+    px_df = df_events_day[["pk", "dt", "user_name", "device", "event_type", "med_desc", "qty", "match_key"]].copy() if not df_events_day.empty else pd.DataFrame()
+    if not px_df.empty:
+        px_df["source"] = "Pyxis"
+
+    ph_df = df_pharm_day[["pk", "dt", "user_name", "destination", "priority", "med_desc", "qty"]].copy() if not df_pharm_day.empty else pd.DataFrame()
+    if not ph_df.empty:
+        ph_df = ph_df.rename(columns={"destination": "device", "priority": "event_type"})
+        ph_df["source"] = "Pharmacy"
+        ph_df["match_key"] = ph_df["user_name"].apply(normalize_name)
+
+    day_combined = pd.concat([px_df, ph_df], ignore_index=True)
+    if day_combined.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    day_combined["dt"] = pd.to_datetime(day_combined["dt"], errors="coerce")
+    day_combined = day_combined.dropna(subset=["dt"]).sort_values(["match_key", "dt"]).reset_index(drop=True)
+    day_combined["prev_match_key"] = day_combined["match_key"].shift()
+    day_combined["prev_device"] = day_combined["device"].shift()
+    day_combined["prev_dt"] = day_combined["dt"].shift()
+    day_combined["gap"] = (day_combined["dt"] - day_combined["prev_dt"]).dt.total_seconds().fillna(0)
+    day_combined["is_new_session"] = np.where(
+        (day_combined["match_key"] != day_combined["prev_match_key"]) |
+        (day_combined["device"] != day_combined["prev_device"]) |
+        (day_combined["gap"] > 1200),
+        1, 0
+    )
+    day_combined["session_id"] = day_combined["is_new_session"].cumsum()
+
+    grouped = (
+        day_combined.groupby("session_id")
+        .agg(
+            tech_key=("match_key", "first"),
+            user_name=("user_name", "first"),
+            device=("device", "first"),
+            source=("source", "first"),
+            primary_event=("event_type", "first"),
+            start=("dt", "min"),
+            end=("dt", "max"),
+            tx_count=("pk", "count"),
+        )
+        .reset_index()
+    )
+    grouped["duration_sec"] = (grouped["end"] - grouped["start"]).dt.total_seconds()
+    grouped["duration_sec"] = np.where(grouped["duration_sec"] < 10, 30, grouped["duration_sec"])
+    grouped = grouped.sort_values(["tech_key", "start"]).reset_index(drop=True)
+    grouped["next_start"] = grouped.groupby("tech_key")["start"].shift(-1)
+    grouped["walk_sec"] = (grouped["next_start"] - grouped["end"]).dt.total_seconds()
+    grouped["walk_sec"] = grouped["walk_sec"].where(grouped["walk_sec"].gt(0), 0).fillna(0)
+    return day_combined, grouped
+
+
+def summarize_shift_audit_sessions(active_sessions, active_work_keys, training_count):
+    return {
+        "staff_on_shift": len(active_work_keys),
+        "sessions": int(len(active_sessions)),
+        "active_sec": float(active_sessions["duration_sec"].sum()),
+        "walk_sec": float(active_sessions["walk_sec"].sum()),
+        "long_gap_count": int(active_sessions["long_gap_flag"].sum()),
+        "training_count": int(training_count),
+    }
+
+
+def run_shift_audit_profile_for_date(sel_date, shifts, selected_names=None, view_scope="Whole Shift Team"):
+    selected_names = selected_names or []
+    df_sched = load_shift_schedule_for_date(sel_date)
+    if df_sched.empty:
+        return None
+
+    profile_shifts = [s for s in shifts if s in df_sched["shift_type"].dropna().unique()]
+    if not profile_shifts:
+        return None
+
+    df_events = load_day_events_for_shift_audit(sel_date)
+    df_pharm = load_day_pharmacy_for_shift_audit(sel_date)
+    if df_events.empty and df_pharm.empty:
+        return None
+
+    profile_sched = df_sched[df_sched["shift_type"].isin(profile_shifts)].copy()
+    if view_scope == "Selected Staff Only" and selected_names:
+        profile_keys = set(profile_sched[profile_sched["staff_name"].isin(selected_names)]["match_key"].unique())
+    else:
+        profile_keys = set(profile_sched["match_key"].unique())
+    if not profile_keys:
+        return None
+
+    day_stream, day_sessions = build_shift_day_sessions(df_events, df_pharm)
+    if day_sessions.empty:
+        return None
+
+    active_sessions = day_sessions[day_sessions["tech_key"].isin(profile_keys)].copy()
+    if active_sessions.empty:
+        return None
+
+    work_key_to_name = (
+        profile_sched[["match_key", "staff_name", "assignment_type"]]
+        .drop_duplicates("match_key")
+        .set_index("match_key")
+    )
+    key_to_name = work_key_to_name["staff_name"].to_dict()
+    key_to_assignment = work_key_to_name["assignment_type"].fillna("").astype(str).to_dict()
+
+    active_sessions["assignment_type"] = active_sessions["tech_key"].map(key_to_assignment).fillna("")
+    active_sessions["tech_display"] = active_sessions["tech_key"].map(key_to_name).fillna(active_sessions["user_name"])
+    active_sessions["tech_display"] = np.where(
+        active_sessions["assignment_type"].str.lower().eq("training"),
+        active_sessions["tech_display"] + " (Training)",
+        active_sessions["tech_display"],
+    )
+    active_sessions["work_type"] = active_sessions.apply(
+        lambda row: classify_shift_work_type(row["source"], row["device"], row["primary_event"]),
+        axis=1
+    )
+    active_sessions["work_type"] = pd.Categorical(
+        active_sessions["work_type"],
+        categories=SHIFT_WORK_TYPE_ORDER,
+        ordered=True,
+    )
+    active_sessions["long_gap_flag"] = active_sessions["walk_sec"] > 1200
+
+    training_count = int(
+        profile_sched["assignment_type"].fillna("").astype(str).str.lower().eq("training").sum()
+    )
+    summary = summarize_shift_audit_sessions(active_sessions, profile_keys, training_count)
+
+    work_type_breakdown = (
+        active_sessions.groupby("work_type", observed=False, as_index=False)
+        .agg(
+            sessions=("session_id", "count"),
+            active_sec=("duration_sec", "sum"),
+            walk_sec=("walk_sec", "sum"),
+            techs=("tech_display", "nunique"),
+        )
+        .sort_values("work_type")
+    )
+    work_type_breakdown = work_type_breakdown[work_type_breakdown["sessions"] > 0]
+    dominant_work_type = (
+        work_type_breakdown.sort_values(["active_sec", "work_type"], ascending=[False, True])["work_type"].iloc[0]
+        if not work_type_breakdown.empty else ""
+    )
+
+    return {
+        "audit_date": pd.to_datetime(sel_date).date(),
+        "shifts": profile_shifts,
+        "selected_names": selected_names,
+        "view_scope": view_scope,
+        "staff_on_shift": summary["staff_on_shift"],
+        "sessions": summary["sessions"],
+        "active_sec": summary["active_sec"],
+        "walk_sec": summary["walk_sec"],
+        "long_gap_count": summary["long_gap_count"],
+        "training_count": summary["training_count"],
+        "dominant_work_type": dominant_work_type,
+        "work_type_breakdown": work_type_breakdown.to_dict("records"),
+    }
+
+
+def save_shift_audit_result(profile_name, audit_result):
+    init_db()
+    sql = text("""
+        INSERT INTO shift_audit_results (
+            profile_name, audit_date, shifts_json, selected_names_json, view_scope,
+            staff_on_shift, sessions, active_sec, walk_sec, long_gap_count,
+            training_count, dominant_work_type, work_type_json, updated_at
+        )
+        VALUES (
+            :profile_name, :audit_date, :shifts_json, :selected_names_json, :view_scope,
+            :staff_on_shift, :sessions, :active_sec, :walk_sec, :long_gap_count,
+            :training_count, :dominant_work_type, :work_type_json, NOW()
+        )
+        ON CONFLICT (profile_name, audit_date) DO UPDATE SET
+            shifts_json = EXCLUDED.shifts_json,
+            selected_names_json = EXCLUDED.selected_names_json,
+            view_scope = EXCLUDED.view_scope,
+            staff_on_shift = EXCLUDED.staff_on_shift,
+            sessions = EXCLUDED.sessions,
+            active_sec = EXCLUDED.active_sec,
+            walk_sec = EXCLUDED.walk_sec,
+            long_gap_count = EXCLUDED.long_gap_count,
+            training_count = EXCLUDED.training_count,
+            dominant_work_type = EXCLUDED.dominant_work_type,
+            work_type_json = EXCLUDED.work_type_json,
+            updated_at = NOW()
+    """)
+    payload = {
+        "profile_name": profile_name,
+        "audit_date": audit_result["audit_date"],
+        "shifts_json": json.dumps(audit_result["shifts"]),
+        "selected_names_json": json.dumps(audit_result["selected_names"]),
+        "view_scope": audit_result["view_scope"],
+        "staff_on_shift": audit_result["staff_on_shift"],
+        "sessions": audit_result["sessions"],
+        "active_sec": audit_result["active_sec"],
+        "walk_sec": audit_result["walk_sec"],
+        "long_gap_count": audit_result["long_gap_count"],
+        "training_count": audit_result["training_count"],
+        "dominant_work_type": audit_result["dominant_work_type"],
+        "work_type_json": json.dumps(audit_result["work_type_breakdown"]),
+    }
+    with engine.begin() as conn:
+        conn.execute(sql, payload)
+
+
+@st.cache_data(ttl=300)
+def load_shift_audit_results(start_date, end_date, profile_names=None):
+    init_db()
+    if profile_names:
+        sql = text("""
+            SELECT *
+            FROM shift_audit_results
+            WHERE audit_date BETWEEN :start_date AND :end_date
+              AND profile_name = ANY(:profile_names)
+            ORDER BY audit_date, profile_name
+        """)
+        params = {
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "profile_names": list(profile_names),
+        }
+    else:
+        sql = text("""
+            SELECT *
+            FROM shift_audit_results
+            WHERE audit_date BETWEEN :start_date AND :end_date
+            ORDER BY audit_date, profile_name
+        """)
+        params = {"start_date": str(start_date), "end_date": str(end_date)}
+
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params=params)
+    if df.empty:
+        return df
+    df["audit_date"] = pd.to_datetime(df["audit_date"]).dt.date
+    df["shifts"] = df["shifts_json"].apply(lambda x: json.loads(x) if pd.notna(x) and str(x).strip() else [])
+    df["selected_names"] = df["selected_names_json"].apply(lambda x: json.loads(x) if pd.notna(x) and str(x).strip() else [])
+    df["work_type_breakdown"] = df["work_type_json"].apply(lambda x: json.loads(x) if pd.notna(x) and str(x).strip() else [])
+    return df
 
 
 def excel_serial_to_datetime(series):
@@ -1209,6 +1574,7 @@ def render_page_links():
     st.markdown('<div class="rx-nav-label">Performance</div>', unsafe_allow_html=True)
     safe_page_link("pages/1_⏰_Tardies.py", label="Tardies", icon="⏰")
     safe_page_link("pages/2_🔍_Session_Explorer.py", label="Session Explorer", icon="🔍")
+    safe_page_link("pages/📈_Shift_Audit_Monitor.py", label="Shift Audit Monitor", icon="📈")
     safe_page_link("pages/📊_Workforce_Intelligence.py", label="Workforce Intelligence", icon="📊")
     safe_page_link("pages/📥_Pends_Analyzer.py", label="Pends Analyzer", icon="📥")
     safe_page_link("pages/🚨_discrepancy_deep_dive.py", label="Discrepancy Deep Dive", icon="🚨")
