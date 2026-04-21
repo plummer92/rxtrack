@@ -14,19 +14,175 @@ render_sidebar = App.render_sidebar
 load_orders = App.load_overnight_cartfill_orders
 load_context = App.load_overnight_cartfill_context
 
+
+CURRENT_WAVES = ["0600", "0900", "1400", "1700", "2000"]
+PROPOSED_WAVES = ["0600", "0900", "1530", "2000"]
+
+# Weighted redistribution based on the agreed due-window redesign:
+# 0600: 1000-1400
+# 0900: 1400-2100
+# 1530: 2100-0500
+# 2000: 0500-1000
+PROPOSED_SPLIT = {
+    "0600": {"0600": 1.0},
+    "0900": {"0900": 1.0},
+    "1400": {"0900": 1 / 3, "1530": 2 / 3},
+    "1700": {"1530": 1.0},
+    "2000": {"0600": 1 / 6, "2000": 5 / 6},
+}
+
+
+def nearest_wave_label(ts):
+    if pd.isna(ts):
+        return "Unknown"
+    value = ts.hour + (ts.minute / 60)
+    anchors = {"0600": 6, "0900": 9, "1400": 14, "1700": 17, "2000": 20}
+    return min(anchors, key=lambda label: abs(value - anchors[label]))
+
+
+def prepare_daily_current(df):
+    if df.empty:
+        return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
+
+    daily = (
+        df.groupby(["event_date", "current_wave"], as_index=False)
+        .agg(
+            total_orders=("pk", "count"),
+            administered_orders=("was_administered", "sum"),
+        )
+        .rename(columns={"current_wave": "wave"})
+    )
+    daily["not_administered_orders"] = daily["total_orders"] - daily["administered_orders"]
+    return daily
+
+
+def prepare_daily_proposed(current_daily):
+    if current_daily.empty:
+        return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
+
+    rows = []
+    for row in current_daily.itertuples(index=False):
+        split_map = PROPOSED_SPLIT.get(row.wave, {})
+        for proposed_wave, weight in split_map.items():
+            rows.append(
+                {
+                    "event_date": row.event_date,
+                    "wave": proposed_wave,
+                    "total_orders": row.total_orders * weight,
+                    "administered_orders": row.administered_orders * weight,
+                    "not_administered_orders": row.not_administered_orders * weight,
+                }
+            )
+
+    proposed = pd.DataFrame(rows)
+    if proposed.empty:
+        return proposed
+
+    return (
+        proposed.groupby(["event_date", "wave"], as_index=False)
+        .sum(numeric_only=True)
+    )
+
+
+def build_average_table(daily_df, dates, wave_order, label):
+    if not dates:
+        return pd.DataFrame(columns=["model", "wave", "avg_total_per_day", "avg_administered_per_day", "avg_not_administered_per_day"])
+
+    full_index = pd.MultiIndex.from_product([dates, wave_order], names=["event_date", "wave"])
+    daily = (
+        daily_df.set_index(["event_date", "wave"])
+        .reindex(full_index, fill_value=0)
+        .reset_index()
+    )
+    averages = (
+        daily.groupby("wave", as_index=False)[["total_orders", "administered_orders", "not_administered_orders"]]
+        .mean()
+        .rename(
+            columns={
+                "total_orders": "avg_total_per_day",
+                "administered_orders": "avg_administered_per_day",
+                "not_administered_orders": "avg_not_administered_per_day",
+            }
+        )
+    )
+    averages.insert(0, "model", label)
+    return averages
+
+
+def build_period_tables(current_daily, proposed_daily, focus_df, wave_order_current, wave_order_proposed):
+    dates = sorted(pd.to_datetime(focus_df["event_date"].dropna().unique()).tolist())
+    weekday_dates = sorted(d for d in dates if pd.Timestamp(d).weekday() < 5)
+    weekend_dates = sorted(d for d in dates if pd.Timestamp(d).weekday() >= 5)
+
+    return {
+        "overall": (
+            build_average_table(current_daily, dates, wave_order_current, "Current"),
+            build_average_table(proposed_daily, dates, wave_order_proposed, "Proposed"),
+            len(dates),
+        ),
+        "weekday": (
+            build_average_table(
+                current_daily[current_daily["event_date"].isin(pd.to_datetime(weekday_dates))],
+                weekday_dates,
+                wave_order_current,
+                "Current",
+            ),
+            build_average_table(
+                proposed_daily[proposed_daily["event_date"].isin(pd.to_datetime(weekday_dates))],
+                weekday_dates,
+                wave_order_proposed,
+                "Proposed",
+            ),
+            len(weekday_dates),
+        ),
+        "weekend": (
+            build_average_table(
+                current_daily[current_daily["event_date"].isin(pd.to_datetime(weekend_dates))],
+                weekend_dates,
+                wave_order_current,
+                "Current",
+            ),
+            build_average_table(
+                proposed_daily[proposed_daily["event_date"].isin(pd.to_datetime(weekend_dates))],
+                weekend_dates,
+                wave_order_proposed,
+                "Proposed",
+            ),
+            len(weekend_dates),
+        ),
+    }
+
+
+def style_average_table(df):
+    if df.empty:
+        return df
+    styled = df.copy()
+    for col in ["avg_total_per_day", "avg_administered_per_day", "avg_not_administered_per_day"]:
+        styled[col] = styled[col].map(lambda x: f"{x:.1f}")
+    return styled.rename(
+        columns={
+            "model": "Model",
+            "wave": "Cartfill",
+            "avg_total_per_day": "Avg Total / Day",
+            "avg_administered_per_day": "Avg Admined / Day",
+            "avg_not_administered_per_day": "Avg Not Admined / Day",
+        }
+    )
+
+
 start_date, end_date = render_sidebar()
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Cartfill Optimizer",
-        "Focus the overnight model on SJS Cleanroom cartfills, measure demand against a four-hour prep window, and surface long-hold waste risk.",
+        "Track cleanroom cartfill volume, compare current versus proposed waves, and use actual administered versus not-administered orders to redesign capacity.",
         kicker="Operations",
     )
     _debug_event("Cartfill Optimizer", "shared_intro_loaded")
     _debug_panel("Cartfill Optimizer", intro_mode="shared")
 else:
     st.header("🌙 Cartfill Optimizer")
-    st.caption("Focus overnight cleanroom cartfills on staffing pressure and waste prevention.")
+    st.caption("Track IV cartfill volume and compare current versus proposed cartfill models.")
     _debug_event("Cartfill Optimizer", "fallback_header_used")
     _debug_panel("Cartfill Optimizer", intro_mode="fallback")
 
@@ -39,7 +195,7 @@ if df_orders.empty:
     st.stop()
 
 orders = df_orders.copy()
-for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date"]:
+for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "event_date"]:
     if col in orders.columns:
         orders[col] = pd.to_datetime(orders[col], errors="coerce")
 
@@ -47,6 +203,8 @@ orders["pharmacy"] = orders["pharmacy"].fillna("Unknown").astype(str).str.strip(
 orders["prep_or_dispense_user"] = orders["prep_or_dispense_user"].fillna("Unknown").astype(str).str.strip()
 orders["order_medication"] = orders["order_medication"].fillna("Unknown").astype(str).str.strip()
 orders["is_sjs_cleanroom"] = orders["is_sjs_cleanroom"].fillna(False)
+orders["current_wave"] = orders["ready_for_dispense_dt"].apply(nearest_wave_label)
+orders["was_administered"] = orders["admin_given_dt"].notna().astype(int)
 orders["prep_lead_hours"] = pd.to_numeric(orders["prep_lead_hours"], errors="coerce")
 orders["hold_hours"] = pd.to_numeric(orders["hold_hours"], errors="coerce")
 
@@ -64,133 +222,210 @@ if filtered.empty:
 
 cleanroom = filtered[filtered["is_sjs_cleanroom"]].copy()
 focus = cleanroom if not cleanroom.empty else filtered.copy()
+focus = focus[focus["event_date"].notna()].copy()
+focus["event_date"] = pd.to_datetime(focus["event_date"], errors="coerce").dt.normalize()
 
-focus["due_dt"] = focus["ready_for_dispense_dt"].fillna(focus["admin_given_dt"])
-focus["required_start_dt"] = focus["required_start_dt"].fillna(focus["due_dt"] - pd.Timedelta(hours=4))
-focus["prep_lead_hours"] = focus["prep_lead_hours"].where(focus["prep_lead_hours"].notna(), (focus["due_dt"] - focus["prepared_dt"]).dt.total_seconds() / 3600)
-focus["hold_hours"] = focus["hold_hours"].where(focus["hold_hours"].notna(), (focus["admin_given_dt"] - focus["prepared_dt"]).dt.total_seconds() / 3600)
+if focus.empty:
+    st.warning("The selected records do not have usable cartfill dates.")
+    st.stop()
 
-due_ready = focus.dropna(subset=["due_dt"]).copy()
-prep_ready = focus.dropna(subset=["prepared_dt", "due_dt"]).copy()
-hold_ready = focus.dropna(subset=["prepared_dt", "admin_given_dt"]).copy()
+current_daily = prepare_daily_current(focus)
+proposed_daily = prepare_daily_proposed(current_daily)
+period_tables = build_period_tables(current_daily, proposed_daily, focus, CURRENT_WAVES, PROPOSED_WAVES)
 
-compressed = prep_ready[prep_ready["prep_lead_hours"] < 4].copy()
-long_hold = hold_ready[hold_ready["hold_hours"] > 8].copy()
+total_orders = len(focus)
+total_days = len(sorted(pd.to_datetime(focus["event_date"].dropna().unique()).tolist()))
+total_admined = int(focus["was_administered"].sum())
+total_not_admined = int(total_orders - total_admined)
+avg_per_day = total_orders / total_days if total_days else 0
 
 m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Focused Orders", f"{len(focus):,}")
-m2.metric("Cleanroom Orders", f"{int(focus['is_sjs_cleanroom'].sum()):,}")
-m3.metric("Orders Under 4h Lead", f"{len(compressed):,}")
-m4.metric("Median Prep Lead", f"{prep_ready['prep_lead_hours'].median():.1f} h" if not prep_ready.empty else "N/A")
-m5.metric("Long Holds >8h", f"{len(long_hold):,}")
+m1.metric("Cleanroom Orders", f"{total_orders:,}")
+m2.metric("Avg Orders / Day", f"{avg_per_day:.1f}")
+m3.metric("Administered", f"{total_admined:,}")
+m4.metric("Not Administered", f"{total_not_admined:,}")
+m5.metric("Likely Waste Rate", f"{(total_not_admined / total_orders * 100):.1f}%" if total_orders else "N/A")
 
-st.caption("Current assumptions: scheduled due time comes from `Ready for Dispense`, required cleanroom start is `due time - 4 hours`, and holds over 8 hours are shown as a waste-risk proxy.")
+st.caption(
+    "Current cartfill volume uses the actual `Ready for Dispense` cartfill start time. "
+    "Not-administered orders are rows with no `Admin Given Date & Time`. "
+    "Proposed averages are weighted estimates that reassign current-wave volume into your redesign: "
+    "`0600 = 1000-1400`, `0900 = 1400-2100`, `1530 = 2100-0500`, `2000 = 0500-1000`."
+)
 
 st.divider()
 
-col1, col2 = st.columns(2)
+st.subheader("Current vs Proposed Cartfill Volume")
 
-with col1:
-    st.subheader("When IV Work Needed To Start")
-    if due_ready.empty:
-        st.info("No due timestamps are available in this filter window.")
-    else:
-        start_profile = due_ready.copy()
-        start_profile["required_hour"] = start_profile["required_start_dt"].dt.hour
-        start_mix = start_profile.groupby("required_hour", as_index=False).agg(
-            orders=("pk", "count"),
-        )
-        fig_start = px.bar(
-            start_mix,
-            x="required_hour",
-            y="orders",
-            labels={"required_hour": "Hour Cleanroom Should Start", "orders": "Orders"},
-            color="orders",
-            color_continuous_scale="Blues",
-        )
-        fig_start.update_layout(coloraxis_showscale=False, height=360)
-        st.plotly_chart(fig_start, width="stretch")
+period_label_map = {
+    "overall": "Overall",
+    "weekday": "Weekday",
+    "weekend": "Weekend",
+}
+selected_period = st.segmented_control(
+    "Average Type",
+    options=list(period_label_map.keys()),
+    default="overall",
+    format_func=lambda x: period_label_map[x],
+)
 
-with col2:
-    st.subheader("Due Hour Profile")
-    if due_ready.empty:
-        st.info("No due timestamps are available in this filter window.")
-    else:
-        due_profile = due_ready.copy()
-        due_profile["due_hour"] = due_profile["due_dt"].dt.hour
-        due_mix = due_profile.groupby("due_hour", as_index=False).agg(
-            orders=("pk", "count"),
-        )
-        fig_due = px.line(
-            due_mix,
-            x="due_hour",
-            y="orders",
-            markers=True,
-            labels={"due_hour": "First Dose Due Hour", "orders": "Orders"},
-        )
-        fig_due.update_layout(height=360)
-        st.plotly_chart(fig_due, use_container_width=True)
+current_avg, proposed_avg, period_days = period_tables[selected_period]
+comparison = pd.concat([current_avg, proposed_avg], ignore_index=True)
 
-col3, col4 = st.columns(2)
+c1, c2 = st.columns([1.1, 0.9])
 
-with col3:
-    st.subheader("Highest Pressure Medications")
-    med_pressure = (
+with c1:
+    st.caption(f"{period_label_map[selected_period]} averages across {period_days} days")
+    st.dataframe(
+        style_average_table(comparison),
+        width="stretch",
+        hide_index=True,
+    )
+
+with c2:
+    fig_compare = px.bar(
+        comparison,
+        x="wave",
+        y="avg_total_per_day",
+        color="model",
+        barmode="group",
+        category_orders={"wave": CURRENT_WAVES + ["1530"]},
+        labels={"wave": "Cartfill", "avg_total_per_day": "Avg Orders / Day", "model": "Model"},
+        text_auto=".1f",
+    )
+    fig_compare.update_layout(height=360)
+    st.plotly_chart(fig_compare, width="stretch")
+
+detail_col1, detail_col2 = st.columns(2)
+
+with detail_col1:
+    fig_admin = px.bar(
+        comparison,
+        x="wave",
+        y="avg_administered_per_day",
+        color="model",
+        barmode="group",
+        category_orders={"wave": CURRENT_WAVES + ["1530"]},
+        labels={"wave": "Cartfill", "avg_administered_per_day": "Avg Admined / Day", "model": "Model"},
+        text_auto=".1f",
+    )
+    fig_admin.update_layout(height=360)
+    st.plotly_chart(fig_admin, width="stretch")
+
+with detail_col2:
+    fig_not_admin = px.bar(
+        comparison,
+        x="wave",
+        y="avg_not_administered_per_day",
+        color="model",
+        barmode="group",
+        category_orders={"wave": CURRENT_WAVES + ["1530"]},
+        labels={"wave": "Cartfill", "avg_not_administered_per_day": "Avg Not Admined / Day", "model": "Model"},
+        text_auto=".1f",
+    )
+    fig_not_admin.update_layout(height=360)
+    st.plotly_chart(fig_not_admin, width="stretch")
+
+st.divider()
+
+st.subheader("Current Cleanroom Cartfill Tracker")
+
+wave_mix = (
+    current_daily.groupby("wave", as_index=False)[["total_orders", "administered_orders", "not_administered_orders"]]
+    .sum()
+)
+wave_mix["waste_rate"] = wave_mix["not_administered_orders"] / wave_mix["total_orders"]
+
+tracker_col1, tracker_col2 = st.columns(2)
+
+with tracker_col1:
+    tracker_display = wave_mix.copy()
+    tracker_display["waste_rate"] = tracker_display["waste_rate"].map(lambda x: f"{x * 100:.1f}%")
+    tracker_display = tracker_display.rename(
+        columns={
+            "wave": "Current Cartfill",
+            "total_orders": "Orders",
+            "administered_orders": "Admined",
+            "not_administered_orders": "Not Admined",
+            "waste_rate": "Likely Waste Rate",
+        }
+    )
+    st.dataframe(tracker_display, width="stretch", hide_index=True)
+
+with tracker_col2:
+    fig_tracker = px.bar(
+        wave_mix,
+        x="wave",
+        y=["administered_orders", "not_administered_orders"],
+        category_orders={"wave": CURRENT_WAVES},
+        labels={"value": "Orders", "wave": "Current Cartfill", "variable": "Status"},
+        barmode="stack",
+    )
+    fig_tracker.update_layout(height=360)
+    st.plotly_chart(fig_tracker, width="stretch")
+
+top_col1, top_col2 = st.columns(2)
+
+with top_col1:
+    st.subheader("Top Volume Medications")
+    top_meds = (
         focus.groupby("order_medication", as_index=False)
         .agg(
             orders=("pk", "count"),
-            median_prep_lead=("prep_lead_hours", "median"),
-            median_hold=("hold_hours", "median"),
+            administered=("was_administered", "sum"),
         )
-        .sort_values(["orders", "median_prep_lead"], ascending=[False, True])
+        .sort_values("orders", ascending=False)
         .head(15)
     )
+    top_meds["not_administered"] = top_meds["orders"] - top_meds["administered"]
     fig_meds = px.bar(
-        med_pressure.sort_values("orders"),
+        top_meds.sort_values("orders"),
         x="orders",
         y="order_medication",
         orientation="h",
-        hover_data=["median_prep_lead", "median_hold"],
         labels={"orders": "Orders", "order_medication": ""},
         color="orders",
         color_continuous_scale="Tealgrn",
     )
     fig_meds.update_layout(coloraxis_showscale=False, height=420)
-    st.plotly_chart(fig_meds, use_container_width=True)
+    st.plotly_chart(fig_meds, width="stretch")
 
-with col4:
-    st.subheader("Preparation Load By User")
-    user_load = (
-        focus.groupby("prep_or_dispense_user", as_index=False)
+with top_col2:
+    st.subheader("Top Likely Waste Medications")
+    waste_meds = (
+        focus.groupby("order_medication", as_index=False)
         .agg(
             orders=("pk", "count"),
-            median_prep_lead=("prep_lead_hours", "median"),
-            median_hold=("hold_hours", "median"),
+            not_administered=("was_administered", lambda s: int((1 - s).sum())),
         )
-        .sort_values("orders", ascending=False)
-        .head(15)
     )
-    fig_users = px.bar(
-        user_load.sort_values("orders"),
-        x="orders",
-        y="prep_or_dispense_user",
+    waste_meds = waste_meds[waste_meds["not_administered"] > 0].copy()
+    waste_meds["waste_rate"] = waste_meds["not_administered"] / waste_meds["orders"]
+    waste_meds = waste_meds.sort_values(["not_administered", "waste_rate"], ascending=[False, False]).head(15)
+    fig_waste = px.bar(
+        waste_meds.sort_values("not_administered"),
+        x="not_administered",
+        y="order_medication",
         orientation="h",
-        hover_data=["median_prep_lead", "median_hold"],
-        labels={"orders": "Orders", "prep_or_dispense_user": ""},
-        color="orders",
-        color_continuous_scale="Greens",
+        labels={"not_administered": "Likely Waste Orders", "order_medication": ""},
+        color="not_administered",
+        color_continuous_scale="Reds",
     )
-    fig_users.update_layout(coloraxis_showscale=False, height=420)
-    st.plotly_chart(fig_users, use_container_width=True)
+    fig_waste.update_layout(coloraxis_showscale=False, height=420)
+    st.plotly_chart(fig_waste, width="stretch")
+
+st.divider()
 
 ctx_col1, ctx_col2 = st.columns(2)
 
 with ctx_col1:
-    st.subheader("Configured SJS IV Cartfill Windows")
+    st.subheader("Configured Cartfill Windows From Workbook")
     if df_windows.empty:
         st.info("No cartfill timing rows are stored yet from the workbook.")
     else:
-        cleanroom_windows = df_windows[df_windows["pharmacy"].fillna("").astype(str).str.contains("Cleanroom", case=False, na=False)].copy()
+        cleanroom_windows = df_windows[
+            df_windows["pharmacy"].fillna("").astype(str).str.contains("Cleanroom", case=False, na=False)
+        ].copy()
         if cleanroom_windows.empty:
             st.info("No cleanroom-specific timing rows were found in the workbook context.")
         else:
@@ -201,7 +436,7 @@ with ctx_col1:
             )
 
 with ctx_col2:
-    st.subheader("Staffing Model Snapshot")
+    st.subheader("IV Staffing Snapshot")
     if df_staffing.empty:
         st.info("No staffing model rows are stored yet from the workbook.")
     else:
@@ -220,45 +455,3 @@ with ctx_col2:
                 width="stretch",
                 hide_index=True,
             )
-
-st.divider()
-
-alert_col1, alert_col2 = st.columns(2)
-
-with alert_col1:
-    st.subheader("Orders Inside The 4-Hour Prep Window")
-    if compressed.empty:
-        st.success("No orders with less than 4 hours of prep lead are in the current filter window.")
-    else:
-        st.dataframe(
-            compressed[[
-                "order_id", "order_medication", "pharmacy", "prepared_dt",
-                "due_dt", "prep_lead_hours", "prep_or_dispense_user",
-            ]].sort_values("prep_lead_hours"),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "prepared_dt": st.column_config.DatetimeColumn("Prepared", format="MM/DD/YY HH:mm"),
-                "due_dt": st.column_config.DatetimeColumn("Due", format="MM/DD/YY HH:mm"),
-                "prep_lead_hours": st.column_config.NumberColumn("Prep Lead (h)", format="%.2f"),
-            },
-        )
-
-with alert_col2:
-    st.subheader("Potential Waste Hold List")
-    if long_hold.empty:
-        st.success("No orders exceeded the long-hold threshold in the current filter window.")
-    else:
-        st.dataframe(
-            long_hold[[
-                "order_id", "order_medication", "pharmacy", "prepared_dt",
-                "admin_given_dt", "hold_hours", "prep_or_dispense_user",
-            ]].sort_values("hold_hours", ascending=False),
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "prepared_dt": st.column_config.DatetimeColumn("Prepared", format="MM/DD/YY HH:mm"),
-                "admin_given_dt": st.column_config.DatetimeColumn("Admin Given", format="MM/DD/YY HH:mm"),
-                "hold_hours": st.column_config.NumberColumn("Hold Hours", format="%.2f"),
-            },
-        )
