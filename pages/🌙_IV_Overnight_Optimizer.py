@@ -8,7 +8,7 @@ _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: Non
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
 
-st.set_page_config(page_title="IV Overnight Optimizer", page_icon="🌙", layout="wide")
+st.set_page_config(page_title="Cartfill Optimizer", page_icon="🌙", layout="wide")
 
 render_sidebar = App.render_sidebar
 load_orders = App.load_overnight_cartfill_orders
@@ -18,17 +18,17 @@ start_date, end_date = render_sidebar()
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
-        "IV Overnight Optimizer",
+        "Cartfill Optimizer",
         "Focus the overnight model on SJS Cleanroom cartfills, measure demand against a four-hour prep window, and surface long-hold waste risk.",
         kicker="Operations",
     )
-    _debug_event("IV Overnight Optimizer", "shared_intro_loaded")
-    _debug_panel("IV Overnight Optimizer", intro_mode="shared")
+    _debug_event("Cartfill Optimizer", "shared_intro_loaded")
+    _debug_panel("Cartfill Optimizer", intro_mode="shared")
 else:
-    st.header("🌙 IV Overnight Optimizer")
+    st.header("🌙 Cartfill Optimizer")
     st.caption("Focus overnight cleanroom cartfills on staffing pressure and waste prevention.")
-    _debug_event("IV Overnight Optimizer", "fallback_header_used")
-    _debug_panel("IV Overnight Optimizer", intro_mode="fallback")
+    _debug_event("Cartfill Optimizer", "fallback_header_used")
+    _debug_panel("Cartfill Optimizer", intro_mode="fallback")
 
 with st.spinner("Loading overnight cartfill model..."):
     df_orders = load_orders(start_date, end_date)

@@ -1101,7 +1101,7 @@ def render_page_links():
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
     st.page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
     st.page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
-    st.page_link("pages/🌙_IV_Overnight_Optimizer.py", label="IV Overnight Optimizer", icon="🌙")
+    st.page_link("pages/🌙_IV_Overnight_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
     st.page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
     st.page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
     st.page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
