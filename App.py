@@ -1107,6 +1107,36 @@ def apply_global_styles():
             color: #ffffff;
             box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
         }
+        [data-testid="stTabs"] [role="tabpanel"] {
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 18px;
+            padding: 1rem 1rem 0.4rem 1rem;
+            margin-top: 0.75rem;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
+        }
+        [data-testid="stTabs"] [role="tabpanel"] h1,
+        [data-testid="stTabs"] [role="tabpanel"] h2,
+        [data-testid="stTabs"] [role="tabpanel"] h3,
+        [data-testid="stTabs"] [role="tabpanel"] p,
+        [data-testid="stTabs"] [role="tabpanel"] label,
+        [data-testid="stTabs"] [role="tabpanel"] span {
+            color: #0f172a !important;
+        }
+        [data-testid="stTabs"] [role="tabpanel"] .stCaption,
+        [data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"] {
+            color: #475569 !important;
+        }
+        [data-testid="stExpander"] details {
+            background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 16px;
+        }
+        [data-testid="stExpander"] summary,
+        [data-testid="stExpander"] summary * {
+            color: #0f172a !important;
+            font-weight: 700;
+        }
         h2, h3, [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 {
             color: #0f172a;
         }
