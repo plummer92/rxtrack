@@ -691,6 +691,13 @@ with tab3:
             defaults["shifts"] = [s for s in profile.get("shifts", []) if s in work_shifts] or defaults["shifts"]
             defaults["selected_names"] = profile.get("selected_names", [])
             defaults["view_scope"] = profile.get("view_scope") or "Whole Shift Team"
+            if st.session_state.get("_shift_work_map_profile_applied") != selected_profile:
+                st.session_state["shift_work_map_shifts"] = defaults["shifts"]
+                st.session_state["shift_work_map_names"] = defaults["selected_names"]
+                st.session_state["shift_work_map_scope"] = defaults["view_scope"]
+                st.session_state["_shift_work_map_profile_applied"] = selected_profile
+        else:
+            st.session_state["_shift_work_map_profile_applied"] = "Manual"
 
     wc1, wc2 = st.columns([1, 2])
 
