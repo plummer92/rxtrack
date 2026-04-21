@@ -225,6 +225,16 @@ def init_db():
             notes TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );""",
+        """CREATE TABLE IF NOT EXISTS shift_audit_profiles (
+            profile_name TEXT PRIMARY KEY,
+            page_name TEXT NOT NULL,
+            shifts_json TEXT,
+            selected_names_json TEXT,
+            view_scope TEXT,
+            active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );""",
         """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;"""
     ]
     with db_cursor() as (conn, cur):

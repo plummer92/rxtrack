@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import re
+import json
 from sqlalchemy import text
 import App
 
@@ -16,6 +17,71 @@ seconds_to_mmss = App.seconds_to_mmss
 render_sidebar = App.render_sidebar
 normalize_name = App.normalize_name
 engine = App.engine
+
+
+@st.cache_data(ttl=300)
+def load_shift_audit_profiles():
+    try:
+        sql = text("""
+            SELECT profile_name, page_name, shifts_json, selected_names_json, view_scope, active
+            FROM shift_audit_profiles
+            WHERE page_name = 'shift_work_map' AND active = TRUE
+            ORDER BY profile_name
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn)
+        if df.empty:
+            return df
+        df["shifts"] = df["shifts_json"].apply(lambda x: json.loads(x) if pd.notna(x) and str(x).strip() else [])
+        df["selected_names"] = df["selected_names_json"].apply(lambda x: json.loads(x) if pd.notna(x) and str(x).strip() else [])
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["profile_name", "page_name", "shifts", "selected_names", "view_scope", "active"])
+
+
+def save_shift_audit_profile(profile_name, shifts, selected_names, view_scope):
+    try:
+        sql = text("""
+            INSERT INTO shift_audit_profiles
+                (profile_name, page_name, shifts_json, selected_names_json, view_scope, active, updated_at)
+            VALUES
+                (:profile_name, 'shift_work_map', :shifts_json, :selected_names_json, :view_scope, TRUE, NOW())
+            ON CONFLICT (profile_name) DO UPDATE SET
+                shifts_json = EXCLUDED.shifts_json,
+                selected_names_json = EXCLUDED.selected_names_json,
+                view_scope = EXCLUDED.view_scope,
+                active = TRUE,
+                updated_at = NOW()
+        """)
+        with engine.begin() as conn:
+            conn.execute(
+                sql,
+                {
+                    "profile_name": profile_name.strip(),
+                    "shifts_json": json.dumps(shifts),
+                    "selected_names_json": json.dumps(selected_names),
+                    "view_scope": view_scope,
+                },
+            )
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Could not save audit profile: {e}")
+        return False
+
+
+def summarize_shift_audit(active_sessions, active_work_keys, training_count):
+    total_active_sec = active_sessions["duration_sec"].sum()
+    total_walk_sec = active_sessions["walk_sec"].sum()
+    long_gap_count = int(active_sessions["long_gap_flag"].sum())
+    return {
+        "staff_on_shift": len(active_work_keys),
+        "sessions": len(active_sessions),
+        "active_sec": total_active_sec,
+        "walk_sec": total_walk_sec,
+        "long_gap_count": long_gap_count,
+        "training_count": training_count,
+    }
 
 start_date, end_date = render_sidebar()
 if hasattr(App, "render_page_intro"):
@@ -585,6 +651,8 @@ with tab3:
         "Map scheduled shift coverage to the three biggest daily phases you described: carousel / 0400 pull first, Pyxis delivery second, then returns back into the carousel."
     )
 
+    saved_profiles = load_shift_audit_profiles()
+
     work_date = st.date_input(
         "Work Map Date",
         value=end_date,
@@ -609,13 +677,27 @@ with tab3:
         st.warning("No shift types found for this date.")
         st.stop()
 
+    defaults = {"shifts": work_shifts[:1] if work_shifts else [], "selected_names": [], "view_scope": "Whole Shift Team"}
+    if not saved_profiles.empty:
+        profile_lookup = saved_profiles.set_index("profile_name").to_dict("index")
+        selected_profile = st.selectbox(
+            "Saved Audit Profile",
+            options=["Manual"] + saved_profiles["profile_name"].tolist(),
+            key="shift_work_map_profile",
+        )
+        if selected_profile != "Manual":
+            profile = profile_lookup[selected_profile]
+            defaults["shifts"] = [s for s in profile.get("shifts", []) if s in work_shifts] or defaults["shifts"]
+            defaults["selected_names"] = profile.get("selected_names", [])
+            defaults["view_scope"] = profile.get("view_scope") or "Whole Shift Team"
+
     wc1, wc2 = st.columns([1, 2])
 
     with wc1:
         selected_work_shifts = st.multiselect(
             "Shift(s)",
             options=work_shifts,
-            default=work_shifts[:1] if work_shifts else [],
+            default=defaults["shifts"],
             key="shift_work_map_shifts",
         )
 
@@ -634,6 +716,7 @@ with tab3:
         selected_work_names = st.multiselect(
             "Staff (leave blank for all on shift)",
             options=work_name_options["staff_name"].tolist(),
+            default=[n for n in defaults["selected_names"] if n in work_name_options["staff_name"].tolist()],
             key="shift_work_map_names",
         )
 
@@ -641,9 +724,30 @@ with tab3:
         "View Scope",
         options=["Whole Shift Team", "Selected Staff Only"],
         horizontal=True,
-        index=0,
+        index=0 if defaults["view_scope"] == "Whole Shift Team" else 1,
         key="shift_work_map_scope",
     )
+
+    save_col1, save_col2 = st.columns([2, 1])
+    with save_col1:
+        profile_name = st.text_input(
+            "Save Current Audit As",
+            placeholder="Example: 0500 Hardline Audit",
+            key="shift_work_map_profile_name",
+        )
+    with save_col2:
+        st.write("")
+        st.write("")
+        if st.button("Save Audit Profile", key="save_shift_work_profile"):
+            if not profile_name.strip():
+                st.warning("Enter a profile name before saving.")
+            elif save_shift_audit_profile(
+                profile_name,
+                selected_work_shifts,
+                selected_work_names,
+                view_scope,
+            ):
+                st.success(f"Saved audit profile: {profile_name.strip()}")
 
     if selected_work_names and view_scope == "Selected Staff Only":
         active_work_keys = set(
@@ -688,22 +792,65 @@ with tab3:
     )
     active_sessions["long_gap_flag"] = active_sessions["walk_sec"] > 1200
 
-    total_active_sec = active_sessions["duration_sec"].sum()
-    total_walk_sec = active_sessions["walk_sec"].sum()
-    long_gap_count = int(active_sessions["long_gap_flag"].sum())
     training_count = int(work_sched_filtered["assignment_type"].fillna("").astype(str).str.lower().eq("training").sum())
+    summary = summarize_shift_audit(active_sessions, active_work_keys, training_count)
 
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Staff on Shift", len(active_work_keys))
-    m2.metric("Sessions", f"{len(active_sessions):,}")
-    m3.metric("Active Work Time", seconds_to_mmss(total_active_sec))
-    m4.metric("Walk Time", seconds_to_mmss(total_walk_sec))
-    m5.metric("Training Staff", training_count)
+    m1.metric("Staff on Shift", summary["staff_on_shift"])
+    m2.metric("Sessions", f"{summary['sessions']:,}")
+    m3.metric("Active Work Time", seconds_to_mmss(summary["active_sec"]))
+    m4.metric("Walk Time", seconds_to_mmss(summary["walk_sec"]))
+    m5.metric("Training Staff", summary["training_count"])
 
     st.caption(
         "Use `Whole Shift Team` to keep the regular tech and any trainee together in one shift view. "
         "Switch to `Selected Staff Only` when you want to isolate one person."
     )
+
+    if not saved_profiles.empty:
+        audit_rows = []
+        for profile in saved_profiles.itertuples(index=False):
+            profile_shifts = [s for s in profile.shifts if s in work_shifts]
+            if not profile_shifts:
+                continue
+            profile_sched = df_sched_work[df_sched_work["shift_type"].isin(profile_shifts)].copy()
+            if profile.view_scope == "Selected Staff Only" and profile.selected_names:
+                profile_keys = set(
+                    profile_sched[profile_sched["staff_name"].isin(profile.selected_names)]["match_key"].unique()
+                )
+            else:
+                profile_keys = set(profile_sched["match_key"].unique())
+            profile_sessions = day_sessions[day_sessions["tech_key"].isin(profile_keys)].copy()
+            if profile_sessions.empty:
+                continue
+            profile_sessions["work_type"] = profile_sessions.apply(
+                lambda row: classify_work_type(row["source"], row["device"], row["primary_event"]),
+                axis=1
+            )
+            profile_sessions["long_gap_flag"] = profile_sessions["walk_sec"] > 1200
+            profile_training_count = int(
+                profile_sched["assignment_type"].fillna("").astype(str).str.lower().eq("training").sum()
+            )
+            profile_summary = summarize_shift_audit(profile_sessions, profile_keys, profile_training_count)
+            audit_rows.append(
+                {
+                    "Audit Profile": profile.profile_name,
+                    "Shift(s)": ", ".join(profile_shifts),
+                    "Scope": profile.view_scope,
+                    "Staff on Shift": profile_summary["staff_on_shift"],
+                    "Sessions": profile_summary["sessions"],
+                    "Active Time": seconds_to_mmss(profile_summary["active_sec"]),
+                    "Walk Time": seconds_to_mmss(profile_summary["walk_sec"]),
+                    "Long Gaps >20m": profile_summary["long_gap_count"],
+                    "Training Staff": profile_summary["training_count"],
+                }
+            )
+
+        if audit_rows:
+            st.divider()
+            st.subheader("Saved Audit Runs for This Date")
+            st.caption("These hardlined audit profiles run automatically against the selected date using the saved shift rules.")
+            st.dataframe(pd.DataFrame(audit_rows), use_container_width=True, hide_index=True)
 
     roster = work_sched_filtered[["staff_name", "shift_type", "assignment_type", "note"]].drop_duplicates()
     if selected_work_names:
