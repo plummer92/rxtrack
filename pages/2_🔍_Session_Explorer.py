@@ -106,6 +106,14 @@ sessions['Walk Time'] = (sessions['Next Start'] - sessions['End']).dt.total_seco
 
 tab1, tab2, tab3 = st.tabs(["🔍 Session View", "🕐 Shift Timeline", "🧭 Shift Work Map"])
 
+WORK_TYPE_ORDER = [
+    "Carousel / 0400 Pull",
+    "Pyxis Delivery",
+    "Returns / Carousel Putaway",
+    "Inventory / Counts",
+    "Other Cabinet Work",
+]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — SESSION VIEW (existing)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -357,16 +365,16 @@ def classify_work_type(source, device, event_type):
     evt = str(event_type or "").lower()
 
     if src == "pharmacy":
-        return "Delivery / Pharmacy Queue"
+        return "Carousel / 0400 Pull"
     if re.search(r"stockout|return|outdate|unload", evt):
-        return "Returns / Cleanup"
+        return "Returns / Carousel Putaway"
     if re.search(r"refill|restock|load|replenish", evt):
-        return "Refill / Restock"
+        return "Pyxis Delivery"
     if re.search(r"count|inventory|cycle", evt):
         return "Inventory / Counts"
     if re.search(r"carousel|cubic|pack|central", dev):
-        return "Central Pharmacy / Carousel"
-    return "Pyxis Cabinet Work"
+        return "Returns / Carousel Putaway"
+    return "Other Cabinet Work"
 
 
 with tab2:
@@ -573,7 +581,7 @@ with tab2:
 with tab3:
     st.subheader("🧭 Shift Work Map")
     st.caption(
-        "Map scheduled shift coverage to actual work blocks so the program can estimate what each shift did, how long it took, and how much time was spent walking between sessions."
+        "Map scheduled shift coverage to the three biggest daily phases you described: carousel / 0400 pull first, Pyxis delivery second, then returns back into the carousel."
     )
 
     work_date = st.date_input(
@@ -656,6 +664,11 @@ with tab3:
         lambda row: classify_work_type(row["source"], row["device"], row["primary_event"]),
         axis=1
     )
+    active_sessions["work_type"] = pd.Categorical(
+        active_sessions["work_type"],
+        categories=WORK_TYPE_ORDER,
+        ordered=True,
+    )
     active_sessions["long_gap_flag"] = active_sessions["walk_sec"] > 1200
 
     total_active_sec = active_sessions["duration_sec"].sum()
@@ -699,7 +712,7 @@ with tab3:
         active_sessions.groupby(["tech_display", "work_type"])
         .agg(active_sec=("duration_sec", "sum"))
         .reset_index()
-        .sort_values(["tech_display", "active_sec"], ascending=[True, False])
+        .sort_values(["tech_display", "active_sec", "work_type"], ascending=[True, False, True])
         .drop_duplicates("tech_display")
         .rename(columns={"work_type": "dominant_work_type"})
     )
@@ -715,7 +728,7 @@ with tab3:
             walk_sec=("walk_sec", "sum"),
             techs=("tech_display", "nunique"),
         )
-        .sort_values("active_sec", ascending=False)
+        .sort_values("work_type")
     )
     work_type_summary["active_time"] = work_type_summary["active_sec"].apply(seconds_to_mmss)
     work_type_summary["walk_time"] = work_type_summary["walk_sec"].apply(seconds_to_mmss)
