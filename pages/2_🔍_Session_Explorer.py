@@ -108,9 +108,11 @@ tab1, tab2, tab3 = st.tabs(["🔍 Session View", "🕐 Shift Timeline", "🧭 Sh
 
 WORK_TYPE_ORDER = [
     "Carousel / 0400 Pull",
-    "Pyxis Delivery",
+    "Pyxis Delivery Refills",
+    "Pyxis Outdates",
+    "Pyxis Unloads",
     "Returns / Carousel Putaway",
-    "Other Cabinet Work",
+    "Pyxis Maintenance",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,15 +367,15 @@ def classify_work_type(source, device, event_type):
 
     if src == "pharmacy":
         return "Carousel / 0400 Pull"
+    if re.search(r"outdate", evt):
+        return "Pyxis Outdates"
     if re.search(r"stockout|return|outdate|unload", evt):
-        return "Returns / Carousel Putaway"
+        return "Pyxis Unloads"
     if re.search(r"refill|restock|load|replenish", evt):
-        return "Pyxis Delivery"
-    if re.search(r"cycle count|blind count|physical count", evt):
-        return "Other Cabinet Work"
+        return "Pyxis Delivery Refills"
     if re.search(r"carousel|cubic|pack|central", dev):
         return "Returns / Carousel Putaway"
-    return "Other Cabinet Work"
+    return "Pyxis Maintenance"
 
 
 with tab2:
@@ -635,7 +637,15 @@ with tab3:
             key="shift_work_map_names",
         )
 
-    if selected_work_names:
+    view_scope = st.radio(
+        "View Scope",
+        options=["Whole Shift Team", "Selected Staff Only"],
+        horizontal=True,
+        index=0,
+        key="shift_work_map_scope",
+    )
+
+    if selected_work_names and view_scope == "Selected Staff Only":
         active_work_keys = set(
             work_name_options[work_name_options["staff_name"].isin(selected_work_names)]["match_key"]
         )
@@ -647,18 +657,26 @@ with tab3:
         st.warning("No Pyxis or pharmacy events were found for this date.")
         st.stop()
 
+    active_stream = day_stream[day_stream["match_key"].isin(active_work_keys)].copy()
     active_sessions = day_sessions[day_sessions["tech_key"].isin(active_work_keys)].copy()
     if active_sessions.empty:
         st.warning("No work sessions matched the selected shift staff on this date.")
         st.stop()
 
     work_key_to_name = (
-        work_sched_filtered[["match_key", "staff_name"]]
+        work_sched_filtered[["match_key", "staff_name", "assignment_type"]]
         .drop_duplicates("match_key")
-        .set_index("match_key")["staff_name"]
-        .to_dict()
+        .set_index("match_key")
     )
-    active_sessions["tech_display"] = active_sessions["tech_key"].map(work_key_to_name).fillna(active_sessions["user_name"])
+    key_to_name = work_key_to_name["staff_name"].to_dict()
+    key_to_assignment = work_key_to_name["assignment_type"].fillna("").astype(str).to_dict()
+    active_sessions["assignment_type"] = active_sessions["tech_key"].map(key_to_assignment).fillna("")
+    active_sessions["tech_display"] = active_sessions["tech_key"].map(key_to_name).fillna(active_sessions["user_name"])
+    active_sessions["tech_display"] = np.where(
+        active_sessions["assignment_type"].str.lower().eq("training"),
+        active_sessions["tech_display"] + " (Training)",
+        active_sessions["tech_display"],
+    )
     active_sessions["work_type"] = active_sessions.apply(
         lambda row: classify_work_type(row["source"], row["device"], row["primary_event"]),
         axis=1
@@ -673,13 +691,19 @@ with tab3:
     total_active_sec = active_sessions["duration_sec"].sum()
     total_walk_sec = active_sessions["walk_sec"].sum()
     long_gap_count = int(active_sessions["long_gap_flag"].sum())
+    training_count = int(work_sched_filtered["assignment_type"].fillna("").astype(str).str.lower().eq("training").sum())
 
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Staff on Shift", len(active_work_keys))
     m2.metric("Sessions", f"{len(active_sessions):,}")
     m3.metric("Active Work Time", seconds_to_mmss(total_active_sec))
     m4.metric("Walk Time", seconds_to_mmss(total_walk_sec))
-    m5.metric("Long Gaps >20m", long_gap_count)
+    m5.metric("Training Staff", training_count)
+
+    st.caption(
+        "Use `Whole Shift Team` to keep the regular tech and any trainee together in one shift view. "
+        "Switch to `Selected Staff Only` when you want to isolate one person."
+    )
 
     roster = work_sched_filtered[["staff_name", "shift_type", "assignment_type", "note"]].drop_duplicates()
     if selected_work_names:
@@ -752,7 +776,7 @@ with tab3:
 
     with c2:
         st.subheader("Time by Work Type")
-        st.dataframe(
+        work_type_event = st.dataframe(
             work_type_summary[["work_type", "sessions", "techs", "active_time", "walk_time"]].rename(columns={
                 "work_type": "Work Type",
                 "sessions": "Sessions",
@@ -762,6 +786,8 @@ with tab3:
             }),
             use_container_width=True,
             hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
         )
 
     chart1, chart2 = st.columns(2)
@@ -817,4 +843,36 @@ with tab3:
             "End": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
         }
     )
+
+    if len(work_type_event.selection.rows) > 0:
+        selected_idx = work_type_event.selection.rows[0]
+        selected_work_type = work_type_summary.iloc[selected_idx]["work_type"]
+        session_ids = active_sessions.loc[active_sessions["work_type"] == selected_work_type, "session_id"].tolist()
+        tx_view = active_stream[active_stream["session_id"].isin(session_ids)].copy().sort_values("dt")
+        tx_view["tech_display"] = tx_view["match_key"].map(key_to_name).fillna(tx_view["user_name"])
+        tx_view["tech_display"] = np.where(
+            tx_view["match_key"].map(key_to_assignment).fillna("").astype(str).str.lower().eq("training"),
+            tx_view["tech_display"] + " (Training)",
+            tx_view["tech_display"],
+        )
+
+        st.divider()
+        st.subheader(f"🔎 Transaction Drilldown: {selected_work_type}")
+        st.caption("Clicking a work type above filters to the exact raw transactions that created those sessions.")
+        st.dataframe(
+            tx_view[["dt", "tech_display", "source", "device", "event_type", "med_desc", "qty"]].rename(columns={
+                "dt": "Time",
+                "tech_display": "Technician",
+                "source": "Source",
+                "device": "Device",
+                "event_type": "Event Type",
+                "med_desc": "Medication",
+                "qty": "Qty",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Time": st.column_config.DatetimeColumn("Time", format="HH:mm:ss"),
+            }
+        )
 
