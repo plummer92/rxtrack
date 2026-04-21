@@ -110,7 +110,6 @@ WORK_TYPE_ORDER = [
     "Carousel / 0400 Pull",
     "Pyxis Delivery",
     "Returns / Carousel Putaway",
-    "Inventory / Counts",
     "Other Cabinet Work",
 ]
 
@@ -370,8 +369,8 @@ def classify_work_type(source, device, event_type):
         return "Returns / Carousel Putaway"
     if re.search(r"refill|restock|load|replenish", evt):
         return "Pyxis Delivery"
-    if re.search(r"count|inventory|cycle", evt):
-        return "Inventory / Counts"
+    if re.search(r"cycle count|blind count|physical count", evt):
+        return "Other Cabinet Work"
     if re.search(r"carousel|cubic|pack|central", dev):
         return "Returns / Carousel Putaway"
     return "Other Cabinet Work"
