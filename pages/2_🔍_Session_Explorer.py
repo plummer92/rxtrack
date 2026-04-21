@@ -178,7 +178,6 @@ WORK_TYPE_ORDER = [
     "Carousel / 0400 Pull",
     "Pyxis Delivery Refills",
     "Pyxis Outdates",
-    "Pyxis Unloads",
     "Returns / Carousel Putaway",
     "Pyxis Maintenance",
 ]
@@ -438,7 +437,7 @@ def classify_work_type(source, device, event_type):
     if re.search(r"outdate", evt):
         return "Pyxis Outdates"
     if re.search(r"stockout|return|outdate|unload", evt):
-        return "Pyxis Unloads"
+        return "Pyxis Maintenance"
     if re.search(r"refill|restock|load|replenish", evt):
         return "Pyxis Delivery Refills"
     if re.search(r"carousel|cubic|pack|central", dev):
