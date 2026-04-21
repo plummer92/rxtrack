@@ -132,11 +132,18 @@ if audit_results.empty:
     st.warning("No audit results were produced for the selected date range.")
     st.stop()
 
-flagged_results = (
-    audit_results.groupby("profile_name", group_keys=False)
-    .apply(flag_profile_days)
-    .reset_index(drop=True)
-)
+flagged_chunks = []
+for profile_name in selected_profiles:
+    profile_slice = audit_results[audit_results["profile_name"] == profile_name].copy()
+    if profile_slice.empty:
+        continue
+    flagged_chunks.append(flag_profile_days(profile_slice))
+
+if not flagged_chunks:
+    st.warning("No usable audit rows were available after processing the selected profiles.")
+    st.stop()
+
+flagged_results = pd.concat(flagged_chunks, ignore_index=True)
 
 summary = (
     flagged_results.groupby("profile_name", as_index=False)
