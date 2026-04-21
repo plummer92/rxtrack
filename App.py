@@ -1092,6 +1092,13 @@ def apply_global_styles():
             font-size: 1rem;
             line-height: 1.6;
         }
+        .rx-page-hero .rx-page-title {
+            color: #0f172a !important;
+        }
+        .rx-page-hero .rx-page-subtitle,
+        .rx-page-hero p {
+            color: #334155 !important;
+        }
         [data-testid="stTabs"] [role="tablist"] {
             gap: 0.45rem;
         }
@@ -1099,9 +1106,14 @@ def apply_global_styles():
             background: #eef4fb;
             border: 1px solid rgba(148, 163, 184, 0.42);
             border-radius: 999px;
-            color: #334155;
+            color: #1e293b !important;
             font-weight: 700;
             padding: 0.4rem 0.9rem;
+        }
+        [data-testid="stTabs"] [role="tab"] p,
+        [data-testid="stTabs"] [role="tab"] span,
+        [data-testid="stTabs"] [role="tab"] div {
+            color: inherit !important;
         }
         [data-testid="stTabs"] [role="tab"]:hover {
             background: #dbeafe;
@@ -1132,6 +1144,13 @@ def apply_global_styles():
         [data-testid="stTabs"] [role="tabpanel"] .stCaption,
         [data-testid="stTabs"] [role="tabpanel"] [data-testid="stCaptionContainer"] {
             color: #475569 !important;
+        }
+        [data-testid="stTabs"] [role="tabpanel"] .stSelectbox label,
+        [data-testid="stTabs"] [role="tabpanel"] .stMultiSelect label,
+        [data-testid="stTabs"] [role="tabpanel"] .stNumberInput label,
+        [data-testid="stTabs"] [role="tabpanel"] .stDateInput label {
+            color: #0f172a !important;
+            font-weight: 700;
         }
         [data-testid="stExpander"] details {
             background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
