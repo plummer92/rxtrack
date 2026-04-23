@@ -21,6 +21,7 @@ import contextlib
 import io
 import warnings
 import json
+from openpyxl import load_workbook
 
 from sqlalchemy import create_engine, text
 import os
@@ -127,7 +128,8 @@ def init_db():
         );""",
         """CREATE TABLE IF NOT EXISTS staff_schedule (
             pk TEXT PRIMARY KEY, dt DATE, day_name TEXT, staff_name TEXT, 
-            shift_type TEXT, assignment_type TEXT, raw_entry TEXT, note TEXT
+            shift_type TEXT, assignment_type TEXT, raw_entry TEXT, note TEXT,
+            schedule_status TEXT, cell_fill_color TEXT
         );""",
         """CREATE TABLE IF NOT EXISTS attendance_punches (
             pk TEXT PRIMARY KEY, raw_name TEXT, dt_date DATE, start_dt TIMESTAMP, end_dt TIMESTAMP
@@ -253,7 +255,9 @@ def init_db():
             updated_at TIMESTAMP DEFAULT NOW(),
             PRIMARY KEY (profile_name, audit_date)
         );""",
-        """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;"""
+        """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;""",
+        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS schedule_status TEXT;""",
+        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
@@ -401,7 +405,9 @@ def load_shift_audit_profiles(page_name="shift_work_map"):
 def load_shift_schedule_for_date(sel_date):
     try:
         sql = text("""
-            SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note
+            SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, raw_entry, note,
+                   COALESCE(schedule_status, assignment_type, 'Standard') AS schedule_status,
+                   cell_fill_color
             FROM staff_schedule
             WHERE dt = :d
         """)
@@ -413,6 +419,7 @@ def load_shift_schedule_for_date(sel_date):
         df["staff_name"] = df["staff_name"].fillna("Unknown").astype(str).str.strip()
         df["shift_type"] = df["shift_type"].fillna("").astype(str).str.strip()
         df["assignment_type"] = df["assignment_type"].fillna("").astype(str).str.strip()
+        df["schedule_status"] = df["schedule_status"].fillna("Standard").astype(str).str.strip()
         df["match_key"] = df["staff_name"].apply(normalize_name)
         return df
     except Exception:
@@ -809,8 +816,72 @@ def clean_pharmacy_report(df):
     df["pk"] = df.apply(generate_pk, axis=1)
     return df[["pk", "queue_id", "priority", "dt", "med_id", "med_desc", "destination", "user_name", "qty"]]
 
-def clean_schedule_data(df):
+def normalize_fill_color(fill):
+    """Return ARGB/RGB fill value from an openpyxl PatternFill, when present."""
+    if fill is None or getattr(fill, "fill_type", None) is None:
+        return ""
+    color = fill.fgColor
+    if not color:
+        return ""
+    if color.type == "rgb" and color.rgb:
+        return str(color.rgb).upper()
+    if color.type == "indexed":
+        return f"INDEXED:{color.indexed}"
+    if color.type == "theme":
+        return f"THEME:{color.theme}"
+    return ""
+
+
+def classify_schedule_status(raw_entry, fill_color=""):
+    text = str(raw_entry or "").lower()
+    if "trade" in text:
+        return "Trade"
+    if "incentive" in text or "bonus" in text:
+        return "Incentive Pay"
+    if "adjust" in text:
+        return "Adjustment"
+    if "open" in text or text.strip() in {"op", "open shift"}:
+        return "Open Shift"
+
+    rgb = str(fill_color or "").replace("#", "").upper()
+    if len(rgb) == 8:
+        rgb = rgb[-6:]
+    if len(rgb) != 6 or not re.fullmatch(r"[0-9A-F]{6}", rgb):
+        return "Standard"
+
+    r, g, b = int(rgb[0:2], 16), int(rgb[2:4], 16), int(rgb[4:6], 16)
+    if r > 210 and 80 <= g <= 190 and b < 120:
+        return "Adjustment"
+    if r >= 170 and g < 105 and b < 105:
+        return "Open Shift"
+    if 80 <= r < 170 and g < 80 and b < 80:
+        return "Incentive Pay"
+    return "Standard"
+
+
+def schedule_fill_lookup_from_workbook(file_obj):
+    try:
+        file_obj.seek(0)
+        wb = load_workbook(file_obj, data_only=True)
+        ws = wb.active
+        lookup = {}
+        for row in ws.iter_rows():
+            date_val = row[1].value if len(row) > 1 else None
+            schedule_date = excel_serial_to_datetime(pd.Series([date_val])).iloc[0]
+            if pd.isna(schedule_date):
+                continue
+            for cell in row[3:]:
+                if cell.value is None:
+                    continue
+                lookup[(schedule_date.date(), str(cell.value).strip())] = normalize_fill_color(cell.fill)
+        return lookup
+    except Exception:
+        return {}
+
+
+def clean_schedule_data(df, schedule_file=None):
     df = df.copy()
+    fill_lookup = schedule_fill_lookup_from_workbook(schedule_file) if schedule_file is not None else {}
     if len(df.columns) > 2:
         df.rename(columns={df.columns[1]: 'Date', df.columns[2]: 'Day'}, inplace=True)
     df = df.iloc[1:].dropna(subset=['Date'])
@@ -833,6 +904,8 @@ def clean_schedule_data(df):
         
         for part in parts:
             if not part or part == ')': continue
+            fill_color = fill_lookup.get((dt, part), fill_lookup.get((dt, raw), ""))
+            schedule_status = classify_schedule_status(part, fill_color)
             override_time = None
             m_range = re.search(r'\(?(\d{4})\s*-\s*\d{4}\)?', part)
             if m_range:
@@ -860,10 +933,18 @@ def clean_schedule_data(df):
                 clean_part = re.split(r'\s(?:trn|training)\s?', clean_part, flags=re.IGNORECASE)[0].strip()
             elif any(x in lower_part for x in ['pto', 'off', 'sick']):
                 assignment_type = "PTO"
+            elif schedule_status != "Standard":
+                assignment_type = schedule_status
+            clean_part = re.sub(r'\s*\((trade|adjustment|adjust|incentive|bonus|open shift|open)\)\s*', ' ', clean_part, flags=re.IGNORECASE).strip()
             final_shift_str = override_time if override_time else header
-            row_str = f"{dt}|{clean_part}|{final_shift_str}"
+            row_str = f"{dt}|{clean_part}|{final_shift_str}|{schedule_status}"
             pk = hashlib.sha256(row_str.encode()).hexdigest()
-            processed_rows.append({'pk': pk, 'dt': dt, 'day_name': day_name, 'staff_name': clean_part.title(), 'shift_type': final_shift_str, 'assignment_type': assignment_type, 'raw_entry': part, 'note': note})
+            processed_rows.append({
+                'pk': pk, 'dt': dt, 'day_name': day_name, 'staff_name': clean_part.title(),
+                'shift_type': final_shift_str, 'assignment_type': assignment_type,
+                'raw_entry': part, 'note': note, 'schedule_status': schedule_status,
+                'cell_fill_color': fill_color,
+            })
     return pd.DataFrame(processed_rows)
 
 def clean_attendance_file(file_obj):
@@ -1164,7 +1245,9 @@ def load_data(start_date, end_date):
             FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s
         """,
         "schedule": """
-            SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note
+            SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note,
+                   COALESCE(schedule_status, assignment_type, 'Standard') AS schedule_status,
+                   cell_fill_color
             FROM staff_schedule WHERE dt BETWEEN %s AND %s
         """,
         "attendance": """
@@ -1911,11 +1994,13 @@ if _is_main:
                     execute_statement(sql_costs, clean.to_dict("records"), batch=True, table_name="Cost Updates")
 
                 elif u_type == "Staff Schedule":
-                    clean = clean_schedule_data(raw)
+                    clean = clean_schedule_data(raw, uploaded if uploaded.name.endswith('.xlsx') else None)
                     sql = """INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, 
-                             assignment_type, raw_entry, note) VALUES (%(pk)s, %(dt)s, %(day_name)s, 
+                             assignment_type, raw_entry, note, schedule_status, cell_fill_color)
+                             VALUES (%(pk)s, %(dt)s, %(day_name)s,
                              %(staff_name)s, %(shift_type)s, %(assignment_type)s, %(raw_entry)s, 
-                             %(note)s) ON CONFLICT (pk) DO NOTHING;"""
+                             %(note)s, %(schedule_status)s, %(cell_fill_color)s)
+                             ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
 
                 elif u_type == "Attendance Tracking":

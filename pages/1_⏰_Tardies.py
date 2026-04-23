@@ -53,9 +53,35 @@ else:
         df_att['match_key'] = df_att['raw_name'].apply(normalize_name)
         df_sched['date_obj'] = pd.to_datetime(df_sched['dt']).dt.date
         df_att['date_obj'] = pd.to_datetime(df_att['dt_date']).dt.date
+        if 'schedule_status' not in df_sched.columns:
+            df_sched['schedule_status'] = df_sched.get('assignment_type', 'Standard')
+        df_sched['schedule_status'] = (
+            df_sched['schedule_status']
+            .fillna(df_sched.get('assignment_type', 'Standard'))
+            .astype(str)
+            .replace({"": "Standard"})
+        )
         
         # Filter out Joe, Krista, and Emily based on the App.py list
         df_sched = df_sched[~df_sched['match_key'].isin(load_admin_users())]
+        status_counts = (
+            df_sched.groupby('schedule_status')
+            .size()
+            .reset_index(name='scheduled_shifts')
+            .sort_values('scheduled_shifts', ascending=False)
+        )
+
+        with st.sidebar:
+            status_options = sorted(df_sched['schedule_status'].dropna().unique())
+            selected_statuses = st.multiselect(
+                "Schedule Status",
+                status_options,
+                default=status_options,
+                help="Separate normal shifts from trades, adjustments, open shifts, and incentive pay."
+            )
+
+        if selected_statuses:
+            df_sched = df_sched[df_sched['schedule_status'].isin(selected_statuses)].copy()
         
         # 3. Smart Shift Matching (Handles 1000 weekend vs 1300 weekday)
         merged = pd.merge(df_sched, df_att, on=['match_key', 'date_obj'], how='inner')
@@ -71,7 +97,7 @@ else:
             merged['delay_min'] = (merged['actual_clock_in'] - merged['scheduled_start']).dt.total_seconds() / 60
             
             # Filter for true tardies > grace period
-            tardies = merged[merged['delay_min'] > grace_period].sort_values('delay_min', ascending=False)
+            tardies = merged[merged['delay_min'] > grace_period].sort_values('delay_min', ascending=False).copy()
             
             # Formatting for display
             tardies['Clock In'] = tardies['actual_clock_in'].dt.strftime('%H:%M')
@@ -79,17 +105,26 @@ else:
             tardies['Late By'] = tardies['delay_min'].apply(lambda x: f"{int(x)} min")
 
             # --- METRICS OVERVIEW ---
-            m1, m2, m3 = st.columns(3)
+            trade_ct = int((df_sched['schedule_status'] == 'Trade').sum())
+            adjustment_ct = int((df_sched['schedule_status'] == 'Adjustment').sum())
+            open_ct = int((df_sched['schedule_status'] == 'Open Shift').sum())
+            incentive_ct = int((df_sched['schedule_status'] == 'Incentive Pay').sum())
+
+            m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
             m1.metric(f"Technicians > {grace_period}m Late", len(tardies))
             m2.metric("Avg Delay", f"{int(tardies['delay_min'].mean()) if not tardies.empty else 0} min")
             m3.metric("Most Impacted Shift", tardies['shift_type'].mode()[0] if not tardies.empty else "None")
+            m4.metric("Trades", trade_ct)
+            m5.metric("Adjustments", adjustment_ct)
+            m6.metric("Open Shifts", open_ct)
+            m7.metric("Incentive Pay", incentive_ct)
 
             # --- ANALYTICS TABS ---
-            tab1, tab2, tab3 = st.tabs(["📋 Tardy Log", "📊 Pattern Analysis", "🔍 Individual Audit"])
+            tab1, tab2, tab3, tab4 = st.tabs(["📋 Tardy Log", "📊 Pattern Analysis", "🔍 Individual Audit", "Schedule Exceptions"])
 
             with tab1:
                 st.dataframe(
-                    tardies[['date_obj', 'staff_name', 'shift_type', 'Scheduled', 'Clock In', 'Late By']], 
+                    tardies[['date_obj', 'staff_name', 'shift_type', 'schedule_status', 'Scheduled', 'Clock In', 'Late By']],
                     use_container_width=True, hide_index=True
                 )
 
@@ -110,16 +145,40 @@ else:
                                       title="Tardies by Shift Type", color='count')
                     st.plotly_chart(fig_shift, use_container_width=True)
 
+                st.subheader("Schedule Status Mix")
+                if not status_counts.empty:
+                    fig_status = px.bar(
+                        status_counts,
+                        x='scheduled_shifts',
+                        y='schedule_status',
+                        orientation='h',
+                        color='schedule_status',
+                        title="Scheduled Shifts by Status"
+                    )
+                    st.plotly_chart(fig_status, use_container_width=True)
+
             with tab3:
                 selected_tech = st.selectbox("Select Technician:", ["All"] + sorted(list(tardies['staff_name'].unique())))
                 view_df = tardies if selected_tech == "All" else tardies[tardies['staff_name'] == selected_tech]
                 
                 st.write(f"Showing **{len(view_df)}** incidents for {selected_tech}")
                 st.dataframe(
-                    view_df[['date_obj', 'shift_type', 'Scheduled', 'Clock In', 'Late By', 'delay_min']], 
+                    view_df[['date_obj', 'shift_type', 'schedule_status', 'Scheduled', 'Clock In', 'Late By', 'delay_min']],
                     use_container_width=True, hide_index=True,
                     column_config={"delay_min": st.column_config.NumberColumn("Minutes Late", format="%d")}
                 )
+
+            with tab4:
+                exception_df = df_sched[df_sched['schedule_status'].ne('Standard')].copy()
+                if exception_df.empty:
+                    st.success("No trade, adjustment, open-shift, or incentive-pay schedule rows in this window.")
+                else:
+                    display_cols = ['date_obj', 'staff_name', 'shift_type', 'schedule_status', 'assignment_type', 'note']
+                    st.dataframe(
+                        exception_df[[c for c in display_cols if c in exception_df.columns]],
+                        use_container_width=True,
+                        hide_index=True
+                    )
         else:
             st.success("🎉 All staff arrived within the grace period for this window.")
     else:

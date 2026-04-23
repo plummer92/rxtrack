@@ -103,10 +103,65 @@ def load_all_devices():
         return pd.DataFrame(columns=["device"])
 
 
+@st.cache_data(ttl=300)
+def load_cassette_events(start, end):
+    """Patient cassette events in the selected window."""
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty
+            FROM events
+            WHERE dt::date BETWEEN :start AND :end
+              AND (
+                    event_type ILIKE '%cassette%'
+                 OR med_desc ILIKE '%cassette%'
+                 OR device ILIKE '%cassette%'
+                 OR device ILIKE '%patient%'
+              )
+              AND event_type NOT ILIKE '%cancel%'
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"start": start, "end": end})
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        return df
+    except Exception as e:
+        st.error(f"[load_cassette_events] {e}")
+        return pd.DataFrame(columns=["pk", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty"])
+
+
+@st.cache_data(ttl=300)
+def load_last_cassette_all_time():
+    """Most recent patient cassette event per device across all time."""
+    try:
+        sql = text("""
+            SELECT device, MAX(dt) AS last_cassette
+            FROM events
+            WHERE (
+                    event_type ILIKE '%cassette%'
+                 OR med_desc ILIKE '%cassette%'
+                 OR device ILIKE '%cassette%'
+                 OR device ILIKE '%patient%'
+              )
+              AND event_type NOT ILIKE '%cancel%'
+            GROUP BY device
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn)
+        df["last_cassette"] = pd.to_datetime(df["last_cassette"], errors="coerce")
+        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
+        return df
+    except Exception as e:
+        st.error(f"[load_last_cassette_all_time] {e}")
+        return pd.DataFrame(columns=["device", "last_cassette"])
+
+
 with st.spinner("Loading return bin data..."):
     df_bins    = load_bin_events(start_date, end_date)
     df_last    = load_last_emptied_all_time()
     df_devices = load_all_devices()
+    df_cassette = load_cassette_events(start_date, end_date)
+    df_cassette_last = load_last_cassette_all_time()
 
 if df_devices.empty:
     st.warning("No device data found. Upload a Daily Transaction Report first.")
@@ -156,11 +211,12 @@ st.divider()
 # TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "⏱️ Recency Status",
     "📅 Daily Coverage",
     "👤 By Technician",
     "🔍 Raw Events",
+    "Patient Cassettes",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -405,4 +461,84 @@ with tab4:
             file_name="return_bin_events.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+with tab5:
+    st.subheader("Patient Cassette Daily Coverage")
+    st.caption("Each cell shows whether a machine had a patient cassette transaction on that day.")
+
+    cassette_recency = pd.DataFrame({"device": sorted(all_devices)})
+    cassette_recency = cassette_recency.merge(df_cassette_last, on="device", how="left")
+    cassette_recency["days_since"] = cassette_recency["last_cassette"].apply(
+        lambda x: (pd.Timestamp(today) - x).days if pd.notna(x) else None
+    )
+    cassette_recency["last_cassette_display"] = cassette_recency["last_cassette"].dt.strftime("%b %d, %Y %H:%M").fillna("-")
+
+    date_range = pd.date_range(start_date, end_date, freq="D").date
+    device_list = sorted(all_devices)
+    grid = pd.MultiIndex.from_product([device_list, date_range], names=["device", "_date"])
+    cassette_grid = pd.DataFrame(index=grid).reset_index()
+
+    if df_cassette.empty:
+        cassette_grid["checks"] = 0
+        st.info("No patient cassette transactions found in this date range.")
+    else:
+        df_cassette["_date"] = df_cassette["dt"].dt.date
+        daily_counts = df_cassette.groupby(["device", "_date"]).size().reset_index(name="checks")
+        cassette_grid = cassette_grid.merge(daily_counts, on=["device", "_date"], how="left")
+        cassette_grid["checks"] = cassette_grid["checks"].fillna(0).astype(int)
+
+    cassette_grid["checked"] = (cassette_grid["checks"] > 0).astype(int)
+    daily_cov = cassette_grid.groupby("_date").apply(lambda g: g["checked"].mean() * 100).reset_index(name="coverage_pct")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Cassette Events", f"{len(df_cassette):,}")
+    c2.metric("Machines Checked", df_cassette["device"].nunique() if not df_cassette.empty else 0)
+    c3.metric("Avg Daily Coverage", f"{daily_cov['coverage_pct'].mean():.1f}%" if not daily_cov.empty else "0.0%")
+    c4.metric("Never Recorded", int(cassette_recency["days_since"].isna().sum()))
+
+    if not daily_cov.empty:
+        fig_cov = px.bar(
+            daily_cov,
+            x="_date",
+            y="coverage_pct",
+            labels={"_date": "", "coverage_pct": "% Machines Checked"},
+            title="Daily Patient Cassette Coverage",
+            color="coverage_pct",
+            color_continuous_scale=["#ef4444", "#facc15", "#22c55e"],
+            range_color=[0, 100],
+            text=daily_cov["coverage_pct"].round(0).astype(int).astype(str) + "%",
+        )
+        fig_cov.update_traces(textposition="outside")
+        fig_cov.update_layout(coloraxis_showscale=False, height=300, xaxis=dict(tickformat="%b %d", tickangle=-30))
+        st.plotly_chart(fig_cov, use_container_width=True)
+
+    pivot = cassette_grid.pivot(index="device", columns="_date", values="checks").fillna(0)
+    pivot.columns = [str(c) for c in pivot.columns]
+    if not pivot.empty:
+        fig_heat = px.imshow(
+            pivot,
+            color_continuous_scale=["#fef2f2", "#22c55e"],
+            labels={"color": "# Cassette Tx"},
+            aspect="auto",
+            title="Patient Cassette Transactions per Machine per Day",
+        )
+        fig_heat.update_layout(
+            height=max(300, len(device_list) * 22 + 80),
+            xaxis=dict(tickangle=-45, tickfont=dict(size=10)),
+            yaxis=dict(tickfont=dict(size=10)),
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+    st.dataframe(
+        cassette_recency[["device", "last_cassette_display", "days_since"]].sort_values(
+            ["days_since", "device"], ascending=[False, True], na_position="first"
+        ),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "device": st.column_config.TextColumn("Machine"),
+            "last_cassette_display": st.column_config.TextColumn("Last Cassette Tx"),
+            "days_since": st.column_config.NumberColumn("Days Since", format="%d"),
+        },
+    )
 

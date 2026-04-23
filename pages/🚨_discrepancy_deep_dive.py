@@ -107,9 +107,33 @@ def load_prior_transactions(start, end):
 
 # ── Execute loaders ───────────────────────────────────────────────────────────
 
+@st.cache_data(ttl=300)
+def load_refill_transactions(start, end):
+    """Load refill/load transactions for pre-refill verify-inventory auditing."""
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty
+            FROM events
+            WHERE dt::date BETWEEN :start AND :end
+              AND event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
+              AND event_type NOT ILIKE '%cancel%'
+              AND event_type NOT ILIKE '%unload%'
+              AND event_type NOT ILIKE '%empty%'
+            ORDER BY dt ASC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"start": start, "end": end})
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        return df
+    except Exception as e:
+        st.warning(f"[load_refill_transactions] {e}")
+        return pd.DataFrame()
+
+
 with st.spinner("Loading discrepancy data..."):
     df_disc  = load_discrepancies(start_date, end_date)
     df_prior = load_prior_transactions(start_date, end_date)
+    df_refills = load_refill_transactions(start_date, end_date)
 
 if df_disc.empty:
     st.success("✅ No discrepancies found in the selected date range.")
@@ -147,6 +171,36 @@ if not df_prior.empty:
     df_disc["likely_cause"] = [str(x) if x else "Unknown" for x in likely_causes]
 else:
     df_disc["likely_cause"] = "Unknown"
+
+df_disc["verify_inventory_flag"] = df_disc["event_type"].astype(str).str.contains("verify", case=False, na=False)
+
+
+def find_next_refill(disc_row, refill_df):
+    if refill_df.empty:
+        return pd.Series({"next_refill_dt": pd.NaT, "next_refill_by": "None", "minutes_to_refill": np.nan})
+    mask = (
+        (refill_df["med_id"] == disc_row["med_id"]) &
+        (refill_df["device"] == disc_row["device"]) &
+        (refill_df["dt"] >= disc_row["dt"]) &
+        (refill_df["dt"] <= disc_row["dt"] + pd.Timedelta(hours=12))
+    )
+    candidates = refill_df[mask].sort_values("dt")
+    if candidates.empty:
+        return pd.Series({"next_refill_dt": pd.NaT, "next_refill_by": "None", "minutes_to_refill": np.nan})
+    nxt = candidates.iloc[0]
+    return pd.Series({
+        "next_refill_dt": nxt["dt"],
+        "next_refill_by": str(nxt["user_name"] or "Unknown"),
+        "minutes_to_refill": (nxt["dt"] - disc_row["dt"]).total_seconds() / 60,
+    })
+
+
+if not df_refills.empty:
+    df_disc = pd.concat([df_disc, df_disc.apply(lambda row: find_next_refill(row, df_refills), axis=1)], axis=1)
+else:
+    df_disc["next_refill_dt"] = pd.NaT
+    df_disc["next_refill_by"] = "None"
+    df_disc["minutes_to_refill"] = np.nan
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 3 — OUTLIER FLAGS
@@ -209,6 +263,7 @@ with st.sidebar:
         key="disc_cause_filter"
     )
     flagged_only = st.checkbox("Flagged only (high-value / repeat)", key="disc_flagged_only")
+    verify_only = st.checkbox("Verify Inventory discrepancies only", key="disc_verify_only")
     cat_filter = st.radio(
         "Med Category",
         ["All", "💨 Inhaler / Insulin", "💊 All Other Meds"],
@@ -221,6 +276,7 @@ if dev_filter:    filtered = filtered[filtered["device"].isin(dev_filter)]
 if med_filter:    filtered = filtered[filtered["med_desc"].isin(med_filter)]
 if cause_filter:  filtered = filtered[filtered["likely_cause"].isin(cause_filter)]
 if flagged_only:  filtered = filtered[filtered["flags"] != ""]
+if verify_only:   filtered = filtered[filtered["verify_inventory_flag"]]
 if cat_filter != "All": filtered = filtered[filtered["med_category"] == cat_filter]
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -232,14 +288,16 @@ total_risk   = filtered["dollar_risk"].sum()
 avg_risk     = filtered["dollar_risk"].mean()
 unique_meds  = filtered["med_id"].nunique()
 unique_devs  = filtered["device"].nunique()
+verify_disc  = int(filtered["verify_inventory_flag"].sum()) if "verify_inventory_flag" in filtered else 0
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 m1.metric("Total Discrepancies",  f"{total_disc:,}")
 m2.metric("Total Dollar Risk",    f"${total_risk:,.2f}")
 m3.metric("Avg Risk per Event",   f"${avg_risk:,.2f}")
 m4.metric("Medications Affected", unique_meds)
 m5.metric("Devices Affected",     unique_devs)
 m6.metric("⚠️ Flagged Events",    flagged_ct)
+m7.metric("Verify Inventory",     f"{verify_disc:,}")
 
 st.divider()
 
@@ -302,11 +360,12 @@ st.divider()
 # LAYER 6 — TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🖥️ By Device",
     "💊 By Medication",
     "👤 Likely Cause",
     "🔍 Raw Detail",
+    "Verify Inventory",
 ])
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -680,4 +739,65 @@ with tab4:
         },
         hide_index=True
     )
+
+
+with tab5:
+    st.subheader("Verify Inventory Before Refill")
+    st.caption("Discrepancies where the transaction type looks like Verify Inventory, tied to the next refill/load on the same med and device within 12 hours.")
+
+    verify_df = filtered[filtered["verify_inventory_flag"]].copy()
+    if verify_df.empty:
+        st.info("No Verify Inventory discrepancies found in the selected filters.")
+    else:
+        linked = int(verify_df["next_refill_dt"].notna().sum())
+        v1, v2, v3, v4 = st.columns(4)
+        v1.metric("Verify Discrepancies", f"{len(verify_df):,}")
+        v2.metric("Linked to Refill", f"{linked:,}")
+        v3.metric("Unlinked", f"{len(verify_df) - linked:,}")
+        v4.metric(
+            "Median Minutes to Refill",
+            f"{verify_df['minutes_to_refill'].dropna().median():.0f}" if verify_df["minutes_to_refill"].notna().any() else "n/a"
+        )
+
+        device_verify = (
+            verify_df.groupby("device")
+            .agg(
+                verify_discrepancies=("pk", "count"),
+                linked_refills=("next_refill_dt", lambda x: x.notna().sum()),
+                total_risk=("dollar_risk", "sum"),
+                median_minutes_to_refill=("minutes_to_refill", "median"),
+            )
+            .reset_index()
+            .sort_values(["verify_discrepancies", "total_risk"], ascending=False)
+        )
+
+        fig_verify = px.bar(
+            device_verify.head(20),
+            x="verify_discrepancies",
+            y="device",
+            orientation="h",
+            color="total_risk",
+            color_continuous_scale="Reds",
+            title="Verify Inventory Discrepancies by Device",
+            text="verify_discrepancies",
+        )
+        fig_verify.update_layout(yaxis={"categoryorder": "total ascending"}, coloraxis_showscale=False, height=420)
+        st.plotly_chart(fig_verify, use_container_width=True)
+
+        st.dataframe(
+            verify_df[[
+                "dt", "device", "med_desc", "discrepancy_qty", "dollar_risk",
+                "user_name", "likely_cause", "next_refill_dt", "next_refill_by",
+                "minutes_to_refill", "discrepancy_reason"
+            ]].sort_values(["device", "dt"]),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "dt": st.column_config.DatetimeColumn("Verify Time", format="MM/DD/YY HH:mm"),
+                "next_refill_dt": st.column_config.DatetimeColumn("Next Refill", format="MM/DD/YY HH:mm"),
+                "discrepancy_qty": st.column_config.NumberColumn("Disc Qty", format="%.0f"),
+                "dollar_risk": st.column_config.NumberColumn("Dollar Risk", format="$%.2f"),
+                "minutes_to_refill": st.column_config.NumberColumn("Minutes to Refill", format="%.0f"),
+            },
+        )
 

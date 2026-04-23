@@ -102,9 +102,41 @@ with col1:
         labels={"day": "", "preparations": "Preparations"},
         color="preparations",
         color_continuous_scale="Blues",
+        title="Click a day to inspect what was made",
     )
     fig_daily.update_layout(coloraxis_showscale=False, height=360)
-    st.plotly_chart(fig_daily, use_container_width=True)
+    daily_event = st.plotly_chart(
+        fig_daily,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="points",
+        key="iv_daily_volume_chart",
+    )
+
+    try:
+        selected_points = daily_event.selection.points
+    except Exception:
+        selected_points = []
+    if selected_points:
+        clicked_day = pd.to_datetime(selected_points[0].get("x"), errors="coerce")
+        if pd.notna(clicked_day):
+            st.session_state["iv_selected_day"] = clicked_day.date()
+
+    day_options = sorted(daily["day"].dropna().tolist())
+    if day_options:
+        default_day = st.session_state.get("iv_selected_day", day_options[-1])
+        if default_day not in day_options:
+            default_day = day_options[-1]
+        selected_day = st.selectbox(
+            "Inspect day",
+            day_options,
+            index=day_options.index(default_day),
+            format_func=lambda d: pd.to_datetime(d).strftime("%a %b %d, %Y"),
+            key="iv_daily_detail_day",
+        )
+        st.session_state["iv_selected_day"] = selected_day
+    else:
+        selected_day = None
 
 with col2:
     st.subheader("Order Mix by Hour")
@@ -126,6 +158,68 @@ with col2:
         )
         fig_hour.update_layout(height=360)
         st.plotly_chart(fig_hour, use_container_width=True)
+
+if selected_day is not None:
+    day_detail = filtered[filtered["order_date"].dt.date == selected_day].copy()
+    st.subheader(f"IV Room Detail for {pd.to_datetime(selected_day).strftime('%A, %B %d, %Y')}")
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("Orders Made", f"{len(day_detail):,}")
+    d2.metric("Preparations", f"{int(day_detail['num_preparations'].sum()):,}")
+    d3.metric("STAT Orders", f"{int(day_detail['priority_name'].str.upper().eq('STAT').sum()):,}")
+    d4.metric("Preparers", f"{day_detail['prepared_by'].nunique():,}")
+    day_tat = day_detail["prepare_tat_minutes"].dropna()
+    d5.metric("Median TAT", f"{day_tat.median():.1f} min" if not day_tat.empty else "N/A")
+
+    day_mix_col, day_table_col = st.columns([1, 2])
+    with day_mix_col:
+        day_compounds = (
+            day_detail.groupby("compound_type", as_index=False)
+            .agg(iv_orders=("pk", "count"), preparations=("num_preparations", "sum"))
+            .sort_values("preparations", ascending=False)
+        )
+        fig_day_mix = px.bar(
+            day_compounds,
+            x="compound_type",
+            y="preparations",
+            hover_data=["iv_orders"],
+            labels={"compound_type": "", "preparations": "Preparations"},
+            color="compound_type",
+            title="Day Mix",
+        )
+        fig_day_mix.update_layout(height=320, showlegend=False)
+        st.plotly_chart(fig_day_mix, use_container_width=True)
+
+    with day_table_col:
+        detail_cols = [
+            "order_dt",
+            "completed_on",
+            "facility_name",
+            "compound_type",
+            "num_preparations",
+            "drug_name",
+            "priority_name",
+            "prepare_tat_minutes",
+            "prepared_by",
+            "approved_by",
+            "secondary_approved_by",
+            "order_lot_number",
+        ]
+        st.dataframe(
+            day_detail[[c for c in detail_cols if c in day_detail.columns]].sort_values(
+                ["order_dt", "drug_name"], ascending=[True, True], na_position="last"
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "order_dt": st.column_config.DatetimeColumn("Ordered", format="MM/DD/YY HH:mm"),
+                "completed_on": st.column_config.DatetimeColumn("Completed", format="MM/DD/YY HH:mm"),
+                "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                "prepare_tat_minutes": st.column_config.NumberColumn("TAT Min", format="%.1f"),
+            },
+        )
+
+    st.divider()
 
 col3, col4 = st.columns(2)
 
