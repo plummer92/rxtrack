@@ -48,8 +48,8 @@ work["prepare_tat_minutes"] = pd.to_numeric(work["prepare_tat_minutes"], errors=
 work["num_preparations"] = pd.to_numeric(work["num_preparations"], errors="coerce").fillna(0)
 work["priority_name"] = work["priority_name"].fillna("").astype(str).str.strip()
 work["compound_type"] = work["compound_type"].fillna("Unspecified").astype(str).str.strip().replace("", "Unspecified")
-work["prepared_by"] = work["prepared_by"].fillna("Unassigned").astype(str).str.strip()
-work["approved_by"] = work["approved_by"].fillna("Unassigned").astype(str).str.strip()
+work["prepared_by"] = work["prepared_by"].fillna("").astype(str).str.strip().replace("", "Unassigned")
+work["approved_by"] = work["approved_by"].fillna("").astype(str).str.strip().replace("", "Unassigned")
 
 facility_options = sorted(work["facility_name"].dropna().unique().tolist())
 selected_facilities = st.multiselect("Facility", facility_options, default=facility_options)
@@ -318,6 +318,39 @@ with col4:
     )
     fig_tech.update_layout(coloraxis_showscale=False, height=420)
     st.plotly_chart(fig_tech, use_container_width=True)
+
+unassigned_rows = filtered[filtered["prepared_by"].eq("Unassigned")].copy()
+if not unassigned_rows.empty:
+    with st.expander(f"Unassigned Tech Prep Raw Data ({len(unassigned_rows):,} rows)", expanded=False):
+        st.caption("These rows have a blank or missing `Prepared By` value in the IV Room source data.")
+        raw_cols = [
+            "order_dt",
+            "completed_on",
+            "facility_name",
+            "compound_type",
+            "drug_name",
+            "dose_number",
+            "order_lot_number",
+            "num_preparations",
+            "priority_name",
+            "prepare_tat_minutes",
+            "prepared_by",
+            "approved_by",
+            "secondary_approved_by",
+        ]
+        st.dataframe(
+            unassigned_rows[[c for c in raw_cols if c in unassigned_rows.columns]].sort_values(
+                ["order_dt", "drug_name"], ascending=[False, True], na_position="last"
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "order_dt": st.column_config.DatetimeColumn("Ordered", format="MM/DD/YY HH:mm"),
+                "completed_on": st.column_config.DatetimeColumn("Completed", format="MM/DD/YY HH:mm"),
+                "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                "prepare_tat_minutes": st.column_config.NumberColumn("TAT Min", format="%.1f"),
+            },
+        )
 
 st.divider()
 
