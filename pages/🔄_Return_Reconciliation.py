@@ -365,7 +365,7 @@ else:
             title="Days Until Same Med Reloaded to Same Device",
         )
         fig_loop.update_layout(height=340, showlegend=False)
-        st.plotly_chart(fig_loop, use_container_width=True)
+        st.plotly_chart(fig_loop, width="stretch")
 
     with med_col:
         top_loops = med_loop_summary.head(15).sort_values("reloaded_within_window")
@@ -381,14 +381,18 @@ else:
             title="Top Meds That Boomerang Back",
         )
         fig_meds.update_layout(height=340, coloraxis_showscale=False)
-        st.plotly_chart(fig_meds, use_container_width=True)
+        st.plotly_chart(fig_meds, width="stretch")
 
+    reload_display = reload_pairs.sort_values(
+        ["reloaded_within_window", "days_to_reload", "unload_dt"],
+        ascending=[False, True, False],
+    )
     st.dataframe(
-        reload_pairs[[
+        reload_display[[
             "unload_dt", "device", "med_desc", "unload_qty", "unload_user",
             "reload_dt", "reload_user", "reload_qty", "days_to_reload", "reload_bucket"
-        ]].sort_values(["reloaded_within_window", "days_to_reload", "unload_dt"], ascending=[False, True, False]),
-        use_container_width=True,
+        ]],
+        width="stretch",
         hide_index=True,
         column_config={
             "unload_dt": st.column_config.DatetimeColumn("Unload Time", format="MM/DD/YY HH:mm"),
@@ -402,7 +406,7 @@ else:
     with st.expander("Medication Loop Summary", expanded=False):
         st.dataframe(
             med_loop_summary,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "unload_events": st.column_config.NumberColumn("Unload Events", format="%d"),
@@ -423,7 +427,7 @@ if unmatched.empty:
     st.success("✅ 100% Reconciliation Achieved.")
 else:
     display = unmatched.sort_values("difference", key=abs, ascending=False).reset_index(drop=True)
-    event = st.dataframe(display, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
+    event = st.dataframe(display, width="stretch", on_select="rerun", selection_mode="single-row", hide_index=True)
 
     if len(event.selection.rows) > 0:
         idx = event.selection.rows[0]
@@ -445,10 +449,10 @@ else:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("### 🟦 Pyxis Unload Events")
-            st.dataframe(unload_detail[["dt", "user_name", "device", "qty"]], use_container_width=True)
+            st.dataframe(unload_detail[["dt", "user_name", "device", "qty"]], width="stretch")
         with c2:
             st.markdown("### 🟩 Pharmacy Return Events")
-            st.dataframe(return_detail[["dt", "user_name", "workflow_type", "qty"]], use_container_width=True)
+            st.dataframe(return_detail[["dt", "user_name", "workflow_type", "qty"]], width="stretch")
 
 # --- Inventory Moves (reference only, excluded from reconciliation) ---
 
@@ -459,7 +463,7 @@ with st.expander(f"📦 Inventory Moves — Excluded from Reconciliation ({int(i
         st.info("No inventory moves found for this date range.")
     else:
         cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in inv_moves.columns]
-        st.dataframe(inv_moves[cols].sort_values("dt") if "dt" in cols else inv_moves[cols], use_container_width=True)
+        st.dataframe(inv_moves[cols].sort_values("dt") if "dt" in cols else inv_moves[cols], width="stretch")
 
 with st.expander(f"🔁 Restocks — Excluded from Reconciliation ({int(restock_qty)} units)", expanded=False):
     st.caption("These are proactive pharmacy refills, not returns triggered by a Pyxis unload. Shown here for reference only.")
@@ -467,7 +471,7 @@ with st.expander(f"🔁 Restocks — Excluded from Reconciliation ({int(restock_
         st.info("No restocks found for this date range.")
     else:
         cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in restocks.columns]
-        st.dataframe(restocks[cols].sort_values("dt") if "dt" in cols else restocks[cols], use_container_width=True)
+        st.dataframe(restocks[cols].sort_values("dt") if "dt" in cols else restocks[cols], width="stretch")
 
 with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation ({int(eject_qty)} units)", expanded=False):
     st.caption("These are broken cassette eject events, not real medication removals. Shown here for reference only.")
@@ -475,5 +479,5 @@ with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation (
         st.info("No unload eject events found for this date range.")
     else:
         cols = [c for c in ["dt", "date", "user_name", "device", "med_desc", "qty", "event_type"] if c in unload_eject.columns]
-        st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], use_container_width=True)
+        st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], width="stretch")
 
