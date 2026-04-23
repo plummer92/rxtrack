@@ -286,6 +286,18 @@ def generate_pk(row):
     row_str = "|".join(subset)
     return hashlib.sha256(row_str.encode()).hexdigest()
 
+
+def normalize_identifier_text(value):
+    """Normalize identifiers so Excel-style numeric text like 528661992.0 becomes 528661992."""
+    if pd.isna(value):
+        return None
+    text_value = str(value).strip()
+    if text_value in {"", "nan", "None"}:
+        return None
+    if re.fullmatch(r"-?\d+\.0+", text_value):
+        return text_value.split(".")[0]
+    return text_value
+
 def normalize_name(full_name):
     # Handle nulls or non-strings
     if not full_name or pd.isna(full_name): 
@@ -1044,10 +1056,13 @@ def clean_iv_room_report(df):
         if col not in df.columns:
             df[col] = None
 
-    for col in ["facility_name", "order_lot_number", "compound_type", "dose_number", "drug_name",
+    for col in ["facility_name", "compound_type", "drug_name",
                 "ordered_time", "priority_name", "prepared_by", "approved_by", "secondary_approved_by"]:
         df[col] = df[col].astype(str).str.strip()
         df[col] = df[col].replace({"": None, "nan": None, "None": None})
+
+    df["order_lot_number"] = df["order_lot_number"].apply(normalize_identifier_text)
+    df["dose_number"] = df["dose_number"].apply(normalize_identifier_text)
 
     df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce").dt.date
     df["ordered_time"] = df["ordered_time"].astype(str).str.strip()
@@ -1346,6 +1361,19 @@ def load_iv_room_data(start_date, end_date):
         for col in ["order_date", "order_dt", "completed_on"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
+        if "order_lot_number" in df.columns:
+            df["order_lot_number"] = df["order_lot_number"].apply(normalize_identifier_text)
+        if "dose_number" in df.columns:
+            df["dose_number"] = df["dose_number"].apply(normalize_identifier_text)
+        dedupe_cols = [
+            c for c in [
+                "facility_name", "order_lot_number", "compound_type", "num_preparations",
+                "dose_number", "drug_name", "order_date", "ordered_time", "order_dt",
+                "completed_on", "priority_name", "prepared_by", "approved_by", "secondary_approved_by"
+            ] if c in df.columns
+        ]
+        if dedupe_cols:
+            df = df.drop_duplicates(subset=dedupe_cols, keep="first").copy()
         return df
     except Exception:
         return pd.DataFrame()
