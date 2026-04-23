@@ -127,16 +127,56 @@ with col1:
         default_day = st.session_state.get("iv_selected_day", day_options[-1])
         if default_day not in day_options:
             default_day = day_options[-1]
-        selected_day = st.selectbox(
-            "Inspect day",
-            day_options,
-            index=day_options.index(default_day),
-            format_func=lambda d: pd.to_datetime(d).strftime("%a %b %d, %Y"),
-            key="iv_daily_detail_day",
+        detail_mode = st.radio(
+            "Detail view",
+            ["Summary only", "Selected day", "Custom range"],
+            horizontal=True,
+            key="iv_detail_mode",
         )
-        st.session_state["iv_selected_day"] = selected_day
+        if detail_mode == "Selected day":
+            selected_day = st.selectbox(
+                "Inspect day",
+                day_options,
+                index=day_options.index(default_day),
+                format_func=lambda d: pd.to_datetime(d).strftime("%a %b %d, %Y"),
+                key="iv_daily_detail_day",
+            )
+            st.session_state["iv_selected_day"] = selected_day
+            detail_start = selected_day
+            detail_end = selected_day
+        elif detail_mode == "Custom range":
+            default_start = st.session_state.get("iv_detail_start", day_options[0])
+            default_end = st.session_state.get("iv_detail_end", day_options[-1])
+            if default_start not in day_options:
+                default_start = day_options[0]
+            if default_end not in day_options:
+                default_end = day_options[-1]
+            detail_start = st.date_input(
+                "Detail start",
+                value=default_start,
+                min_value=day_options[0],
+                max_value=day_options[-1],
+                key="iv_detail_start",
+            )
+            detail_end = st.date_input(
+                "Detail end",
+                value=default_end,
+                min_value=day_options[0],
+                max_value=day_options[-1],
+                key="iv_detail_end",
+            )
+            if detail_end < detail_start:
+                detail_end = detail_start
+            selected_day = None
+        else:
+            selected_day = None
+            detail_start = None
+            detail_end = None
     else:
+        detail_mode = "Summary only"
         selected_day = None
+        detail_start = None
+        detail_end = None
 
 with col2:
     st.subheader("Order Mix by Hour")
@@ -159,9 +199,15 @@ with col2:
         fig_hour.update_layout(height=360)
         st.plotly_chart(fig_hour, use_container_width=True)
 
-if selected_day is not None:
-    day_detail = filtered[filtered["order_date"].dt.date == selected_day].copy()
-    st.subheader(f"IV Room Detail for {pd.to_datetime(selected_day).strftime('%A, %B %d, %Y')}")
+if detail_mode != "Summary only" and detail_start is not None and detail_end is not None:
+    day_detail = filtered[
+        filtered["order_date"].dt.date.between(detail_start, detail_end)
+    ].copy()
+    if detail_start == detail_end:
+        detail_label = pd.to_datetime(detail_start).strftime('%A, %B %d, %Y')
+    else:
+        detail_label = f"{pd.to_datetime(detail_start).strftime('%b %d, %Y')} to {pd.to_datetime(detail_end).strftime('%b %d, %Y')}"
+    st.subheader(f"IV Room Detail for {detail_label}")
 
     d1, d2, d3, d4, d5 = st.columns(5)
     d1.metric("Orders Made", f"{len(day_detail):,}")
@@ -198,6 +244,7 @@ if selected_day is not None:
             "compound_type",
             "num_preparations",
             "drug_name",
+            "dose_number",
             "priority_name",
             "prepare_tat_minutes",
             "prepared_by",
