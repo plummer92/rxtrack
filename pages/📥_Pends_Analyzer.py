@@ -243,11 +243,48 @@ def load_all_unloads():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
+
+@st.cache_data(ttl=300)
+def load_all_reloads():
+    """All reload/restock events across all time for same-device loop analysis.
+    Returns (DataFrame, error_str). error_str is None on success."""
+    try:
+        sql = text("""
+            SELECT pk, dt, user_name, device, med_id, med_desc,
+                   event_type, qty
+            FROM events
+            WHERE event_type ILIKE '%restock%'
+               OR event_type ILIKE '%refill%'
+               OR event_type ILIKE '%replenish%'
+               OR event_type ~* '(^|[^a-z])load([^a-z]|$)'
+        """)
+        with engine.connect() as conn:
+            df_rl = pd.read_sql(sql, conn)
+        df_rl["dt"] = pd.to_datetime(df_rl["dt"], errors="coerce")
+        df_rl["med_id"] = df_rl["med_id"].astype(str).str.strip().str.upper()
+        df_rl["device"] = df_rl["device"].fillna("Unknown").astype(str).str.strip()
+        df_rl = df_rl[
+            ~df_rl["event_type"].astype(str).str.contains("cancel|unload|empty", case=False, na=False)
+        ]
+        if "device" in df_rl.columns:
+            df_rl = df_rl[
+                ~df_rl["device"].astype(str).str.contains("cass|patient", case=False, na=False)
+            ]
+        return df_rl, None
+    except Exception as e:
+        return pd.DataFrame(), str(e)
+
 with st.spinner("Loading unload history..."):
     _unloads_result = load_all_unloads()
 df_unloads, _unloads_error = _unloads_result
 if _unloads_error:
     st.warning(f"⚠️ Could not load unload history for lifecycle analysis: {_unloads_error}")
+
+with st.spinner("Loading reload history..."):
+    _reloads_result = load_all_reloads()
+df_reloads, _reloads_error = _reloads_result
+if _reloads_error:
+    st.warning(f"Could not load reload history for loop analysis: {_reloads_error}")
 
 outlier_flags = []  # list of dicts, one per flagged event
 
@@ -460,6 +497,72 @@ if not df_hist.empty and not df_unloads.empty:
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 5 — TABS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def bucket_reload_days(days_value):
+    if pd.isna(days_value):
+        return "Not reloaded in window"
+    if days_value <= 3:
+        return "0-3 days"
+    if days_value <= 7:
+        return "4-7 days"
+    if days_value <= 14:
+        return "8-14 days"
+    if days_value <= 28:
+        return "15-28 days"
+    return "29+ days"
+
+
+def build_reload_pairs(unload_df, reload_df, max_days):
+    if unload_df.empty:
+        return pd.DataFrame()
+
+    base_cols = ["dt", "user_name", "device", "med_id", "med_desc", "qty", "event_type"]
+    working = unload_df[[c for c in base_cols if c in unload_df.columns]].copy()
+    working = working.rename(columns={
+        "dt": "unload_dt",
+        "user_name": "unload_user",
+        "qty": "unload_qty",
+        "event_type": "unload_event_type",
+    })
+    working["reload_dt"] = pd.NaT
+    working["reload_user"] = None
+    working["reload_qty"] = np.nan
+    working["reload_event_type"] = None
+    working["days_to_reload"] = np.nan
+
+    if reload_df.empty:
+        working["reload_bucket"] = "Not reloaded in window"
+        working["reloaded_within_window"] = False
+        return working
+
+    grouped_reload = {
+        key: grp.sort_values("dt").reset_index(drop=True)
+        for key, grp in reload_df.groupby(["med_id", "device"], dropna=False)
+    }
+
+    max_delta = pd.Timedelta(days=max_days)
+    for idx, row in working.iterrows():
+        key = (row.get("med_id"), row.get("device"))
+        candidates = grouped_reload.get(key)
+        if candidates is None or candidates.empty or pd.isna(row.get("unload_dt")):
+            continue
+        future = candidates[candidates["dt"] > row["unload_dt"]]
+        if future.empty:
+            continue
+        next_row = future.iloc[0]
+        delta = next_row["dt"] - row["unload_dt"]
+        if delta > max_delta:
+            continue
+        working.at[idx, "reload_dt"] = next_row["dt"]
+        working.at[idx, "reload_user"] = next_row.get("user_name")
+        working.at[idx, "reload_qty"] = next_row.get("qty")
+        working.at[idx, "reload_event_type"] = next_row.get("event_type")
+        working.at[idx, "days_to_reload"] = delta.total_seconds() / 86400
+
+    working["reload_bucket"] = working["days_to_reload"].apply(bucket_reload_days)
+    working["reloaded_within_window"] = working["reload_dt"].notna()
+    return working
+
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 Par Audit",
@@ -1011,6 +1114,146 @@ with tab6:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 7 — PAR CHANGE AUDIT TRAIL
 # ─────────────────────────────────────────────────────────────────────────────
+
+    st.divider()
+    st.subheader("Unload to Same-Device Reload Timing")
+    st.caption(
+        "After a med is unloaded from a device, track how often that exact med gets loaded back into the same device within a chosen number of days."
+    )
+
+    reload_window_days = st.slider(
+        "Reload window (days)",
+        min_value=1,
+        max_value=90,
+        value=30,
+        key="pends_reload_window_days",
+        help="Counts a loop when the same med is reloaded to the same device within this many days after unload.",
+    )
+
+    reload_unloads = df_unloads.copy()
+    reload_events = df_reloads.copy()
+
+    if med_filter:
+        med_ids = set(filtered["med_id"].dropna().astype(str).str.strip().str.upper())
+        reload_unloads = reload_unloads[reload_unloads["med_id"].isin(med_ids)]
+        reload_events = reload_events[reload_events["med_id"].isin(med_ids)]
+    if device_filter:
+        reload_unloads = reload_unloads[reload_unloads["device"].isin(device_filter)]
+        reload_events = reload_events[reload_events["device"].isin(device_filter)]
+
+    if not reload_unloads.empty:
+        reload_unloads = reload_unloads[
+            (reload_unloads["dt"].dt.date >= start_date) &
+            (reload_unloads["dt"].dt.date <= end_date)
+        ].copy()
+
+    reload_pairs = build_reload_pairs(reload_unloads, reload_events, reload_window_days)
+
+    if reload_pairs.empty:
+        st.info("No Pyxis unload events available for reload timing analysis in this date range.")
+    else:
+        loop_ct = int(reload_pairs["reloaded_within_window"].sum())
+        loop_rate = (loop_ct / len(reload_pairs) * 100) if len(reload_pairs) else 0
+        median_reload_days = reload_pairs.loc[
+            reload_pairs["reloaded_within_window"], "days_to_reload"
+        ].median()
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Unload Events", f"{len(reload_pairs):,}")
+        r2.metric(f"Reloaded Within {reload_window_days}d", f"{loop_ct:,}")
+        r3.metric("Loop Rate", f"{loop_rate:.1f}%")
+        r4.metric("Median Days to Reload", f"{median_reload_days:.1f}" if pd.notna(median_reload_days) else "n/a")
+
+        bucket_order = ["0-3 days", "4-7 days", "8-14 days", "15-28 days", "29+ days", "Not reloaded in window"]
+        bucket_summary = (
+            reload_pairs.groupby("reload_bucket", as_index=False)
+            .agg(
+                unload_events=("med_id", "count"),
+                distinct_meds=("med_id", "nunique"),
+                distinct_devices=("device", "nunique"),
+            )
+        )
+        bucket_summary["reload_bucket"] = pd.Categorical(
+            bucket_summary["reload_bucket"], categories=bucket_order, ordered=True
+        )
+        bucket_summary = bucket_summary.sort_values("reload_bucket")
+
+        med_loop_summary = (
+            reload_pairs.groupby(["med_id", "med_desc"], as_index=False)
+            .agg(
+                unload_events=("med_id", "count"),
+                reloaded_within_window=("reloaded_within_window", "sum"),
+                loop_rate=("reloaded_within_window", "mean"),
+                median_days_to_reload=("days_to_reload", "median"),
+                devices=("device", "nunique"),
+            )
+            .sort_values(["reloaded_within_window", "unload_events"], ascending=False)
+        )
+        med_loop_summary["loop_rate"] = med_loop_summary["loop_rate"] * 100
+
+        chart_col, med_col = st.columns(2)
+        with chart_col:
+            fig_loop = px.bar(
+                bucket_summary,
+                x="reload_bucket",
+                y="unload_events",
+                labels={"reload_bucket": "", "unload_events": "Unload Events"},
+                color="reload_bucket",
+                category_orders={"reload_bucket": bucket_order},
+                title="Days Until Same Med Reloaded to Same Device",
+            )
+            fig_loop.update_layout(height=340, showlegend=False)
+            st.plotly_chart(fig_loop, width="stretch")
+
+        with med_col:
+            top_loops = med_loop_summary.head(15).sort_values("reloaded_within_window")
+            fig_meds = px.bar(
+                top_loops,
+                x="reloaded_within_window",
+                y="med_desc",
+                orientation="h",
+                hover_data=["unload_events", "loop_rate", "median_days_to_reload", "devices"],
+                labels={"reloaded_within_window": f"Reloaded Within {reload_window_days}d", "med_desc": ""},
+                color="reloaded_within_window",
+                color_continuous_scale="Tealgrn",
+                title="Top Meds That Boomerang Back",
+            )
+            fig_meds.update_layout(height=340, coloraxis_showscale=False)
+            st.plotly_chart(fig_meds, width="stretch")
+
+        reload_display = reload_pairs.sort_values(
+            ["reloaded_within_window", "days_to_reload", "unload_dt"],
+            ascending=[False, True, False],
+        )
+        st.dataframe(
+            reload_display[[
+                "unload_dt", "device", "med_desc", "unload_qty", "unload_user",
+                "reload_dt", "reload_user", "reload_qty", "days_to_reload", "reload_bucket"
+            ]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "unload_dt": st.column_config.DatetimeColumn("Unload Time", format="MM/DD/YY HH:mm"),
+                "reload_dt": st.column_config.DatetimeColumn("Reload Time", format="MM/DD/YY HH:mm"),
+                "unload_qty": st.column_config.NumberColumn("Unload Qty", format="%.0f"),
+                "reload_qty": st.column_config.NumberColumn("Reload Qty", format="%.0f"),
+                "days_to_reload": st.column_config.NumberColumn("Days to Reload", format="%.1f"),
+            },
+        )
+
+        with st.expander("Medication Loop Summary", expanded=False):
+            st.dataframe(
+                med_loop_summary,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "unload_events": st.column_config.NumberColumn("Unload Events", format="%d"),
+                    "reloaded_within_window": st.column_config.NumberColumn(f"Reloaded <= {reload_window_days}d", format="%d"),
+                    "loop_rate": st.column_config.NumberColumn("Loop Rate %", format="%.1f"),
+                    "median_days_to_reload": st.column_config.NumberColumn("Median Days", format="%.1f"),
+                    "devices": st.column_config.NumberColumn("Devices", format="%d"),
+                },
+            )
 
 with tab7:
     st.subheader("Par Change Audit Trail")
