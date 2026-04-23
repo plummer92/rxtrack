@@ -1132,7 +1132,8 @@ def clean_overnight_cartfill_workbook(uploaded):
         raw_orders["pharmacy"] = raw_orders["pharmacy"].fillna("").astype(str).str.strip()
         raw_orders["prep_or_dispense_user"] = raw_orders["prep_or_dispense_user"].fillna("").astype(str).str.strip()
         raw_orders["order_medication"] = raw_orders["order_medication"].fillna("").astype(str).str.strip()
-        raw_orders["order_id"] = raw_orders["order_id"].fillna("").astype(str).str.strip()
+        raw_orders["order_id"] = raw_orders["order_id"].apply(normalize_identifier_text)
+        raw_orders["order_id"] = raw_orders["order_id"].fillna("")
 
         raw_orders["event_date"] = (
             raw_orders["admin_given_dt"]
@@ -1406,6 +1407,17 @@ def load_overnight_cartfill_orders(start_date, end_date):
         for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
+        if "order_id" in df.columns:
+            df["order_id"] = df["order_id"].apply(normalize_identifier_text)
+        dedupe_cols = [
+            c for c in [
+                "order_id", "order_medication", "ready_for_dispense_dt", "admin_given_dt",
+                "prepared_dt", "prep_or_dispense_user", "pharmacy", "event_date",
+                "required_start_dt", "prep_lead_hours", "hold_hours", "is_sjs_cleanroom"
+            ] if c in df.columns
+        ]
+        if dedupe_cols:
+            df = df.drop_duplicates(subset=dedupe_cols, keep="first").copy()
         return df
     except Exception:
         return pd.DataFrame()
@@ -1691,7 +1703,7 @@ def render_page_links():
     safe_page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
     safe_page_link("pages/🌙_Cartfill_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
     safe_page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
-    safe_page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin Tracker", icon="🗑️")
+    safe_page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin & Cassettes", icon="🗑️")
     safe_page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
 
     st.markdown('<div class="rx-nav-label">Performance</div>', unsafe_allow_html=True)

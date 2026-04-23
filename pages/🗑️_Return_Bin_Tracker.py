@@ -10,7 +10,21 @@ import App
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
-st.set_page_config(page_title="Return Bin Tracker", page_icon="🗑️", layout="wide")
+NON_CASSETTE_DEVICES = {
+    "SJSANTE", "SJSBCAB", "SJSBCC", "SJSBCTRIAG", "SJSBRONCH", "SJSCARDVS", "SJSCARDVS2", "SJSCARDVS3",
+    "SJSCATH4-ANES", "SJSCATHL1", "SJSCATHL10", "SJSCATHL11", "SJSCATHL12", "SJSCATHL3", "SJSCATHL4",
+    "SJSCATHL5", "SJSCATHL6", "SJSCATHL7", "SJSCATHL8", "SJSCATHL9", "SJSCSECT-CORE", "SJSCSECT1",
+    "SJSCSECT2", "SJSCSOR", "SJSCSOR-2", "SJSCSOR-3", "SJSCSOR-4", "SJSCSOR-5", "SJSCSOR-6", "SJSCSOR-7",
+    "SJSCSOR-8", "SJSDIAL", "SJSEDSO", "SJSEDTRIAG", "SJSEMS", "SJSER", "SJSGI1", "SJSGI2", "SJSGI3",
+    "SJSGI4", "SJSGIMAIN", "SJSICE", "SJSNICU", "SJSNUCMED", "SJSOR", "SJSOR-1", "SJSOR-10", "SJSOR-11",
+    "SJSOR-12", "SJSOR-13", "SJSOR-14", "SJSOR-15", "SJSOR-16", "SJSOR-2", "SJSOR-3", "SJSOR-4", "SJSOR-5",
+    "SJSOR-6", "SJSOR-7", "SJSOR-8", "SJSOR-9", "SJSOR2", "SJSOSC1", "SJSOSC2", "SJSOSC3", "SJSOSC4",
+    "SJSOSC5", "SJSOSCOR", "SJSOSCPACU", "SJSPACU", "SJSPACU-21", "SJSPACUNOR", "SJSPEDISED", "SJSPEDOP",
+    "SJSPEDPREA", "SJSPHARM", "SJSPREAN", "SJSPREAN2", "SJSPRECATH", "SJSRADM", "SJSRWC", "SJSTRAUMA1",
+    "SJSTRAUMA2", "SJSTRAUMA3",
+}
+
+st.set_page_config(page_title="Return Bin & Patient Cassette Tracker", page_icon="🗑️", layout="wide")
 
 engine = App.engine
 render_sidebar = App.render_sidebar
@@ -18,17 +32,17 @@ render_sidebar = App.render_sidebar
 start_date, end_date = render_sidebar()
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
-        "Return Bin Tracker",
-        "Monitor empty-return-bin events per Pyxis device with visibility into coverage, recency, and operational gaps.",
+        "Return Bin & Patient Cassette Tracker",
+        "Monitor empty-return-bin and patient cassette activity per Pyxis device with visibility into coverage, recency, and operational gaps.",
         kicker="Operations",
     )
-    _debug_event("Return Bin Tracker", "shared_intro_loaded")
-    _debug_panel("Return Bin Tracker", intro_mode="shared")
+    _debug_event("Return Bin & Patient Cassette Tracker", "shared_intro_loaded")
+    _debug_panel("Return Bin & Patient Cassette Tracker", intro_mode="shared")
 else:
-    st.header("🗑️ Return Bin Tracker")
-    st.caption("Monitor empty-return-bin events per Pyxis device with visibility into coverage, recency, and operational gaps.")
-    _debug_event("Return Bin Tracker", "fallback_header_used")
-    _debug_panel("Return Bin Tracker", intro_mode="fallback")
+    st.header("🗑️ Return Bin & Patient Cassette Tracker")
+    st.caption("Monitor empty-return-bin and patient cassette activity per Pyxis device with visibility into coverage, recency, and operational gaps.")
+    _debug_event("Return Bin & Patient Cassette Tracker", "fallback_header_used")
+    _debug_panel("Return Bin & Patient Cassette Tracker", intro_mode="fallback")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -168,6 +182,7 @@ if df_devices.empty:
     st.stop()
 
 all_devices = set(df_devices["device"].unique())
+cassette_eligible_devices = sorted(all_devices - NON_CASSETTE_DEVICES)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RECENCY TABLE — all devices + days since last emptied
@@ -464,9 +479,9 @@ with tab4:
 
 with tab5:
     st.subheader("Patient Cassette Daily Coverage")
-    st.caption("Each cell shows whether a machine had a patient cassette transaction on that day.")
+    st.caption("Each cell shows whether a cassette-eligible machine had a patient cassette transaction on that day.")
 
-    cassette_recency = pd.DataFrame({"device": sorted(all_devices)})
+    cassette_recency = pd.DataFrame({"device": cassette_eligible_devices})
     cassette_recency = cassette_recency.merge(df_cassette_last, on="device", how="left")
     cassette_recency["days_since"] = cassette_recency["last_cassette"].apply(
         lambda x: (pd.Timestamp(today) - x).days if pd.notna(x) else None
@@ -474,7 +489,7 @@ with tab5:
     cassette_recency["last_cassette_display"] = cassette_recency["last_cassette"].dt.strftime("%b %d, %Y %H:%M").fillna("-")
 
     date_range = pd.date_range(start_date, end_date, freq="D").date
-    device_list = sorted(all_devices)
+    device_list = cassette_eligible_devices
     grid = pd.MultiIndex.from_product([device_list, date_range], names=["device", "_date"])
     cassette_grid = pd.DataFrame(index=grid).reset_index()
 
@@ -541,4 +556,6 @@ with tab5:
             "days_since": st.column_config.NumberColumn("Days Since", format="%d"),
         },
     )
+    if NON_CASSETTE_DEVICES:
+        st.caption(f"Excluded from patient cassette coverage: {len(NON_CASSETTE_DEVICES)} machines configured as non-cassette areas.")
 
