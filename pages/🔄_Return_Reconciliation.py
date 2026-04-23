@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.express as px
 import App
 
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
@@ -72,8 +73,17 @@ if not df_events.empty and "event_type" in df_events.columns:
         pyxis_unload = pyxis_unload[
             ~pyxis_unload["device"].astype(str).str.contains("cass|patient", case=False, na=False)
         ]
+    pyxis_reload = df_events[
+        df_events["event_type"].astype(str).str.contains(r"restock|refill|\bload\b|replenish", case=False, na=False) &
+        ~df_events["event_type"].astype(str).str.contains("cancel|unload|empty", case=False, na=False)
+    ].copy()
+    if "device" in pyxis_reload.columns:
+        pyxis_reload = pyxis_reload[
+            ~pyxis_reload["device"].astype(str).str.contains("cass|patient", case=False, na=False)
+        ]
 else:
     unload_eject = pd.DataFrame()
+    pyxis_reload = pd.DataFrame()
 
 if not df_pharm.empty:
     pharm_df = df_pharm.copy()
@@ -113,6 +123,7 @@ pharm_return = pharm_all[~pharm_all["workflow_type"].isin(EXCLUDED_TYPES)].copy(
 
 if selected_users:
     if not pyxis_unload.empty: pyxis_unload = pyxis_unload[pyxis_unload["user_name"].isin(selected_users)]
+    if not pyxis_reload.empty: pyxis_reload = pyxis_reload[pyxis_reload["user_name"].isin(selected_users)]
     if not pharm_return.empty: pharm_return = pharm_return[pharm_return["user_name"].isin(selected_users)]
     if not inv_moves.empty: inv_moves = inv_moves[inv_moves["user_name"].isin(selected_users)]
     if not restocks.empty: restocks = restocks[restocks["user_name"].isin(selected_users)]
@@ -149,10 +160,12 @@ def remove_controls(df):
 
 if exclude_dummy:
     pyxis_unload = remove_dummy(pyxis_unload)
+    pyxis_reload = remove_dummy(pyxis_reload)
     pharm_return = remove_dummy(pharm_return)
 
 if exclude_controls:
     pyxis_unload = remove_controls(pyxis_unload)
+    pyxis_reload = remove_controls(pyxis_reload)
     pharm_return = remove_controls(pharm_return)
 
 # --- Normalize Date ---
@@ -163,6 +176,7 @@ def ensure_date_column(df):
     return df
 
 pyxis_unload = ensure_date_column(pyxis_unload)
+pyxis_reload = ensure_date_column(pyxis_reload)
 pharm_return = ensure_date_column(pharm_return)
 inv_moves    = ensure_date_column(inv_moves)
 restocks     = ensure_date_column(restocks)
@@ -211,6 +225,193 @@ m4.metric("Unmatched Med-Days", len(unmatched))
 m5.metric("Inv Moves (excl.)", int(inv_move_qty))
 m6.metric("Restocks (excl.)", int(restock_qty))
 m7.metric("Eject Events (excl.)", int(eject_qty))
+
+st.divider()
+
+# --- Unload -> Reload Loop Analysis ---
+
+st.subheader("🔁 Unload to Same-Device Reload Timing")
+st.caption("How long after a med is unloaded from a Pyxis device does that exact med get loaded back into that same device?")
+
+reload_window_days = st.slider(
+    "Reload window (days)",
+    min_value=1,
+    max_value=90,
+    value=28,
+    help="Counts a loop when the same med is reloaded to the same device within this many days after unload.",
+)
+
+
+def bucket_reload_days(days_value):
+    if pd.isna(days_value):
+        return "Not reloaded in window"
+    if days_value <= 3:
+        return "0-3 days"
+    if days_value <= 7:
+        return "4-7 days"
+    if days_value <= 14:
+        return "8-14 days"
+    if days_value <= 28:
+        return "15-28 days"
+    return "29+ days"
+
+
+def build_reload_pairs(unload_df, reload_df, max_days):
+    if unload_df.empty:
+        return pd.DataFrame()
+
+    base_cols = [
+        "dt", "date", "user_name", "device", "med_id", "med_desc", "qty", "event_type"
+    ]
+    working = unload_df[[c for c in base_cols if c in unload_df.columns]].copy()
+    working = working.rename(columns={
+        "dt": "unload_dt",
+        "date": "unload_date",
+        "user_name": "unload_user",
+        "qty": "unload_qty",
+        "event_type": "unload_event_type",
+    })
+    working["reload_dt"] = pd.NaT
+    working["reload_user"] = None
+    working["reload_qty"] = np.nan
+    working["reload_event_type"] = None
+    working["days_to_reload"] = np.nan
+    working["hours_to_reload"] = np.nan
+
+    if reload_df.empty:
+        working["reload_bucket"] = "Not reloaded in window"
+        working["reloaded_within_window"] = False
+        return working
+
+    grouped_reload = {
+        key: grp.sort_values("dt").reset_index(drop=True)
+        for key, grp in reload_df.groupby(["med_id", "device"], dropna=False)
+    }
+
+    max_delta = pd.Timedelta(days=max_days)
+    for idx, row in working.iterrows():
+        key = (row.get("med_id"), row.get("device"))
+        candidates = grouped_reload.get(key)
+        if candidates is None or candidates.empty or pd.isna(row.get("unload_dt")):
+            continue
+        future = candidates[candidates["dt"] > row["unload_dt"]]
+        if future.empty:
+            continue
+        next_row = future.iloc[0]
+        delta = next_row["dt"] - row["unload_dt"]
+        if delta > max_delta:
+            continue
+        working.at[idx, "reload_dt"] = next_row["dt"]
+        working.at[idx, "reload_user"] = next_row.get("user_name")
+        working.at[idx, "reload_qty"] = next_row.get("qty")
+        working.at[idx, "reload_event_type"] = next_row.get("event_type")
+        working.at[idx, "days_to_reload"] = delta.total_seconds() / 86400
+        working.at[idx, "hours_to_reload"] = delta.total_seconds() / 3600
+
+    working["reload_bucket"] = working["days_to_reload"].apply(bucket_reload_days)
+    working["reloaded_within_window"] = working["reload_dt"].notna()
+    return working
+
+
+reload_pairs = build_reload_pairs(pyxis_unload, pyxis_reload, reload_window_days)
+
+if reload_pairs.empty:
+    st.info("No Pyxis unload events available for reload timing analysis in this date range.")
+else:
+    loop_ct = int(reload_pairs["reloaded_within_window"].sum())
+    loop_rate = (loop_ct / len(reload_pairs) * 100) if len(reload_pairs) else 0
+    median_reload_days = reload_pairs.loc[reload_pairs["reloaded_within_window"], "days_to_reload"].median()
+
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Unload Events", f"{len(reload_pairs):,}")
+    r2.metric(f"Reloaded Within {reload_window_days}d", f"{loop_ct:,}")
+    r3.metric("Loop Rate", f"{loop_rate:.1f}%")
+    r4.metric("Median Days to Reload", f"{median_reload_days:.1f}" if pd.notna(median_reload_days) else "n/a")
+
+    bucket_order = ["0-3 days", "4-7 days", "8-14 days", "15-28 days", "29+ days", "Not reloaded in window"]
+    bucket_summary = (
+        reload_pairs.groupby("reload_bucket", as_index=False)
+        .agg(
+            unload_events=("med_id", "count"),
+            distinct_meds=("med_id", "nunique"),
+            distinct_devices=("device", "nunique"),
+        )
+    )
+    bucket_summary["reload_bucket"] = pd.Categorical(bucket_summary["reload_bucket"], categories=bucket_order, ordered=True)
+    bucket_summary = bucket_summary.sort_values("reload_bucket")
+
+    med_loop_summary = (
+        reload_pairs.groupby(["med_id", "med_desc"], as_index=False)
+        .agg(
+            unload_events=("med_id", "count"),
+            reloaded_within_window=("reloaded_within_window", "sum"),
+            loop_rate=("reloaded_within_window", "mean"),
+            median_days_to_reload=("days_to_reload", "median"),
+            devices=("device", "nunique"),
+        )
+        .sort_values(["reloaded_within_window", "unload_events"], ascending=False)
+    )
+    med_loop_summary["loop_rate"] = med_loop_summary["loop_rate"] * 100
+
+    chart_col, med_col = st.columns(2)
+    with chart_col:
+        fig_loop = px.bar(
+            bucket_summary,
+            x="reload_bucket",
+            y="unload_events",
+            labels={"reload_bucket": "", "unload_events": "Unload Events"},
+            color="reload_bucket",
+            category_orders={"reload_bucket": bucket_order},
+            title="Days Until Same Med Reloaded to Same Device",
+        )
+        fig_loop.update_layout(height=340, showlegend=False)
+        st.plotly_chart(fig_loop, use_container_width=True)
+
+    with med_col:
+        top_loops = med_loop_summary.head(15).sort_values("reloaded_within_window")
+        fig_meds = px.bar(
+            top_loops,
+            x="reloaded_within_window",
+            y="med_desc",
+            orientation="h",
+            hover_data=["unload_events", "loop_rate", "median_days_to_reload", "devices"],
+            labels={"reloaded_within_window": f"Reloaded Within {reload_window_days}d", "med_desc": ""},
+            color="reloaded_within_window",
+            color_continuous_scale="Tealgrn",
+            title="Top Meds That Boomerang Back",
+        )
+        fig_meds.update_layout(height=340, coloraxis_showscale=False)
+        st.plotly_chart(fig_meds, use_container_width=True)
+
+    st.dataframe(
+        reload_pairs[[
+            "unload_dt", "device", "med_desc", "unload_qty", "unload_user",
+            "reload_dt", "reload_user", "reload_qty", "days_to_reload", "reload_bucket"
+        ]].sort_values(["reloaded_within_window", "days_to_reload", "unload_dt"], ascending=[False, True, False]),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "unload_dt": st.column_config.DatetimeColumn("Unload Time", format="MM/DD/YY HH:mm"),
+            "reload_dt": st.column_config.DatetimeColumn("Reload Time", format="MM/DD/YY HH:mm"),
+            "unload_qty": st.column_config.NumberColumn("Unload Qty", format="%.0f"),
+            "reload_qty": st.column_config.NumberColumn("Reload Qty", format="%.0f"),
+            "days_to_reload": st.column_config.NumberColumn("Days to Reload", format="%.1f"),
+        },
+    )
+
+    with st.expander("Medication Loop Summary", expanded=False):
+        st.dataframe(
+            med_loop_summary,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "unload_events": st.column_config.NumberColumn("Unload Events", format="%d"),
+                "reloaded_within_window": st.column_config.NumberColumn(f"Reloaded <= {reload_window_days}d", format="%d"),
+                "loop_rate": st.column_config.NumberColumn("Loop Rate %", format="%.1f"),
+                "median_days_to_reload": st.column_config.NumberColumn("Median Days", format="%.1f"),
+                "devices": st.column_config.NumberColumn("Devices", format="%d"),
+            },
+        )
 
 st.divider()
 
