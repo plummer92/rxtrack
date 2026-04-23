@@ -838,6 +838,8 @@ def classify_schedule_status(raw_entry, fill_color=""):
         return "Trade"
     if "incentive" in text or "bonus" in text:
         return "Incentive Pay"
+    if "out early" in text or " in @" in text or "out @" in text:
+        return "Adjustment"
     if "adjust" in text:
         return "Adjustment"
     if "open" in text or text.strip() in {"op", "open shift"}:
@@ -850,6 +852,16 @@ def classify_schedule_status(raw_entry, fill_color=""):
         return "Standard"
 
     r, g, b = int(rgb[0:2], 16), int(rgb[2:4], 16), int(rgb[4:6], 16)
+
+    # Full-row weekend colors in the schedule should not become exceptions.
+    if g > r and g > b and g >= 150:
+        return "Standard"
+    if r >= 230 and g >= 170 and b >= 180:
+        return "Standard"
+
+    # Gold/yellow/orange cells in the schedule are used for shift adjustments.
+    if r >= 220 and g >= 140 and b <= 90:
+        return "Adjustment"
     if r > 210 and 80 <= g <= 190 and b < 120:
         return "Adjustment"
     if r >= 170 and g < 105 and b < 105:
