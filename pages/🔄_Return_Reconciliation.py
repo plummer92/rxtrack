@@ -57,8 +57,8 @@ pharm_all = pd.DataFrame()
 
 if not df_events.empty and "event_type" in df_events.columns:
     pyxis_all_raw = df_events[
-        df_events["event_type"].astype(str).str.contains("empty|unload|return bin", case=False, na=False) &
-        ~df_events["event_type"].astype(str).str.contains("cancelled", case=False, na=False)
+        df_events["event_type"].astype(str).str.contains("empty|unload|return bin|destock", case=False, na=False) &
+        ~df_events["event_type"].astype(str).str.contains("cancel", case=False, na=False)
     ].copy()
 
     # Unload Eject = broken cassette, not a real medication removal — split out for reference
@@ -104,18 +104,24 @@ if not pharm_all.empty:
 # Return + Instant Return + Instant Restock = count toward reconciliation
 
 EXCLUDED_TYPES = {"Inventory Move", "Restock"}
+INCLUDED_RETURN_TYPES = {"Return", "Instant Return", "Instant Restock"}
 
 inv_moves = pharm_all[pharm_all["workflow_type"] == "Inventory Move"].copy() if not pharm_all.empty else pd.DataFrame()
 restocks   = pharm_all[pharm_all["workflow_type"] == "Restock"].copy() if not pharm_all.empty else pd.DataFrame()
-pharm_return = pharm_all[~pharm_all["workflow_type"].isin(EXCLUDED_TYPES)].copy() if not pharm_all.empty else pd.DataFrame()
+pharm_return = pharm_all[pharm_all["workflow_type"].isin(INCLUDED_RETURN_TYPES)].copy() if not pharm_all.empty else pd.DataFrame()
 
 # --- Apply User Filter ---
 
+detail_pyxis_unload = pyxis_unload.copy()
+detail_pharm_return = pharm_return.copy()
+detail_inv_moves = inv_moves.copy()
+detail_restocks = restocks.copy()
+
 if selected_users:
-    if not pyxis_unload.empty: pyxis_unload = pyxis_unload[pyxis_unload["user_name"].isin(selected_users)]
-    if not pharm_return.empty: pharm_return = pharm_return[pharm_return["user_name"].isin(selected_users)]
-    if not inv_moves.empty: inv_moves = inv_moves[inv_moves["user_name"].isin(selected_users)]
-    if not restocks.empty: restocks = restocks[restocks["user_name"].isin(selected_users)]
+    if not detail_pyxis_unload.empty: detail_pyxis_unload = detail_pyxis_unload[detail_pyxis_unload["user_name"].isin(selected_users)]
+    if not detail_pharm_return.empty: detail_pharm_return = detail_pharm_return[detail_pharm_return["user_name"].isin(selected_users)]
+    if not detail_inv_moves.empty: detail_inv_moves = detail_inv_moves[detail_inv_moves["user_name"].isin(selected_users)]
+    if not detail_restocks.empty: detail_restocks = detail_restocks[detail_restocks["user_name"].isin(selected_users)]
 
 # --- Apply Med Filters ---
 
@@ -150,10 +156,14 @@ def remove_controls(df):
 if exclude_dummy:
     pyxis_unload = remove_dummy(pyxis_unload)
     pharm_return = remove_dummy(pharm_return)
+    detail_pyxis_unload = remove_dummy(detail_pyxis_unload)
+    detail_pharm_return = remove_dummy(detail_pharm_return)
 
 if exclude_controls:
     pyxis_unload = remove_controls(pyxis_unload)
     pharm_return = remove_controls(pharm_return)
+    detail_pyxis_unload = remove_controls(detail_pyxis_unload)
+    detail_pharm_return = remove_controls(detail_pharm_return)
 
 # --- Normalize Date ---
 
@@ -167,6 +177,10 @@ pharm_return = ensure_date_column(pharm_return)
 inv_moves    = ensure_date_column(inv_moves)
 restocks     = ensure_date_column(restocks)
 unload_eject = ensure_date_column(unload_eject)
+detail_pyxis_unload = ensure_date_column(detail_pyxis_unload)
+detail_pharm_return = ensure_date_column(detail_pharm_return)
+detail_inv_moves    = ensure_date_column(detail_inv_moves)
+detail_restocks     = ensure_date_column(detail_restocks)
 
 # --- Aggregate ---
 
@@ -204,8 +218,8 @@ restock_qty   = restocks["qty"].sum() if not restocks.empty and "qty" in restock
 eject_qty     = unload_eject["qty"].sum() if not unload_eject.empty and "qty" in unload_eject.columns else 0
 
 m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-m1.metric("Total Pyxis Unload Qty", int(total_unload))
-m2.metric("Total Pharmacy Return Qty", int(total_return))
+m1.metric("Total Pyxis Removal Qty", int(total_unload))
+m2.metric("Total Carousel Return Qty", int(total_return))
 m3.metric("Reconciliation %", f"{recon_pct:.1f}%")
 m4.metric("Unmatched Med-Days", len(unmatched))
 m5.metric("Inv Moves (excl.)", int(inv_move_qty))
@@ -213,6 +227,7 @@ m6.metric("Restocks (excl.)", int(restock_qty))
 m7.metric("Eject Events (excl.)", int(eject_qty))
 
 st.divider()
+st.caption("Reconciliation totals use all qualifying Pyxis removals and carousel return transactions in the date range. The user filter narrows detail tables only.")
 
 # --- Variance Table + Drilldown ---
 
@@ -233,20 +248,20 @@ else:
         st.divider()
         st.subheader(f"🔎 Drilldown: {selected['med_desc']} — {date}")
 
-        unload_detail = pyxis_unload[
-            (pyxis_unload["med_id"] == med_id) & (pyxis_unload["date"] == date)
+        unload_detail = detail_pyxis_unload[
+            (detail_pyxis_unload["med_id"] == med_id) & (detail_pyxis_unload["date"] == date)
         ].sort_values("dt")
 
-        return_detail = pharm_return[
-            (pharm_return["med_id"] == med_id) & (pharm_return["date"] == date)
+        return_detail = detail_pharm_return[
+            (detail_pharm_return["med_id"] == med_id) & (detail_pharm_return["date"] == date)
         ].sort_values("dt")
 
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("### 🟦 Pyxis Unload Events")
+            st.markdown("### Pyxis Removal Events")
             st.dataframe(unload_detail[["dt", "user_name", "device", "qty"]], width="stretch")
         with c2:
-            st.markdown("### 🟩 Pharmacy Return Events")
+            st.markdown("### Carousel Return Events")
             st.dataframe(return_detail[["dt", "user_name", "workflow_type", "qty"]], width="stretch")
 
 # --- Inventory Moves (reference only, excluded from reconciliation) ---
@@ -254,19 +269,19 @@ else:
 st.divider()
 with st.expander(f"📦 Inventory Moves — Excluded from Reconciliation ({int(inv_move_qty)} units)", expanded=False):
     st.caption("These are surplus-to-working-inventory transfers, not Pyxis returns. They are shown here for reference only.")
-    if inv_moves.empty:
+    if detail_inv_moves.empty:
         st.info("No inventory moves found for this date range.")
     else:
-        cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in inv_moves.columns]
-        st.dataframe(inv_moves[cols].sort_values("dt") if "dt" in cols else inv_moves[cols], width="stretch")
+        cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in detail_inv_moves.columns]
+        st.dataframe(detail_inv_moves[cols].sort_values("dt") if "dt" in cols else detail_inv_moves[cols], width="stretch")
 
 with st.expander(f"🔁 Restocks — Excluded from Reconciliation ({int(restock_qty)} units)", expanded=False):
     st.caption("These are proactive pharmacy refills, not returns triggered by a Pyxis unload. Shown here for reference only.")
-    if restocks.empty:
+    if detail_restocks.empty:
         st.info("No restocks found for this date range.")
     else:
-        cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in restocks.columns]
-        st.dataframe(restocks[cols].sort_values("dt") if "dt" in cols else restocks[cols], width="stretch")
+        cols = [c for c in ["dt", "date", "user_name", "med_desc", "qty", "workflow_type"] if c in detail_restocks.columns]
+        st.dataframe(detail_restocks[cols].sort_values("dt") if "dt" in cols else detail_restocks[cols], width="stretch")
 
 with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation ({int(eject_qty)} units)", expanded=False):
     st.caption("These are broken cassette eject events, not real medication removals. Shown here for reference only.")
@@ -275,4 +290,3 @@ with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation (
     else:
         cols = [c for c in ["dt", "date", "user_name", "device", "med_desc", "qty", "event_type"] if c in unload_eject.columns]
         st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], width="stretch")
-
