@@ -1191,6 +1191,24 @@ with tab6:
         )
         med_loop_summary["loop_rate"] = med_loop_summary["loop_rate"] * 100
 
+        machine_loop_summary = (
+            reload_pairs.groupby(["med_id", "med_desc", "device"], as_index=False)
+            .agg(
+                unload_events=("med_id", "count"),
+                reloaded_within_window=("reloaded_within_window", "sum"),
+                loop_rate=("reloaded_within_window", "mean"),
+                median_days_to_reload=("days_to_reload", "median"),
+                median_reload_qty=("reload_qty", "median"),
+            )
+            .sort_values(["reloaded_within_window", "unload_events"], ascending=False)
+        )
+        machine_loop_summary["loop_rate"] = machine_loop_summary["loop_rate"] * 100
+        machine_loop_summary["med_device"] = (
+            machine_loop_summary["med_desc"].fillna(machine_loop_summary["med_id"])
+            + " | "
+            + machine_loop_summary["device"].fillna("Unknown")
+        )
+
         chart_col, med_col = st.columns(2)
         with chart_col:
             fig_loop = px.bar(
@@ -1220,6 +1238,25 @@ with tab6:
             )
             fig_meds.update_layout(height=340, coloraxis_showscale=False)
             st.plotly_chart(fig_meds, width="stretch")
+
+        st.divider()
+        st.subheader("Top Boomerang Machines")
+        st.caption("Which exact med + device combinations are cycling back into Pyxis most often.")
+
+        top_machine_loops = machine_loop_summary.head(20).sort_values("reloaded_within_window")
+        fig_machine = px.bar(
+            top_machine_loops,
+            x="reloaded_within_window",
+            y="med_device",
+            orientation="h",
+            hover_data=["unload_events", "loop_rate", "median_days_to_reload", "median_reload_qty"],
+            labels={"reloaded_within_window": f"Reloaded Within {reload_window_days}d", "med_device": ""},
+            color="reloaded_within_window",
+            color_continuous_scale="Tealgrn",
+            title="Boomerang Meds by Machine",
+        )
+        fig_machine.update_layout(height=520, coloraxis_showscale=False, yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig_machine, width="stretch")
 
         reload_display = reload_pairs.sort_values(
             ["reloaded_within_window", "days_to_reload", "unload_dt"],
@@ -1252,6 +1289,22 @@ with tab6:
                     "loop_rate": st.column_config.NumberColumn("Loop Rate %", format="%.1f"),
                     "median_days_to_reload": st.column_config.NumberColumn("Median Days", format="%.1f"),
                     "devices": st.column_config.NumberColumn("Devices", format="%d"),
+                },
+            )
+
+        with st.expander("Machine Loop Summary", expanded=True):
+            st.dataframe(
+                machine_loop_summary,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "med_desc": st.column_config.TextColumn("Medication"),
+                    "device": st.column_config.TextColumn("Device"),
+                    "unload_events": st.column_config.NumberColumn("Unload Events", format="%d"),
+                    "reloaded_within_window": st.column_config.NumberColumn(f"Reloaded <= {reload_window_days}d", format="%d"),
+                    "loop_rate": st.column_config.NumberColumn("Loop Rate %", format="%.1f"),
+                    "median_days_to_reload": st.column_config.NumberColumn("Median Days", format="%.1f"),
+                    "median_reload_qty": st.column_config.NumberColumn("Median Reload Qty", format="%.1f"),
                 },
             )
 
