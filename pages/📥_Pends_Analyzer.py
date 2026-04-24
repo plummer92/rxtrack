@@ -564,6 +564,17 @@ def build_reload_pairs(unload_df, reload_df, max_days):
     return working
 
 
+def classify_boomerang_source(event_type):
+    text = str(event_type).lower()
+    if "empty" in text or "return bin" in text:
+        return "Empty Return Bin"
+    if "destock" in text:
+        return "Unload/Destock"
+    if "unload" in text:
+        return "Unload/Destock"
+    return "Other"
+
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 Par Audit",
     "👤 By User",
@@ -1130,6 +1141,13 @@ with tab6:
         help="Counts a loop when the same med is reloaded to the same device within this many days after unload.",
     )
 
+    boomerang_source_filter = st.segmented_control(
+        "Removal source",
+        options=["All Removals", "Unload/Destock", "Empty Return Bin"],
+        default="Unload/Destock",
+        key="pends_boomerang_source_filter",
+    )
+
     reload_unloads = df_unloads.copy()
     reload_events = df_reloads.copy()
 
@@ -1146,8 +1164,16 @@ with tab6:
             (reload_unloads["dt"].dt.date >= start_date) &
             (reload_unloads["dt"].dt.date <= end_date)
         ].copy()
+        reload_unloads["boomerang_source"] = reload_unloads["event_type"].apply(classify_boomerang_source)
+
+        if boomerang_source_filter == "Unload/Destock":
+            reload_unloads = reload_unloads[reload_unloads["boomerang_source"] == "Unload/Destock"]
+        elif boomerang_source_filter == "Empty Return Bin":
+            reload_unloads = reload_unloads[reload_unloads["boomerang_source"] == "Empty Return Bin"]
 
     reload_pairs = build_reload_pairs(reload_unloads, reload_events, reload_window_days)
+    if not reload_pairs.empty:
+        reload_pairs["boomerang_source"] = reload_pairs["unload_event_type"].apply(classify_boomerang_source)
 
     if reload_pairs.empty:
         st.info("No Pyxis unload events available for reload timing analysis in this date range.")
@@ -1159,7 +1185,7 @@ with tab6:
         ].median()
 
         r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Unload Events", f"{len(reload_pairs):,}")
+        r1.metric("Removal Txns", f"{len(reload_pairs):,}")
         r2.metric(f"Reloaded Within {reload_window_days}d", f"{loop_ct:,}")
         r3.metric("Loop Rate", f"{loop_rate:.1f}%")
         r4.metric("Median Days to Reload", f"{median_reload_days:.1f}" if pd.notna(median_reload_days) else "n/a")
@@ -1217,7 +1243,7 @@ with tab6:
                 bucket_summary,
                 x="reload_bucket",
                 y="unload_events",
-                labels={"reload_bucket": "", "unload_events": "Unload Events"},
+                labels={"reload_bucket": "", "unload_events": "Removal Txns"},
                 color="reload_bucket",
                 category_orders={"reload_bucket": bucket_order},
                 title="Days Until Same Med Reloaded to Same Device",
@@ -1243,7 +1269,7 @@ with tab6:
 
         st.divider()
         st.subheader("Top Boomerang Machines")
-        st.caption("Which exact med + device combinations are cycling back into Pyxis most often.")
+        st.caption(f"Which exact med + device combinations are cycling back into Pyxis most often for {boomerang_source_filter.lower()}.")
 
         top_machine_loops = machine_loop_summary.head(20).sort_values("reloaded_txns")
         fig_machine = px.bar(
