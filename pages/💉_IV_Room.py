@@ -12,6 +12,79 @@ def to_csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8")
 
 
+def collapse_iv_display_rows(df):
+    if df.empty:
+        return df.copy()
+
+    collapsed = df.copy()
+    collapsed["approved_by"] = collapsed["approved_by"].fillna("").astype(str).str.strip()
+    collapsed["prepared_by"] = collapsed["prepared_by"].fillna("").astype(str).str.strip()
+    collapsed["secondary_approved_by"] = collapsed["secondary_approved_by"].fillna("").astype(str).str.strip()
+    collapsed["order_lot_number"] = collapsed["order_lot_number"].fillna("").astype(str).str.strip()
+    collapsed["dose_number"] = collapsed["dose_number"].fillna("").astype(str).str.strip()
+    collapsed["drug_name"] = collapsed["drug_name"].fillna("").astype(str).str.strip()
+    collapsed["compound_type"] = collapsed["compound_type"].fillna("").astype(str).str.strip()
+    collapsed["facility_name"] = collapsed["facility_name"].fillna("").astype(str).str.strip()
+    collapsed["completed_on"] = pd.to_datetime(collapsed["completed_on"], errors="coerce")
+    collapsed["prepare_tat_minutes"] = pd.to_numeric(collapsed["prepare_tat_minutes"], errors="coerce")
+
+    collapse_keys = [
+        "facility_name",
+        "order_lot_number",
+        "drug_name",
+        "dose_number",
+        "compound_type",
+        "num_preparations",
+    ]
+    fallback_keys = collapse_keys + ["pk"]
+
+    has_lot = collapsed["order_lot_number"].ne("")
+    collapsed["display_group"] = ""
+    collapsed.loc[has_lot, "display_group"] = (
+        collapsed.loc[has_lot, collapse_keys]
+        .astype(str)
+        .agg(" | ".join, axis=1)
+    )
+    collapsed.loc[~has_lot, "display_group"] = (
+        collapsed.loc[~has_lot, fallback_keys]
+        .astype(str)
+        .agg(" | ".join, axis=1)
+    )
+
+    collapsed["has_approved_by"] = collapsed["approved_by"].ne("").astype(int)
+    collapsed["has_named_preparer"] = collapsed["prepared_by"].str.lower().ne("unassigned").astype(int)
+    collapsed["has_completed_on"] = collapsed["completed_on"].notna().astype(int)
+    collapsed["has_secondary_approval"] = collapsed["secondary_approved_by"].ne("").astype(int)
+    collapsed["prepare_tat_rank"] = collapsed["prepare_tat_minutes"].fillna(-1)
+
+    collapsed = collapsed.sort_values(
+        [
+            "display_group",
+            "has_approved_by",
+            "has_named_preparer",
+            "has_completed_on",
+            "has_secondary_approval",
+            "prepare_tat_rank",
+            "order_dt",
+        ],
+        ascending=[True, False, False, False, False, False, False],
+        na_position="last",
+    )
+    collapsed = collapsed.drop_duplicates(subset=["display_group"], keep="first").copy()
+
+    return collapsed.drop(
+        columns=[
+            "display_group",
+            "has_approved_by",
+            "has_named_preparer",
+            "has_completed_on",
+            "has_secondary_approval",
+            "prepare_tat_rank",
+        ],
+        errors="ignore",
+    )
+
+
 st.set_page_config(page_title="IV Room", page_icon="💉", layout="wide")
 
 render_sidebar = App.render_sidebar
@@ -50,6 +123,8 @@ work["priority_name"] = work["priority_name"].fillna("").astype(str).str.strip()
 work["compound_type"] = work["compound_type"].fillna("Unspecified").astype(str).str.strip().replace("", "Unspecified")
 work["prepared_by"] = work["prepared_by"].fillna("").astype(str).str.strip().replace("", "Unassigned")
 work["approved_by"] = work["approved_by"].fillna("").astype(str).str.strip().replace("", "Unassigned")
+raw_work = work.copy()
+work = collapse_iv_display_rows(work)
 
 facility_options = sorted(work["facility_name"].dropna().unique().tolist())
 selected_facilities = st.multiselect("Facility", facility_options, default=facility_options)
@@ -62,9 +137,21 @@ if selected_facilities:
 if selected_compounds:
     filtered = filtered[filtered["compound_type"].isin(selected_compounds)]
 
+raw_filtered = raw_work.copy()
+if selected_facilities:
+    raw_filtered = raw_filtered[raw_filtered["facility_name"].isin(selected_facilities)]
+if selected_compounds:
+    raw_filtered = raw_filtered[raw_filtered["compound_type"].isin(selected_compounds)]
+
 if filtered.empty:
     st.warning("No IV room records match the current filters.")
     st.stop()
+
+collapsed_count = len(raw_filtered) - len(filtered)
+if collapsed_count > 0:
+    st.caption(
+        f"Collapsed {collapsed_count:,} workflow-stage duplicate rows for display. The raw log remains available below for verification."
+    )
 
 stat_mask = filtered["priority_name"].str.upper().eq("STAT")
 tat_ready = filtered.dropna(subset=["prepare_tat_minutes"]).copy()
@@ -319,7 +406,7 @@ with col4:
     fig_tech.update_layout(coloraxis_showscale=False, height=420)
     st.plotly_chart(fig_tech, use_container_width=True)
 
-unassigned_rows = filtered[filtered["prepared_by"].eq("Unassigned")].copy()
+unassigned_rows = raw_filtered[raw_filtered["prepared_by"].eq("Unassigned")].copy()
 if not unassigned_rows.empty:
     with st.expander(f"Unassigned Tech Prep Raw Data ({len(unassigned_rows):,} rows)", expanded=False):
         st.caption("These rows have a blank or missing `Prepared By` value in the IV Room source data.")
@@ -485,13 +572,13 @@ with st.expander("Raw IV Room Log"):
         "secondary_approved_by",
     ]
     st.dataframe(
-        filtered[raw_cols].sort_values("order_dt", ascending=False),
+        raw_filtered[raw_cols].sort_values("order_dt", ascending=False),
         width="stretch",
         hide_index=True,
     )
     st.download_button(
         "Export IV Room CSV",
-        data=to_csv_bytes(filtered[raw_cols]),
+        data=to_csv_bytes(raw_filtered[raw_cols]),
         file_name="iv_room_workload.csv",
         mime="text/csv",
     )
