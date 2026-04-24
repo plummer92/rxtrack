@@ -1147,6 +1147,20 @@ with tab6:
         default="Unload/Destock",
         key="pends_boomerang_source_filter",
     )
+    exclude_quick_corrections = st.checkbox(
+        "Exclude quick unload/reload corrections",
+        value=True,
+        key="pends_exclude_quick_corrections",
+        help="Filters out back-to-back unload/load pairs that likely reflect moving a med to a different pocket size rather than true churn.",
+    )
+    quick_correction_minutes = st.slider(
+        "Quick correction window (minutes)",
+        min_value=1,
+        max_value=30,
+        value=5,
+        key="pends_quick_correction_minutes",
+        help="Unload/reload pairs at or under this many minutes will be treated as pocket-correction moves.",
+    )
 
     reload_unloads = df_unloads.copy()
     reload_events = df_reloads.copy()
@@ -1174,25 +1188,44 @@ with tab6:
     reload_pairs = build_reload_pairs(reload_unloads, reload_events, reload_window_days)
     if not reload_pairs.empty:
         reload_pairs["boomerang_source"] = reload_pairs["unload_event_type"].apply(classify_boomerang_source)
+        reload_pairs["minutes_to_reload"] = reload_pairs["days_to_reload"] * 1440
+        reload_pairs["is_quick_correction"] = (
+            reload_pairs["reloaded_within_window"] &
+            reload_pairs["minutes_to_reload"].notna() &
+            (reload_pairs["minutes_to_reload"] <= quick_correction_minutes)
+        )
+    else:
+        reload_pairs["minutes_to_reload"] = pd.Series(dtype=float)
+        reload_pairs["is_quick_correction"] = pd.Series(dtype=bool)
 
-    if reload_pairs.empty:
+    quick_correction_pairs = reload_pairs[reload_pairs["is_quick_correction"]].copy() if not reload_pairs.empty else pd.DataFrame()
+    analysis_pairs = reload_pairs.copy()
+    if exclude_quick_corrections and not analysis_pairs.empty:
+        analysis_pairs = analysis_pairs[~analysis_pairs["is_quick_correction"]].copy()
+
+    if analysis_pairs.empty:
         st.info("No Pyxis unload events available for reload timing analysis in this date range.")
     else:
-        loop_ct = int(reload_pairs["reloaded_within_window"].sum())
-        loop_rate = (loop_ct / len(reload_pairs) * 100) if len(reload_pairs) else 0
-        median_reload_days = reload_pairs.loc[
-            reload_pairs["reloaded_within_window"], "days_to_reload"
+        loop_ct = int(analysis_pairs["reloaded_within_window"].sum())
+        loop_rate = (loop_ct / len(analysis_pairs) * 100) if len(analysis_pairs) else 0
+        median_reload_days = analysis_pairs.loc[
+            analysis_pairs["reloaded_within_window"], "days_to_reload"
         ].median()
+        excluded_quick_ct = len(quick_correction_pairs) if exclude_quick_corrections else 0
 
         r1, r2, r3, r4 = st.columns(4)
-        r1.metric("Removal Txns", f"{len(reload_pairs):,}")
+        r1.metric("Removal Txns", f"{len(analysis_pairs):,}")
         r2.metric(f"Reloaded Within {reload_window_days}d", f"{loop_ct:,}")
         r3.metric("Loop Rate", f"{loop_rate:.1f}%")
-        r4.metric("Median Days to Reload", f"{median_reload_days:.1f}" if pd.notna(median_reload_days) else "n/a")
+        r4.metric(
+            "Median Days to Reload",
+            f"{median_reload_days:.1f}" if pd.notna(median_reload_days) else "n/a",
+            delta=f"-{excluded_quick_ct} quick corrections" if excluded_quick_ct else None
+        )
 
         bucket_order = ["0-3 days", "4-7 days", "8-14 days", "15-28 days", "29+ days", "Not reloaded in window"]
         bucket_summary = (
-            reload_pairs.groupby("reload_bucket", as_index=False)
+            analysis_pairs.groupby("reload_bucket", as_index=False)
             .agg(
                 unload_events=("med_id", "count"),
                 distinct_meds=("med_id", "nunique"),
@@ -1205,7 +1238,7 @@ with tab6:
         bucket_summary = bucket_summary.sort_values("reload_bucket")
 
         med_loop_summary = (
-            reload_pairs.groupby(["med_id", "med_desc"], as_index=False)
+            analysis_pairs.groupby(["med_id", "med_desc"], as_index=False)
             .agg(
                 unload_events=("med_id", "count"),
                 reloaded_within_window=("reloaded_within_window", "sum"),
@@ -1218,7 +1251,7 @@ with tab6:
         med_loop_summary["loop_rate"] = med_loop_summary["loop_rate"] * 100
 
         machine_loop_summary = (
-            reload_pairs.groupby(["med_id", "med_desc", "device"], as_index=False)
+            analysis_pairs.groupby(["med_id", "med_desc", "device"], as_index=False)
             .agg(
                 unload_txns=("med_id", "count"),
                 reloaded_txns=("reloaded_within_window", "sum"),
@@ -1267,6 +1300,11 @@ with tab6:
             fig_meds.update_layout(height=340, coloraxis_showscale=False)
             st.plotly_chart(fig_meds, width="stretch")
 
+        if exclude_quick_corrections and not quick_correction_pairs.empty:
+            st.caption(
+                f"Excluded {len(quick_correction_pairs):,} quick unload/load pairs at or under {quick_correction_minutes} minutes as likely pocket-size corrections."
+            )
+
         st.divider()
         st.subheader("Top Boomerang Machines")
         st.caption(f"Which exact med + device combinations are cycling back into Pyxis most often for {boomerang_source_filter.lower()}.")
@@ -1286,14 +1324,14 @@ with tab6:
         fig_machine.update_layout(height=520, coloraxis_showscale=False, yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig_machine, width="stretch")
 
-        reload_display = reload_pairs.sort_values(
+        reload_display = analysis_pairs.sort_values(
             ["reloaded_within_window", "days_to_reload", "unload_dt"],
             ascending=[False, True, False],
         )
         st.dataframe(
             reload_display[[
                 "unload_dt", "device", "med_desc", "unload_qty", "unload_user",
-                "reload_dt", "reload_user", "reload_qty", "days_to_reload", "reload_bucket"
+                "reload_dt", "reload_user", "reload_qty", "days_to_reload", "minutes_to_reload", "reload_bucket"
             ]],
             width="stretch",
             hide_index=True,
@@ -1303,8 +1341,30 @@ with tab6:
                 "unload_qty": st.column_config.NumberColumn("Unload Qty", format="%.0f"),
                 "reload_qty": st.column_config.NumberColumn("Reload Qty", format="%.0f"),
                 "days_to_reload": st.column_config.NumberColumn("Days to Reload", format="%.1f"),
+                "minutes_to_reload": st.column_config.NumberColumn("Minutes to Reload", format="%.1f"),
             },
         )
+
+        if not quick_correction_pairs.empty:
+            with st.expander("Excluded Quick Corrections", expanded=False):
+                st.dataframe(
+                    quick_correction_pairs[[
+                        "unload_dt", "device", "med_desc", "unload_qty", "unload_user",
+                        "reload_dt", "reload_user", "reload_qty", "minutes_to_reload",
+                        "unload_event_type", "reload_event_type"
+                    ]].sort_values(["minutes_to_reload", "unload_dt"], ascending=[True, False]),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "unload_dt": st.column_config.DatetimeColumn("Unload Time", format="MM/DD/YY HH:mm"),
+                        "reload_dt": st.column_config.DatetimeColumn("Reload Time", format="MM/DD/YY HH:mm"),
+                        "unload_qty": st.column_config.NumberColumn("Unload Qty", format="%.0f"),
+                        "reload_qty": st.column_config.NumberColumn("Reload Qty", format="%.0f"),
+                        "minutes_to_reload": st.column_config.NumberColumn("Minutes to Reload", format="%.1f"),
+                        "unload_event_type": st.column_config.TextColumn("Unload Event"),
+                        "reload_event_type": st.column_config.TextColumn("Reload Event"),
+                    },
+                )
 
         with st.expander("Medication Loop Summary", expanded=False):
             st.dataframe(
@@ -1346,9 +1406,9 @@ with tab6:
                 machine_med_id = selected_machine["med_id"]
                 machine_device = selected_machine["device"]
 
-                supporting_events = reload_pairs[
-                    (reload_pairs["med_id"] == machine_med_id) &
-                    (reload_pairs["device"] == machine_device)
+                supporting_events = analysis_pairs[
+                    (analysis_pairs["med_id"] == machine_med_id) &
+                    (analysis_pairs["device"] == machine_device)
                 ].sort_values(
                     ["reloaded_within_window", "days_to_reload", "unload_dt"],
                     ascending=[False, True, False],
@@ -1369,7 +1429,7 @@ with tab6:
                 st.dataframe(
                     supporting_events[[
                         "unload_dt", "unload_user", "unload_qty", "reload_dt", "reload_user",
-                        "reload_qty", "days_to_reload", "reload_bucket", "unload_event_type", "reload_event_type"
+                        "reload_qty", "days_to_reload", "minutes_to_reload", "reload_bucket", "unload_event_type", "reload_event_type"
                     ]],
                     width="stretch",
                     hide_index=True,
@@ -1381,6 +1441,7 @@ with tab6:
                         "unload_qty": st.column_config.NumberColumn("Unload Qty", format="%.0f"),
                         "reload_qty": st.column_config.NumberColumn("Reload Qty", format="%.0f"),
                         "days_to_reload": st.column_config.NumberColumn("Days to Reload", format="%.2f"),
+                        "minutes_to_reload": st.column_config.NumberColumn("Minutes to Reload", format="%.1f"),
                         "reload_bucket": st.column_config.TextColumn("Reload Bucket"),
                         "unload_event_type": st.column_config.TextColumn("Unload Event"),
                         "reload_event_type": st.column_config.TextColumn("Reload Event"),
