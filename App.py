@@ -1736,6 +1736,7 @@ def render_sidebar_chrome():
         """, unsafe_allow_html=True)
         render_page_links()
         st.divider()
+        render_demo_mode_toggle()
         render_ui_debug_toggle()
 
 
@@ -1771,6 +1772,115 @@ def render_ui_debug_toggle():
     current = ui_debug_enabled()
     enabled = st.toggle("UI Debug Mode", value=current, key="rxtrack_ui_debug_toggle")
     st.session_state["_ui_debug_enabled"] = enabled
+
+
+def demo_mode_enabled():
+    return bool(st.session_state.get("_rxtrack_demo_mode", False))
+
+
+def render_demo_mode_toggle():
+    current = demo_mode_enabled()
+    enabled = st.toggle("Interview Demo Mode", value=current, key="rxtrack_demo_mode_toggle")
+    st.session_state["_rxtrack_demo_mode"] = enabled
+    if enabled:
+        st.caption("Demo mode highlights the strongest workflows and quiets the internal admin feel.")
+
+
+def render_demo_hub(start_date, end_date, df_events, df_pharm, df_sched, df_att):
+    st.markdown("## Interview Demo")
+    st.caption(
+        f"Story window: {start_date.strftime('%b %d, %Y')} to {end_date.strftime('%b %d, %Y')} | "
+        "Use this as a guided walkthrough of workflow intelligence, staffing analytics, and operational waste reduction."
+    )
+
+    ev_count = len(df_events) if not df_events.empty else 0
+    pharm_count = len(df_pharm) if not df_pharm.empty else 0
+    sched_count = len(df_sched) if not df_sched.empty else 0
+    att_count = len(df_att) if not df_att.empty else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Pyxis Events", f"{ev_count:,}")
+    m2.metric("Pharmacy Orders", f"{pharm_count:,}")
+    m3.metric("Schedule Rows", f"{sched_count:,}")
+    m4.metric("Attendance Punches", f"{att_count:,}")
+
+    st.divider()
+
+    st.subheader("Recommended Walkthrough")
+    walkthrough = [
+        (
+            "1. Return Reconciliation",
+            "Show chain-of-custody logic from Pyxis removals to carousel returns.",
+            "pages/🔄_Return_Reconciliation.py",
+            "Open Return Reconciliation",
+            "🔄",
+        ),
+        (
+            "2. Pends Analyzer",
+            "Highlight reload churn, boomerang meds, machine-specific waste, and raw verification drilldowns.",
+            "pages/📥_Pends_Analyzer.py",
+            "Open Pends Analyzer",
+            "📥",
+        ),
+        (
+            "3. IV Room",
+            "Walk through daily workload, drill into a production day, and inspect unassigned prep rows.",
+            "pages/💉_IV_Room.py",
+            "Open IV Room",
+            "💉",
+        ),
+        (
+            "4. Tardies / Schedule Logic",
+            "Show shift-trade handling, color-aware schedule exceptions, and attendance analytics.",
+            "pages/1_⏰_Tardies.py",
+            "Open Tardies",
+            "⏰",
+        ),
+    ]
+
+    for title, desc, path, label, icon in walkthrough:
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            st.markdown(f"**{title}**")
+            st.caption(desc)
+        with c2:
+            st.page_link(path, label=label, icon=icon)
+
+    st.divider()
+
+    c1, c2 = st.columns(2)
+    with c1:
+        with st.expander("3-Minute Interview Script", expanded=True):
+            st.markdown(
+                """
+1. RxTrack unifies Pyxis, carousel, IV room, scheduling, and attendance data into one operational app.
+2. It was built to surface waste, missed reconciliation, staffing exceptions, and repeat manual work.
+3. Return Reconciliation shows whether removals from Pyxis are actually matched by carousel-side return workflows.
+4. Pends Analyzer shows medications that get unloaded and then reloaded back into the same machine, which points to standard-stock opportunities.
+5. IV Room turns raw preparation logs into staffing and production visibility with day-level drilldowns.
+                """
+            )
+    with c2:
+        with st.expander("10-Minute Demo Narrative", expanded=True):
+            st.markdown(
+                """
+- Start with the Overview Hub to frame the app as pharmacy operations intelligence.
+- Go to Return Reconciliation and explain closed-loop medication accountability.
+- Move to Pends Analyzer and show boomerang meds by machine, raw supporting events, and quick-correction filtering.
+- Open IV Room and drill into one day to show production analytics from raw event data.
+- Finish with Tardies to show schedule-aware attendance logic, including trade and adjustment handling.
+                """
+            )
+
+    with st.expander("What This Demonstrates", expanded=False):
+        st.markdown(
+            """
+- Workflow understanding, not just dashboarding
+- Translating frontline pain points into operational tooling
+- Iterating logic when real-world pharmacy processes do not fit a naive model
+- Building analytics that support both accountability and efficiency
+            """
+        )
 
 
 def record_ui_debug_event(page_name, event, **details):
@@ -1830,6 +1940,7 @@ def render_sidebar():
         render_page_links()
 
         st.divider()
+        render_demo_mode_toggle()
         render_ui_debug_toggle()
         st.markdown("### Analysis Window")
 
@@ -2156,6 +2267,9 @@ if _is_main:
 
     # 1. OVERVIEW
     if selected_page == "📊 Overview":
+        if demo_mode_enabled():
+            render_demo_hub(start_date, end_date, df_events, df_pharm, df_sched, df_att)
+            st.divider()
         if not df_events.empty:
             st.markdown("## 🏥 Executive Summary")
             st.caption(f"Date range: {start_date.strftime('%b %d, %Y')} → {end_date.strftime('%b %d, %Y')}")
