@@ -518,6 +518,7 @@ def build_reload_pairs(unload_df, reload_df, max_days):
 
     base_cols = ["dt", "user_name", "device", "med_id", "med_desc", "qty", "event_type"]
     working = unload_df[[c for c in base_cols if c in unload_df.columns]].copy()
+    working = working.drop_duplicates(subset=base_cols).reset_index(drop=True)
     working = working.rename(columns={
         "dt": "unload_dt",
         "user_name": "unload_user",
@@ -535,10 +536,13 @@ def build_reload_pairs(unload_df, reload_df, max_days):
         working["reloaded_within_window"] = False
         return working
 
-    grouped_reload = {
-        key: grp.sort_values("dt").reset_index(drop=True)
-        for key, grp in reload_df.groupby(["med_id", "device"], dropna=False)
-    }
+    reload_working = reload_df[[c for c in base_cols if c in reload_df.columns]].copy()
+    reload_working = reload_working.drop_duplicates(subset=base_cols).reset_index(drop=True)
+    grouped_reload = {}
+    for key, grp in reload_working.groupby(["med_id", "device"], dropna=False):
+        grp = grp.sort_values("dt").reset_index(drop=True).copy()
+        grp["matched"] = False
+        grouped_reload[key] = grp
 
     max_delta = pd.Timedelta(days=max_days)
     for idx, row in working.iterrows():
@@ -546,13 +550,18 @@ def build_reload_pairs(unload_df, reload_df, max_days):
         candidates = grouped_reload.get(key)
         if candidates is None or candidates.empty or pd.isna(row.get("unload_dt")):
             continue
-        future = candidates[candidates["dt"] > row["unload_dt"]]
+        future = candidates[
+            (~candidates["matched"]) &
+            (candidates["dt"] > row["unload_dt"])
+        ]
         if future.empty:
             continue
         next_row = future.iloc[0]
         delta = next_row["dt"] - row["unload_dt"]
         if delta > max_delta:
             continue
+        matched_idx = next_row.name
+        grouped_reload[key].at[matched_idx, "matched"] = True
         working.at[idx, "reload_dt"] = next_row["dt"]
         working.at[idx, "reload_user"] = next_row.get("user_name")
         working.at[idx, "reload_qty"] = next_row.get("qty")
