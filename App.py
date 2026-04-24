@@ -1672,6 +1672,20 @@ def apply_global_styles():
             color: #0f172a !important;
             font-weight: 700;
         }
+        [data-testid="stExpander"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stExpander"] [data-testid="stMarkdownContainer"] li,
+        [data-testid="stExpander"] [data-testid="stMarkdownContainer"] label,
+        [data-testid="stExpander"] [data-testid="stMarkdownContainer"] span,
+        [data-testid="stExpander"] .stCaption,
+        [data-testid="stExpander"] [data-testid="stCaptionContainer"] {
+            color: #334155 !important;
+        }
+        [data-testid="stExpander"] h1,
+        [data-testid="stExpander"] h2,
+        [data-testid="stExpander"] h3,
+        [data-testid="stExpander"] strong {
+            color: #0f172a !important;
+        }
         h2, h3, [data-testid="stMarkdownContainer"] h2, [data-testid="stMarkdownContainer"] h3 {
             color: #f8fafc;
         }
