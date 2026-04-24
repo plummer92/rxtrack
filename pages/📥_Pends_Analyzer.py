@@ -1194,13 +1194,15 @@ with tab6:
         machine_loop_summary = (
             reload_pairs.groupby(["med_id", "med_desc", "device"], as_index=False)
             .agg(
-                unload_events=("med_id", "count"),
-                reloaded_within_window=("reloaded_within_window", "sum"),
+                unload_txns=("med_id", "count"),
+                reloaded_txns=("reloaded_within_window", "sum"),
                 loop_rate=("reloaded_within_window", "mean"),
+                total_unload_qty=("unload_qty", "sum"),
+                total_reload_qty=("reload_qty", "sum"),
                 median_days_to_reload=("days_to_reload", "median"),
                 median_reload_qty=("reload_qty", "median"),
             )
-            .sort_values(["reloaded_within_window", "unload_events"], ascending=False)
+            .sort_values(["reloaded_txns", "unload_txns"], ascending=False)
         )
         machine_loop_summary["loop_rate"] = machine_loop_summary["loop_rate"] * 100
         machine_loop_summary["med_device"] = (
@@ -1243,15 +1245,15 @@ with tab6:
         st.subheader("Top Boomerang Machines")
         st.caption("Which exact med + device combinations are cycling back into Pyxis most often.")
 
-        top_machine_loops = machine_loop_summary.head(20).sort_values("reloaded_within_window")
+        top_machine_loops = machine_loop_summary.head(20).sort_values("reloaded_txns")
         fig_machine = px.bar(
             top_machine_loops,
-            x="reloaded_within_window",
+            x="reloaded_txns",
             y="med_device",
             orientation="h",
-            hover_data=["unload_events", "loop_rate", "median_days_to_reload", "median_reload_qty"],
-            labels={"reloaded_within_window": f"Reloaded Within {reload_window_days}d", "med_device": ""},
-            color="reloaded_within_window",
+            hover_data=["unload_txns", "loop_rate", "total_unload_qty", "total_reload_qty", "median_days_to_reload", "median_reload_qty"],
+            labels={"reloaded_txns": f"Reloaded Txns Within {reload_window_days}d", "med_device": ""},
+            color="reloaded_txns",
             color_continuous_scale="Tealgrn",
             title="Boomerang Meds by Machine",
         )
@@ -1293,20 +1295,71 @@ with tab6:
             )
 
         with st.expander("Machine Loop Summary", expanded=True):
-            st.dataframe(
-                machine_loop_summary,
+            machine_loop_view = machine_loop_summary.reset_index(drop=True)
+            machine_event = st.dataframe(
+                machine_loop_view,
                 width="stretch",
+                on_select="rerun",
+                selection_mode="single-row",
                 hide_index=True,
                 column_config={
                     "med_desc": st.column_config.TextColumn("Medication"),
                     "device": st.column_config.TextColumn("Device"),
-                    "unload_events": st.column_config.NumberColumn("Unload Events", format="%d"),
-                    "reloaded_within_window": st.column_config.NumberColumn(f"Reloaded <= {reload_window_days}d", format="%d"),
+                    "unload_txns": st.column_config.NumberColumn("Unload Txns", format="%d"),
+                    "reloaded_txns": st.column_config.NumberColumn(f"Reloaded Txns <= {reload_window_days}d", format="%d"),
                     "loop_rate": st.column_config.NumberColumn("Loop Rate %", format="%.1f"),
+                    "total_unload_qty": st.column_config.NumberColumn("Total Unload Qty", format="%.0f"),
+                    "total_reload_qty": st.column_config.NumberColumn("Total Reload Qty", format="%.0f"),
                     "median_days_to_reload": st.column_config.NumberColumn("Median Days", format="%.1f"),
                     "median_reload_qty": st.column_config.NumberColumn("Median Reload Qty", format="%.1f"),
                 },
             )
+
+            if len(machine_event.selection.rows) > 0:
+                selected_machine = machine_loop_view.iloc[machine_event.selection.rows[0]]
+                machine_med_id = selected_machine["med_id"]
+                machine_device = selected_machine["device"]
+
+                supporting_events = reload_pairs[
+                    (reload_pairs["med_id"] == machine_med_id) &
+                    (reload_pairs["device"] == machine_device)
+                ].sort_values(
+                    ["reloaded_within_window", "days_to_reload", "unload_dt"],
+                    ascending=[False, True, False],
+                )
+
+                st.divider()
+                st.subheader("Selected Machine Raw Data")
+                st.caption(
+                    f"{selected_machine['med_desc']} at {machine_device} — raw unload/reload events behind the selected summary row."
+                )
+
+                sr1, sr2, sr3, sr4 = st.columns(4)
+                sr1.metric("Unload Txns", int(selected_machine["unload_txns"]))
+                sr2.metric(f"Reloaded Txns <= {reload_window_days}d", int(selected_machine["reloaded_txns"]))
+                sr3.metric("Total Unload Qty", f"{selected_machine['total_unload_qty']:.0f}")
+                sr4.metric("Total Reload Qty", f"{selected_machine['total_reload_qty']:.0f}" if pd.notna(selected_machine["total_reload_qty"]) else "0")
+
+                st.dataframe(
+                    supporting_events[[
+                        "unload_dt", "unload_user", "unload_qty", "reload_dt", "reload_user",
+                        "reload_qty", "days_to_reload", "reload_bucket", "unload_event_type", "reload_event_type"
+                    ]],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "unload_dt": st.column_config.DatetimeColumn("Unload Time", format="MM/DD/YY HH:mm"),
+                        "reload_dt": st.column_config.DatetimeColumn("Reload Time", format="MM/DD/YY HH:mm"),
+                        "unload_user": st.column_config.TextColumn("Unload User"),
+                        "reload_user": st.column_config.TextColumn("Reload User"),
+                        "unload_qty": st.column_config.NumberColumn("Unload Qty", format="%.0f"),
+                        "reload_qty": st.column_config.NumberColumn("Reload Qty", format="%.0f"),
+                        "days_to_reload": st.column_config.NumberColumn("Days to Reload", format="%.2f"),
+                        "reload_bucket": st.column_config.TextColumn("Reload Bucket"),
+                        "unload_event_type": st.column_config.TextColumn("Unload Event"),
+                        "reload_event_type": st.column_config.TextColumn("Reload Event"),
+                    },
+                )
 
 with tab7:
     st.subheader("Par Change Audit Trail")
