@@ -299,11 +299,17 @@ with st.sidebar:
         key="disc_cause_filter"
     )
     flagged_only = st.checkbox("Flagged only (high-value / repeat)", key="disc_flagged_only")
-    verify_only = st.checkbox("Verify Inventory discrepancies only", key="disc_verify_only")
+    verify_only = st.checkbox(
+        "Verify Inventory discrepancies only",
+        value=True,
+        help="Defaulted on because this catches count-entry mismatches found when the next tech verifies inventory.",
+        key="disc_verify_only"
+    )
     med_section_filter = st.radio(
         "Medication Section",
-        ["All", SPECIAL_MED_SECTION, OTHER_MED_SECTION],
+        [OTHER_MED_SECTION, SPECIAL_MED_SECTION, "All"],
         index=0,
+        help="Defaulted to All Other Meds so insulins and inhalers do not skew the tech count-entry signal.",
         key="disc_med_section_filter"
     )
     med_group_filter = st.multiselect(
@@ -321,6 +327,17 @@ if flagged_only:  filtered = filtered[filtered["flags"] != ""]
 if verify_only:   filtered = filtered[filtered["verify_inventory_flag"]]
 if med_section_filter != "All": filtered = filtered[filtered["med_section"] == med_section_filter]
 if med_group_filter: filtered = filtered[filtered["med_group"].isin(med_group_filter)]
+
+likely_cause_audit = df_disc.copy()
+if dev_filter:    likely_cause_audit = likely_cause_audit[likely_cause_audit["device"].isin(dev_filter)]
+if med_filter:    likely_cause_audit = likely_cause_audit[likely_cause_audit["med_desc"].isin(med_filter)]
+if cause_filter:  likely_cause_audit = likely_cause_audit[likely_cause_audit["likely_cause"].isin(cause_filter)]
+if flagged_only:  likely_cause_audit = likely_cause_audit[likely_cause_audit["flags"] != ""]
+if med_group_filter: likely_cause_audit = likely_cause_audit[likely_cause_audit["med_group"].isin(med_group_filter)]
+likely_cause_audit = likely_cause_audit[
+    (likely_cause_audit["verify_inventory_flag"]) &
+    (likely_cause_audit["med_section"] == OTHER_MED_SECTION)
+]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 5 — EXECUTIVE METRICS
@@ -684,27 +701,44 @@ with tab2:
 # ─────────────────────────────────────────────────────────────────────────────
 
 with tab3:
-    st.subheader("Likely Cause Attribution")
+    st.subheader("Likely Cause: Count Entry Mismatches")
     st.caption(
-        "Based on whoever did the most recent clean transaction on that med+device "
-        "before the discrepancy was logged. This is a probable indicator — not proof."
+        "Focused on Verify Inventory discrepancies for All Other Meds by default. "
+        "The likely cause is the user who last completed a clean transaction on the same med/device "
+        "before another tech found the count did not match what Pyxis expected."
     )
 
+    if med_section_filter != OTHER_MED_SECTION:
+        st.info(
+            "This tab intentionally ignores the Medication Section sidebar choice and audits Verify Inventory "
+            "events for All Other Meds only. Insulins and inhalers stay out of this likely-cause view."
+        )
+
     cause_summary = (
-        filtered.groupby("likely_cause")
+        likely_cause_audit.groupby("likely_cause")
         .agg(
             disc_count  = ("pk",          "count"),
             total_risk  = ("dollar_risk", "sum"),
+            verify_count = ("verify_inventory_flag", "sum"),
             avg_risk    = ("dollar_risk", "mean"),
             unique_meds = ("med_id",      "nunique"),
             unique_devs = ("device",      "nunique"),
         )
         .reset_index()
-        .sort_values("total_risk", ascending=False)
+        .sort_values(["disc_count", "verify_count", "total_risk"], ascending=False)
     )
+    cause_summary["verify_count"] = cause_summary["verify_count"].astype(int)
 
     # Exclude Unknown from charts but keep in table
     known = cause_summary[cause_summary["likely_cause"] != "Unknown"]
+
+    known_disc_count = int(known["disc_count"].sum()) if not known.empty else 0
+    top_likely_cause = known.iloc[0]["likely_cause"] if not known.empty else "None"
+    lc1, lc2, lc3, lc4 = st.columns(4)
+    lc1.metric("Known Likely-Cause Events", f"{known_disc_count:,}")
+    lc2.metric("Unknown Events", f"{int((likely_cause_audit['likely_cause'] == 'Unknown').sum()):,}")
+    lc3.metric("Top Likely Cause", top_likely_cause)
+    lc4.metric("Verify Inventory Events", f"{len(likely_cause_audit):,}")
 
     col_a, col_b = st.columns(2)
 
@@ -716,7 +750,7 @@ with tab3:
                 orientation="h",
                 color="disc_count",
                 color_continuous_scale="Reds",
-                title="Discrepancy Count by Likely Cause",
+                title="Verify Count Mismatches by Likely Cause",
                 labels={"disc_count": "Count", "likely_cause": ""},
                 text="disc_count"
             )
@@ -748,10 +782,10 @@ with tab3:
             )
             st.plotly_chart(fig_cause_risk, use_container_width=True)
 
-    unknown_ct = int((filtered["likely_cause"] == "Unknown").sum())
+    unknown_ct = int((likely_cause_audit["likely_cause"] == "Unknown").sum())
     if unknown_ct > 0:
         st.info(
-            f"ℹ️ {unknown_ct} discrepancies ({unknown_ct/total_disc*100:.1f}%) have no prior "
+            f"ℹ️ {unknown_ct} discrepancies ({unknown_ct/len(likely_cause_audit)*100:.1f}%) have no prior "
             f"transaction on record — likely the first ever transaction on that med+device, "
             f"or data predates your earliest upload."
         )
@@ -760,9 +794,9 @@ with tab3:
 
     # Drill-down: pick a user and see their events
     st.subheader("User Drill-Down")
-    known_users = sorted(filtered[
-        (filtered["likely_cause"] != "Unknown") &
-        (filtered["likely_cause"].notna())
+    known_users = sorted(likely_cause_audit[
+        (likely_cause_audit["likely_cause"] != "Unknown") &
+        (likely_cause_audit["likely_cause"].notna())
     ]["likely_cause"].astype(str).unique())
     if known_users:
         sel_user = st.selectbox(
@@ -770,10 +804,10 @@ with tab3:
             known_users,
             key="disc_drilldown_user"
         )
-        user_events = filtered[filtered["likely_cause"] == sel_user][[
+        user_events = likely_cause_audit[likely_cause_audit["likely_cause"] == sel_user][[
             "med_section", "med_group", "dt", "device", "med_desc", "discrepancy_qty",
             "discrepancy_reason", "dollar_risk", "flags"
-        ]].sort_values("dollar_risk", ascending=False)
+        ]].sort_values("dt", ascending=False)
 
         st.dataframe(
             user_events,
@@ -794,6 +828,7 @@ with tab3:
         use_container_width=True,
         column_config={
             "disc_count":  st.column_config.NumberColumn("Count",       format="%d"),
+            "verify_count": st.column_config.NumberColumn("Verify Count", format="%d"),
             "total_risk":  st.column_config.NumberColumn("Total Risk",  format="$%.2f"),
             "avg_risk":    st.column_config.NumberColumn("Avg Risk",    format="$%.2f"),
             "unique_meds": st.column_config.NumberColumn("Meds",        format="%d"),
