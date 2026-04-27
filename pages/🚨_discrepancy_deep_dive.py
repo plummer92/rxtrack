@@ -17,6 +17,44 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False)
     return buf.getvalue()
 
+
+INSULIN_PATTERN = (
+    r"\b(insulin|regular insulin|insulin regular|lispro|aspart|glargine|detemir|degludec|glulisine|nph|"
+    r"humalog|novolog|novolin|humulin|lantus|levemir|tresiba|toujeo|basaglar|"
+    r"semglee|fiasp|apidra|admelog|afrezza|lyumjev|rezvoglar|relion)\b"
+)
+INHALER_PATTERN = (
+    r"\b(inhaler|hfa|mdi|dpi|ellipta|respimat|diskus|flexhaler|twisthaler|"
+    r"redihaler|aerosol|puff|actuat|albuterol|levalbuterol|ipratropium|"
+    r"tiotropium|fluticasone|salmeterol|budesonide|formoterol|mometasone|"
+    r"umeclidinium|vilanterol|beclomethasone|ciclesonide|breo|advair|"
+    r"symbicort|spiriva|combivent|proair|ventolin|xopenex|dulera|trelegy|"
+    r"anoro|qvar|asmanex|pulmicort)\b"
+)
+SPECIAL_MED_SECTION = "Insulins & Inhalers"
+OTHER_MED_SECTION = "All Other Meds"
+
+
+def classify_med_section(row: pd.Series) -> pd.Series:
+    """Split high-touch insulin/inhaler meds from the rest for discrepancy review."""
+    med_text = f"{row.get('med_desc', '')} {row.get('med_id', '')}".lower()
+    is_insulin = bool(pd.Series([med_text]).str.contains(INSULIN_PATTERN, regex=True, na=False).iloc[0])
+    is_inhaler = bool(pd.Series([med_text]).str.contains(INHALER_PATTERN, regex=True, na=False).iloc[0])
+
+    if is_insulin and is_inhaler:
+        med_group = "Insulin + Inhaler Match"
+    elif is_insulin:
+        med_group = "Insulin"
+    elif is_inhaler:
+        med_group = "Inhaler"
+    else:
+        med_group = "Other"
+
+    return pd.Series({
+        "med_section": SPECIAL_MED_SECTION if is_insulin or is_inhaler else OTHER_MED_SECTION,
+        "med_group": med_group,
+    })
+
 st.set_page_config(
     page_title="Discrepancy Deep Dive",
     page_icon="🚨",
@@ -228,13 +266,11 @@ def build_flags(row):
 df_disc["flags"] = df_disc.apply(build_flags, axis=1)
 flagged_ct = (df_disc["flags"] != "").sum()
 
-# ── Med Category Split ───────────────────────────────────────────────────────
-# Inhalers/Insulin are flagged separately — they drive disproportionate counts
-INHALER_INSULIN_PATTERN = r"hfa|inhaler|puff|actuat|insulin|lispro|glargine|detemir|aspart|glulisine|nph"
-
-df_disc["med_category"] = df_disc["med_desc"].str.lower().str.contains(
-    INHALER_INSULIN_PATTERN, regex=True, na=False
-).map({True: "💨 Inhaler / Insulin", False: "💊 All Other Meds"})
+# Medication section split
+# Insulins and inhalers get their own review lane because their count units
+# are more error-prone than typical tablet/capsule inventory.
+df_disc[["med_section", "med_group"]] = df_disc.apply(classify_med_section, axis=1)
+df_disc["med_category"] = df_disc["med_section"]  # Backward-compatible name for older chart code.
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 4 — SIDEBAR FILTERS
@@ -264,11 +300,17 @@ with st.sidebar:
     )
     flagged_only = st.checkbox("Flagged only (high-value / repeat)", key="disc_flagged_only")
     verify_only = st.checkbox("Verify Inventory discrepancies only", key="disc_verify_only")
-    cat_filter = st.radio(
-        "Med Category",
-        ["All", "💨 Inhaler / Insulin", "💊 All Other Meds"],
+    med_section_filter = st.radio(
+        "Medication Section",
+        ["All", SPECIAL_MED_SECTION, OTHER_MED_SECTION],
         index=0,
-        key="disc_cat_filter"
+        key="disc_med_section_filter"
+    )
+    med_group_filter = st.multiselect(
+        "Medication Type",
+        sorted(df_disc["med_group"].dropna().unique()),
+        placeholder="All types",
+        key="disc_med_group_filter"
     )
 
 filtered = df_disc.copy()
@@ -277,7 +319,8 @@ if med_filter:    filtered = filtered[filtered["med_desc"].isin(med_filter)]
 if cause_filter:  filtered = filtered[filtered["likely_cause"].isin(cause_filter)]
 if flagged_only:  filtered = filtered[filtered["flags"] != ""]
 if verify_only:   filtered = filtered[filtered["verify_inventory_flag"]]
-if cat_filter != "All": filtered = filtered[filtered["med_category"] == cat_filter]
+if med_section_filter != "All": filtered = filtered[filtered["med_section"] == med_section_filter]
+if med_group_filter: filtered = filtered[filtered["med_group"].isin(med_group_filter)]
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 5 — EXECUTIVE METRICS
@@ -302,27 +345,27 @@ m7.metric("Verify Inventory",     f"{verify_disc:,}")
 st.divider()
 
 # ── Inhaler / Insulin vs All Other Meds split ────────────────────────────────
-st.subheader("💨 Inhaler & Insulin vs 💊 All Other Meds")
-st.caption("These meds typically drive a disproportionate share of count errors due to unit-of-measure complexity.")
+st.subheader("Insulins & Inhalers vs All Other Meds")
+st.caption("Insulins and inhalers are isolated into their own section so their unit-of-measure noise does not hide the rest of the medication discrepancy picture.")
 
-inh_df  = filtered[filtered["med_category"] == "💨 Inhaler / Insulin"]
-other_df = filtered[filtered["med_category"] == "💊 All Other Meds"]
+inh_df  = filtered[filtered["med_section"] == SPECIAL_MED_SECTION]
+other_df = filtered[filtered["med_section"] == OTHER_MED_SECTION]
 
 sp1, sp2, sp3, sp4, sp5, sp6 = st.columns(6)
-sp1.metric("💨 Inhaler/Insulin Count",    f"{len(inh_df):,}")
-sp2.metric("💨 Inhaler/Insulin Risk",     f"${inh_df['dollar_risk'].sum():,.2f}")
-sp3.metric("💨 % of Total Count",
+sp1.metric("Insulin/Inhaler Count",    f"{len(inh_df):,}")
+sp2.metric("Insulin/Inhaler Risk",     f"${inh_df['dollar_risk'].sum():,.2f}")
+sp3.metric("Insulin/Inhaler % Count",
            f"{len(inh_df)/len(filtered)*100:.1f}%" if len(filtered) > 0 else "0%")
-sp4.metric("💊 Other Meds Count",         f"{len(other_df):,}")
-sp5.metric("💊 Other Meds Risk",          f"${other_df['dollar_risk'].sum():,.2f}")
-sp6.metric("💊 % of Total Count",
+sp4.metric("Other Meds Count",         f"{len(other_df):,}")
+sp5.metric("Other Meds Risk",          f"${other_df['dollar_risk'].sum():,.2f}")
+sp6.metric("Other Meds % Count",
            f"{len(other_df)/len(filtered)*100:.1f}%" if len(filtered) > 0 else "0%")
 
 # Side-by-side donut: count split and dollar risk split
 if len(filtered) > 0:
     sc1, sc2 = st.columns(2)
     with sc1:
-        cat_counts = filtered["med_category"].value_counts().reset_index()
+        cat_counts = filtered["med_section"].value_counts().reset_index()
         cat_counts.columns = ["category", "count"]
         fig_cat_ct = px.pie(
             cat_counts, names="category", values="count",
@@ -330,14 +373,14 @@ if len(filtered) > 0:
             title="Share of Discrepancy Count",
             color="category",
             color_discrete_map={
-                "💨 Inhaler / Insulin": "#f97316",
-                "💊 All Other Meds":    "#3b82f6"
+                SPECIAL_MED_SECTION: "#f97316",
+                OTHER_MED_SECTION: "#3b82f6"
             }
         )
         fig_cat_ct.update_layout(height=300, margin=dict(t=40, b=0))
         st.plotly_chart(fig_cat_ct, use_container_width=True)
     with sc2:
-        cat_risk = filtered.groupby("med_category")["dollar_risk"].sum().reset_index()
+        cat_risk = filtered.groupby("med_section")["dollar_risk"].sum().reset_index()
         cat_risk.columns = ["category", "dollar_risk"]
         fig_cat_risk = px.pie(
             cat_risk, names="category", values="dollar_risk",
@@ -345,14 +388,63 @@ if len(filtered) > 0:
             title="Share of Dollar Risk",
             color="category",
             color_discrete_map={
-                "💨 Inhaler / Insulin": "#f97316",
-                "💊 All Other Meds":    "#3b82f6"
+                SPECIAL_MED_SECTION: "#f97316",
+                OTHER_MED_SECTION: "#3b82f6"
             }
         )
         fig_cat_risk.update_layout(height=300, margin=dict(t=40, b=0))
         st.plotly_chart(fig_cat_risk, use_container_width=True)
 
-st.caption("Use the **Med Category** filter in the sidebar to drill into just one group across all tabs.")
+section_tabs = st.tabs([SPECIAL_MED_SECTION, OTHER_MED_SECTION])
+section_columns = [
+    "med_group", "med_id", "med_desc", "disc_count", "total_risk",
+    "avg_risk", "unique_devs", "flagged"
+]
+for section_tab, section_name, section_df in zip(
+    section_tabs,
+    [SPECIAL_MED_SECTION, OTHER_MED_SECTION],
+    [inh_df, other_df],
+):
+    with section_tab:
+        if section_df.empty:
+            st.info(f"No {section_name.lower()} discrepancies match the current filters.")
+            continue
+
+        section_summary = (
+            section_df.groupby(["med_group", "med_id", "med_desc"])
+            .agg(
+                disc_count=("pk", "count"),
+                total_risk=("dollar_risk", "sum"),
+                avg_risk=("dollar_risk", "mean"),
+                unique_devs=("device", "nunique"),
+                flagged=("flags", lambda x: (x != "").sum()),
+            )
+            .reset_index()
+            .sort_values(["disc_count", "total_risk"], ascending=False)
+        )
+
+        st.dataframe(
+            section_summary[section_columns],
+            use_container_width=True,
+            column_config={
+                "med_group": st.column_config.TextColumn("Type"),
+                "disc_count": st.column_config.NumberColumn("Count", format="%d"),
+                "total_risk": st.column_config.NumberColumn("Total Risk", format="$%.2f"),
+                "avg_risk": st.column_config.NumberColumn("Avg Risk", format="$%.2f"),
+                "unique_devs": st.column_config.NumberColumn("Devices", format="%d"),
+                "flagged": st.column_config.NumberColumn("Flagged", format="%d"),
+            },
+            hide_index=True,
+        )
+        st.download_button(
+            f"Export {section_name} Summary to Excel",
+            data=to_excel_bytes(section_summary),
+            file_name=f"discrepancy_{section_name.lower().replace(' ', '_').replace('&', 'and')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"export_{section_name.lower().replace(' ', '_').replace('&', 'and')}",
+        )
+
+st.caption("Use the **Medication Section** filter in the sidebar to drill into one section across all tabs.")
 
 st.divider()
 
@@ -469,7 +561,7 @@ with tab2:
     st.subheader("Discrepancies by Medication")
 
     med_summary = (
-        filtered.groupby(["med_id", "med_desc"])
+        filtered.groupby(["med_section", "med_group", "med_id", "med_desc"])
         .agg(
             disc_count   = ("pk",          "count"),
             total_risk   = ("dollar_risk", "sum"),
@@ -569,6 +661,8 @@ with tab2:
         med_summary,
         use_container_width=True,
         column_config={
+            "med_section": st.column_config.TextColumn("Section"),
+            "med_group":   st.column_config.TextColumn("Type"),
             "disc_count":  st.column_config.NumberColumn("Count",       format="%d"),
             "total_risk":  st.column_config.NumberColumn("Total Risk",  format="$%.2f"),
             "avg_risk":    st.column_config.NumberColumn("Avg Risk",    format="$%.2f"),
@@ -677,7 +771,7 @@ with tab3:
             key="disc_drilldown_user"
         )
         user_events = filtered[filtered["likely_cause"] == sel_user][[
-            "dt", "device", "med_desc", "discrepancy_qty",
+            "med_section", "med_group", "dt", "device", "med_desc", "discrepancy_qty",
             "discrepancy_reason", "dollar_risk", "flags"
         ]].sort_values("dollar_risk", ascending=False)
 
@@ -685,6 +779,8 @@ with tab3:
             user_events,
             use_container_width=True,
             column_config={
+                "med_section":       st.column_config.TextColumn("Med Section"),
+                "med_group":         st.column_config.TextColumn("Med Type"),
                 "dt":               st.column_config.DatetimeColumn("Date/Time",    format="MM/DD/YY HH:mm"),
                 "discrepancy_qty":  st.column_config.NumberColumn("Disc Qty",       format="%.0f"),
                 "dollar_risk":      st.column_config.NumberColumn("Dollar Risk",    format="$%.2f"),
@@ -722,7 +818,7 @@ with tab4:
 
     st.dataframe(
         display_df[[
-            "flags", "dt", "device", "med_desc",
+            "flags", "med_section", "med_group", "dt", "device", "med_desc",
             "discrepancy_qty", "discrepancy_reason",
             "cost_per_unit", "dollar_risk",
             "user_name", "likely_cause"
@@ -730,6 +826,8 @@ with tab4:
         use_container_width=True,
         column_config={
             "flags":             st.column_config.TextColumn("⚠️ Flags"),
+            "med_section":       st.column_config.TextColumn("Med Section"),
+            "med_group":         st.column_config.TextColumn("Med Type"),
             "dt":                st.column_config.DatetimeColumn("Date/Time",      format="MM/DD/YY HH:mm"),
             "discrepancy_qty":   st.column_config.NumberColumn("Disc Qty",         format="%.0f"),
             "cost_per_unit":     st.column_config.NumberColumn("Unit Cost",        format="$%.2f"),
@@ -786,13 +884,15 @@ with tab5:
 
         st.dataframe(
             verify_df[[
-                "dt", "device", "med_desc", "discrepancy_qty", "dollar_risk",
+                "med_section", "med_group", "dt", "device", "med_desc", "discrepancy_qty", "dollar_risk",
                 "user_name", "likely_cause", "next_refill_dt", "next_refill_by",
                 "minutes_to_refill", "discrepancy_reason"
             ]].sort_values(["device", "dt"]),
             use_container_width=True,
             hide_index=True,
             column_config={
+                "med_section": st.column_config.TextColumn("Med Section"),
+                "med_group": st.column_config.TextColumn("Med Type"),
                 "dt": st.column_config.DatetimeColumn("Verify Time", format="MM/DD/YY HH:mm"),
                 "next_refill_dt": st.column_config.DatetimeColumn("Next Refill", format="MM/DD/YY HH:mm"),
                 "discrepancy_qty": st.column_config.NumberColumn("Disc Qty", format="%.0f"),
