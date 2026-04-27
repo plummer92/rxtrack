@@ -27,6 +27,7 @@ INHALER_PATTERN = (
 SPECIAL_MED_SECTION = "Insulins & Inhalers"
 OTHER_MED_SECTION = "All Other Meds"
 REFILL_EVENT_PATTERN = "ARRAY['%restock%', '%refill%', '%load%', '%replenish%']"
+PATIENT_CASSETTE_PATTERN = r"patient\s*cass|cassette|cass\b"
 
 
 st.set_page_config(
@@ -65,6 +66,11 @@ def classify_med_section(row: pd.Series) -> pd.Series:
         "med_section": SPECIAL_MED_SECTION if is_insulin or is_inhaler else OTHER_MED_SECTION,
         "med_group": med_group,
     })
+
+
+def is_patient_cassette(row: pd.Series) -> bool:
+    med_text = f"{row.get('med_desc', '')} {row.get('med_id', '')}".lower()
+    return bool(pd.Series([med_text]).str.contains(PATIENT_CASSETTE_PATTERN, regex=True, na=False).iloc[0])
 
 
 @st.cache_data(ttl=300)
@@ -195,6 +201,18 @@ audit_df = pd.concat([df_verify, prior_cols], axis=1)
 audit_df["verify_date"] = audit_df["dt"].dt.date
 audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
 audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
+audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
+
+max_qty_off = int(np.ceil(audit_df["abs_discrepancy_qty"].max())) if not audit_df.empty else 0
+min_qty_off = st.slider(
+    "Minimum quantity off",
+    min_value=1,
+    max_value=max(1, max_qty_off),
+    value=1,
+    step=1,
+    help="Raise this to focus on larger count misses, such as 5 or more off.",
+    key="verify_audit_min_qty_off",
+)
 
 with st.sidebar:
     st.divider()
@@ -230,6 +248,7 @@ with st.sidebar:
     )
 
 filtered = audit_df.copy()
+filtered = filtered[filtered["abs_discrepancy_qty"] >= min_qty_off]
 if not include_special_meds:
     filtered = filtered[filtered["med_section"] == OTHER_MED_SECTION]
 if device_filter:
