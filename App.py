@@ -142,6 +142,19 @@ def init_db():
             pk TEXT PRIMARY KEY, station TEXT, med_id TEXT, med_desc TEXT,
             unit_cost FLOAT, current_count FLOAT, pocket_location TEXT
         );""",
+        """CREATE TABLE IF NOT EXISTS cycle_count_status (
+            pk TEXT PRIMARY KEY,
+            snapshot_date DATE,
+            source_filename TEXT,
+            isa_name TEXT,
+            med_id TEXT,
+            med_desc TEXT,
+            location TEXT,
+            cycle_count_interval FLOAT,
+            last_cycle_count TIMESTAMP,
+            days_since_last_count FLOAT,
+            days_over_due FLOAT
+        );""",
         """CREATE TABLE IF NOT EXISTS iv_room_workload (
             pk TEXT PRIMARY KEY,
             facility_name TEXT,
@@ -1029,6 +1042,91 @@ def clean_detailed_inventory(df):
     df['row_sig'] = df['station'].astype(str) + df['med_id'].astype(str) + df['pocket_location'].astype(str)
     df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
     return df[required + ['pk']]
+
+
+def clean_cycle_count_status_report(file_obj):
+    file_obj.seek(0)
+    metadata_line = file_obj.readline()
+    if isinstance(metadata_line, bytes):
+        metadata_line = metadata_line.decode("utf-8", errors="ignore")
+
+    file_obj.seek(0)
+    try:
+        df = pd.read_csv(file_obj, header=1)
+    except UnicodeDecodeError:
+        file_obj.seek(0)
+        df = pd.read_csv(file_obj, header=1, encoding="latin1")
+
+    df = df.copy()
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+        .str.replace("/", "_")
+    )
+    df = df.rename(columns={
+        "isa_name": "isa_name",
+        "med_id": "med_id",
+        "description": "med_desc",
+        "location": "location",
+        "cycle_count_interval": "cycle_count_interval",
+        "last_cycle_count": "last_cycle_count",
+        "days_since_last_count": "days_since_last_count",
+        "days_over_due": "days_over_due",
+    })
+
+    required = [
+        "isa_name", "med_id", "med_desc", "location",
+        "cycle_count_interval", "last_cycle_count",
+        "days_since_last_count", "days_over_due",
+    ]
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    filename = getattr(file_obj, "name", "") or ""
+    snapshot_date = None
+    m_fname = re.search(r"(\d{8})", filename)
+    if m_fname:
+        snapshot_date = pd.to_datetime(m_fname.group(1), format="%m%d%Y", errors="coerce")
+    if pd.isna(snapshot_date) or snapshot_date is None:
+        m_meta = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", str(metadata_line))
+        if m_meta:
+            snapshot_date = pd.to_datetime(m_meta.group(1), errors="coerce")
+    if pd.isna(snapshot_date) or snapshot_date is None:
+        snapshot_date = pd.Timestamp.today().normalize()
+
+    df["source_filename"] = filename
+    df["snapshot_date"] = pd.to_datetime(snapshot_date, errors="coerce").date()
+    df["isa_name"] = df["isa_name"].fillna("").astype(str).str.strip()
+    df["med_id"] = df["med_id"].fillna("").astype(str).str.strip().str.upper()
+    df["med_desc"] = df["med_desc"].fillna("").astype(str).str.strip()
+    df["location"] = df["location"].fillna("").astype(str).str.strip().str.upper()
+    df["cycle_count_interval"] = pd.to_numeric(df["cycle_count_interval"], errors="coerce").fillna(0)
+    df["days_since_last_count"] = pd.to_numeric(df["days_since_last_count"], errors="coerce").fillna(0)
+    df["days_over_due"] = pd.to_numeric(df["days_over_due"], errors="coerce").fillna(0)
+
+    last_count = pd.to_datetime(df["last_cycle_count"], errors="coerce")
+    sentinel_mask = last_count.dt.year.fillna(0).le(1)
+    df["last_cycle_count"] = last_count.mask(sentinel_mask)
+
+    df = df[(df["med_id"] != "") & (df["location"] != "")].copy()
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row["snapshot_date"]),
+                str(row["isa_name"]),
+                str(row["med_id"]),
+                str(row["location"]),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+
+    df = df.astype(object)
+    df = df.where(pd.notna(df), None)
+    return df[["pk", "snapshot_date", "source_filename"] + required]
 
 
 def clean_iv_room_report(df):
@@ -2116,14 +2214,15 @@ if _is_main:
         u_type = st.selectbox("File Type:", [
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
-            "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model"
+            "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model",
+            "Days Since Last Cycle Count Report"
         ])
         uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
         if uploaded and st.button(f"Process {u_type}"):
             try:
                 processed_count = 0
                 # 1. Load raw file
-                if u_type == "IV Overnight Cartfill Model":
+                if u_type in {"IV Overnight Cartfill Model", "Days Since Last Cycle Count Report"}:
                     raw = None
                 elif uploaded.name.endswith('.xlsx'):
                     raw = pd.read_excel(uploaded)
@@ -2194,6 +2293,23 @@ if _is_main:
                                      %(unit_cost)s, %(current_count)s, %(pocket_location)s)
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Detailed Inventory")
+                elif u_type == "Days Since Last Cycle Count Report":
+                    clean = clean_cycle_count_status_report(uploaded)
+                    sql = """INSERT INTO cycle_count_status
+                             (pk, snapshot_date, source_filename, isa_name, med_id, med_desc, location,
+                              cycle_count_interval, last_cycle_count, days_since_last_count, days_over_due)
+                             VALUES (%(pk)s, %(snapshot_date)s, %(source_filename)s, %(isa_name)s, %(med_id)s,
+                                     %(med_desc)s, %(location)s, %(cycle_count_interval)s, %(last_cycle_count)s,
+                                     %(days_since_last_count)s, %(days_over_due)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 source_filename = EXCLUDED.source_filename,
+                                 isa_name = EXCLUDED.isa_name,
+                                 med_desc = EXCLUDED.med_desc,
+                                 cycle_count_interval = EXCLUDED.cycle_count_interval,
+                                 last_cycle_count = EXCLUDED.last_cycle_count,
+                                 days_since_last_count = EXCLUDED.days_since_last_count,
+                                 days_over_due = EXCLUDED.days_over_due;"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cycle Count Status")
 
                 elif u_type in {"IV Room Workload", "IV Room Batching"}:
                     clean = clean_iv_room_report(raw)

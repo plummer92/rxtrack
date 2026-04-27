@@ -15,6 +15,7 @@ else:
 engine = App.engine
 load_admin_users = App.load_admin_users
 _DEFAULT_ADMIN_USERS = App._DEFAULT_ADMIN_USERS
+clean_cycle_count_status_report = App.clean_cycle_count_status_report
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
@@ -298,6 +299,80 @@ if variance_file:
         )
 
         st.success(f"✅ Successfully uploaded {len(df_upload)} variance records.")
+        st.cache_data.clear()
+
+st.divider()
+
+# =============================================================
+# CYCLE COUNT STATUS SNAPSHOT UPLOAD
+# =============================================================
+
+st.header("Cycle Count Status Snapshot Upload")
+st.caption("Upload the Days Since Last Cycle Count Report CSV so Cycle Count Integrity can use the real current overdue status by location.")
+
+status_file = st.file_uploader(
+    "Upload Days Since Last Cycle Count Report CSV",
+    type=["csv"],
+    key="cycle_count_status_upload",
+)
+
+if status_file:
+    try:
+        df_status = clean_cycle_count_status_report(status_file)
+    except Exception as e:
+        st.error(f"Could not read cycle count status report: {e}")
+        st.stop()
+
+    preview_cols = [
+        "snapshot_date", "isa_name", "med_id", "med_desc", "location",
+        "cycle_count_interval", "last_cycle_count", "days_since_last_count", "days_over_due",
+    ]
+    st.subheader("Preview")
+    st.dataframe(df_status[preview_cols].head(10), width="stretch", hide_index=True)
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Rows", len(df_status))
+    s2.metric("Overdue Locations", int((pd.to_numeric(df_status["days_over_due"], errors="coerce").fillna(0) > 0).sum()))
+    s3.metric("Never Counted Locations", int(pd.to_datetime(df_status["last_cycle_count"], errors="coerce").isna().sum()))
+
+    if st.button("Upload Cycle Count Status Snapshot"):
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS cycle_count_status (
+                    pk TEXT PRIMARY KEY,
+                    snapshot_date DATE,
+                    source_filename TEXT,
+                    isa_name TEXT,
+                    med_id TEXT,
+                    med_desc TEXT,
+                    location TEXT,
+                    cycle_count_interval FLOAT,
+                    last_cycle_count TIMESTAMP,
+                    days_since_last_count FLOAT,
+                    days_over_due FLOAT
+                )
+            """))
+
+        sql = """
+            INSERT INTO cycle_count_status
+            (pk, snapshot_date, source_filename, isa_name, med_id, med_desc, location,
+             cycle_count_interval, last_cycle_count, days_since_last_count, days_over_due)
+            VALUES (%(pk)s, %(snapshot_date)s, %(source_filename)s, %(isa_name)s, %(med_id)s, %(med_desc)s,
+                    %(location)s, %(cycle_count_interval)s, %(last_cycle_count)s, %(days_since_last_count)s,
+                    %(days_over_due)s)
+            ON CONFLICT (pk) DO UPDATE SET
+                source_filename = EXCLUDED.source_filename,
+                isa_name = EXCLUDED.isa_name,
+                med_desc = EXCLUDED.med_desc,
+                cycle_count_interval = EXCLUDED.cycle_count_interval,
+                last_cycle_count = EXCLUDED.last_cycle_count,
+                days_since_last_count = EXCLUDED.days_since_last_count,
+                days_over_due = EXCLUDED.days_over_due;
+        """
+        from App import execute_statement
+
+        execute_statement(sql, df_status.to_dict("records"), batch=True, table_name="Cycle Count Status")
+        st.success(f"Successfully uploaded {len(df_status)} cycle count status rows.")
         st.cache_data.clear()
 
 st.divider()
