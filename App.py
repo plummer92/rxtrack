@@ -1732,7 +1732,6 @@ def render_page_links():
     safe_page_link("pages/📊_Cycle_Count_Integrity.py", label="Cycle Count Integrity", icon="📊")
     safe_page_link("pages/📋_Carousel_Drop_Tracker.py", label="Carousel Drop Tracker", icon="📋")
     safe_page_link("pages/_🔍_MedLookup.py", label="Med Lookup", icon="🔍")
-    safe_page_link("pages/_🧠_RxBrain.py", label="RxBrain", icon="🧠")
     safe_page_link("pages/🗄️_db_health.py", label="Database Health", icon="🗄️")
     safe_page_link("pages/Admin_Master_Mapping.py", label="Admin & Mapping", icon="⚙️")
 
