@@ -27,9 +27,21 @@ INHALER_PATTERN = (
 SPECIAL_MED_SECTION = "Insulins & Inhalers"
 OTHER_MED_SECTION = "All Other Meds"
 REFILL_EVENT_PATTERN = "ARRAY['%restock%', '%refill%', '%load%', '%replenish%']"
+INVENTORY_CHANGE_EVENT_PATTERN = (
+    "ARRAY['%restock%', '%refill%', '%load%', '%replenish%', '%count inventory%', "
+    "'%unload%', '%empty%', '%outdate%', '%adjust%']"
+)
 PATIENT_CASSETTE_PATTERN = r"patient\s*cass|cassette|cass\b"
 COACHING_LOG_TABLE = "verify_count_audit_coaching_log"
 MANUAL_CORRECTION_USERS = ["Jared Wolfe"]
+EVIDENCE_OPTIONS = [
+    "Strong refill-entry pattern",
+    "Possible refill-entry pattern",
+    "Needs inventory-chain review",
+    "Missing pull data",
+    "Refill matched pull",
+    "No prior refill found",
+]
 
 
 st.set_page_config(
@@ -244,6 +256,29 @@ def load_count_inventory_corrections(start, end, followup_days=14):
 
 
 @st.cache_data(ttl=300)
+def load_inventory_change_events(start, end, lookback_days=60):
+    """Inventory-changing events that can break the chain between a refill and later verify."""
+    try:
+        lookback = start - timedelta(days=lookback_days)
+        sql = text(f"""
+            SELECT pk, dt, user_name, device, med_id, med_desc, event_type,
+                   qty, beginning_qty, ending_qty
+            FROM events
+            WHERE dt::date BETWEEN :lookback AND :end
+              AND event_type ILIKE ANY ({INVENTORY_CHANGE_EVENT_PATTERN})
+              AND event_type NOT ILIKE '%verify%'
+              AND event_type NOT ILIKE '%remove%'
+            ORDER BY dt ASC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"lookback": lookback, "end": end})
+        return normalize_event_numbers(df)
+    except Exception as exc:
+        st.warning(f"[load_inventory_change_events] {exc}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
 def load_pyxis_pulls(start, end, lookback_days=60):
     """Carousel/Pyxis pull demand lines from pharmacy_orders."""
     try:
@@ -357,6 +392,83 @@ def empty_correction() -> pd.Series:
     })
 
 
+def find_inventory_changes_since_refill(verify_row: pd.Series, inventory_events: pd.DataFrame) -> pd.Series:
+    if inventory_events.empty or pd.isna(verify_row.get("prior_refill_dt")):
+        return empty_inventory_chain()
+    matches = inventory_events[
+        (inventory_events["med_id"] == verify_row["med_id"]) &
+        (inventory_events["device"] == verify_row["device"]) &
+        (inventory_events["dt"] > verify_row["prior_refill_dt"]) &
+        (inventory_events["dt"] < verify_row["dt"]) &
+        (inventory_events["pk"] != verify_row["pk"])
+    ].sort_values("dt")
+    if matches.empty:
+        return empty_inventory_chain()
+
+    last_event = matches.iloc[-1]
+    return pd.Series({
+        "inventory_events_since_refill": int(len(matches)),
+        "last_inventory_event_dt": last_event["dt"],
+        "last_inventory_event_by": str(last_event.get("user_name") or "Unknown"),
+        "last_inventory_event_type": last_event.get("event_type", ""),
+        "last_inventory_event_qty": last_event.get("qty", np.nan),
+        "last_inventory_event_beginning_qty": last_event.get("beginning_qty", np.nan),
+        "last_inventory_event_ending_qty": last_event.get("ending_qty", np.nan),
+    })
+
+
+def empty_inventory_chain() -> pd.Series:
+    return pd.Series({
+        "inventory_events_since_refill": 0,
+        "last_inventory_event_dt": pd.NaT,
+        "last_inventory_event_by": "",
+        "last_inventory_event_type": "",
+        "last_inventory_event_qty": np.nan,
+        "last_inventory_event_beginning_qty": np.nan,
+        "last_inventory_event_ending_qty": np.nan,
+    })
+
+
+def classify_evidence(row: pd.Series) -> pd.Series:
+    discrepancy = row.get("discrepancy_qty", np.nan)
+    refill_vs_pull = row.get("refill_qty_vs_pull", np.nan)
+    refill_pull_qty = row.get("refill_date_pull_qty", np.nan)
+    inventory_events = int(row.get("inventory_events_since_refill") or 0)
+
+    if not row.get("has_prior_refill", False):
+        status = "No prior refill found"
+        reason = "No prior refill/load was found for this med and Pyxis before the verify event."
+    elif inventory_events > 0:
+        status = "Needs inventory-chain review"
+        reason = "Another inventory-changing transaction happened after the prior refill and before the verify."
+    elif pd.isna(refill_pull_qty):
+        status = "Missing pull data"
+        reason = "No refill-date Pyxis pull quantity was found, so the refill entry cannot be compared to pull quantity."
+    elif pd.isna(refill_vs_pull) or pd.isna(discrepancy):
+        status = "Missing pull data"
+        reason = "The refill-vs-pull or discrepancy value is missing."
+    elif abs(refill_vs_pull) <= 0.01:
+        status = "Refill matched pull"
+        reason = "The prior refill quantity matched the refill-date pull quantity."
+    elif (
+        abs(abs(refill_vs_pull) - abs(discrepancy)) <= 0.01 and
+        np.sign(refill_vs_pull) == -np.sign(discrepancy)
+    ):
+        status = "Strong refill-entry pattern"
+        reason = "The refill-vs-pull difference exactly lines up with the later verify mismatch."
+    elif (
+        abs(abs(refill_vs_pull) - abs(discrepancy)) <= 2 and
+        np.sign(refill_vs_pull) == -np.sign(discrepancy)
+    ):
+        status = "Possible refill-entry pattern"
+        reason = "The refill-vs-pull difference is close to the later verify mismatch."
+    else:
+        status = "Needs inventory-chain review"
+        reason = "The refill-vs-pull difference does not cleanly explain the verify mismatch."
+
+    return pd.Series({"evidence_status": status, "evidence_reason": reason})
+
+
 def summarize_pulls_by_date(pulls: pd.DataFrame) -> pd.DataFrame:
     if pulls.empty:
         return pd.DataFrame()
@@ -415,6 +527,7 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
     df_verify = load_verify_discrepancies(start, end)
     df_refills = load_prior_refills(start, end)
     df_corrections = load_count_inventory_corrections(start, end)
+    df_inventory_events = load_inventory_change_events(start, end)
     df_pulls = load_pyxis_pulls(start, end)
 
     if df_verify.empty:
@@ -424,6 +537,11 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
     prior_cols = df_verify.apply(lambda row: find_prior_refill(row, df_refills), axis=1)
     correction_cols = df_verify.apply(lambda row: find_next_correction(row, df_corrections), axis=1)
     audit_df = pd.concat([df_verify, prior_cols, correction_cols], axis=1)
+    inventory_chain_cols = audit_df.apply(
+        lambda row: find_inventory_changes_since_refill(row, df_inventory_events),
+        axis=1,
+    )
+    audit_df = pd.concat([audit_df, inventory_chain_cols], axis=1)
     audit_df["verify_date"] = audit_df["dt"].dt.date
     audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
     audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
@@ -433,6 +551,7 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
     audit_df = add_pull_summary(audit_df, pull_summary, "verify_date", "verify_date")
     audit_df["refill_qty_vs_pull"] = audit_df["prior_refill_qty"] - audit_df["refill_date_pull_qty"].fillna(0)
     audit_df["verify_qty_vs_pull"] = audit_df["qty"] - audit_df["verify_date_pull_qty"].fillna(0)
+    audit_df[["evidence_status", "evidence_reason"]] = audit_df.apply(classify_evidence, axis=1)
     audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
     return audit_df
 
@@ -499,10 +618,38 @@ with st.sidebar:
         placeholder="All refill users",
         key="verify_audit_refill_user_filter",
     )
+    evidence_filter = st.multiselect(
+        "Evidence Type",
+        EVIDENCE_OPTIONS,
+        default=["Strong refill-entry pattern", "Possible refill-entry pattern", "Needs inventory-chain review"],
+        key="verify_audit_evidence_filter",
+    )
     only_matched = st.checkbox(
         "Only rows with a prior refill/load found",
         value=False,
         key="verify_audit_only_matched",
+    )
+    only_clean_chain = st.checkbox(
+        "Only clean refill chains",
+        value=False,
+        help="Show only rows with no inventory-changing transaction between the prior refill/load and the verify event.",
+        key="verify_audit_only_clean_chain",
+    )
+    use_max_hours_filter = st.checkbox(
+        "Use max-hours prior refill filter",
+        value=False,
+        help="Optional. Old refills can still be valid when the inventory chain is clean.",
+        key="verify_audit_use_max_hours_filter",
+    )
+    max_hours_since_refill = st.number_input(
+        "Max hours since prior refill/load",
+        min_value=1,
+        max_value=1440,
+        value=48,
+        step=1,
+        disabled=not use_max_hours_filter,
+        help="Optional stale-match filter. Leave off when you want old but clean refill chains to remain visible.",
+        key="verify_audit_max_hours_since_refill",
     )
     hide_completed = st.checkbox(
         "Hide completed coaching rows",
@@ -529,8 +676,19 @@ if med_filter:
     filtered = filtered[filtered["med_desc"].astype(str).isin(med_filter)]
 if refill_user_filter:
     filtered = filtered[filtered["prior_refill_by"].astype(str).isin(refill_user_filter)]
+if evidence_filter:
+    filtered = filtered[filtered["evidence_status"].isin(evidence_filter)]
+else:
+    filtered = filtered.iloc[0:0]
 if only_matched:
     filtered = filtered[filtered["has_prior_refill"]]
+if only_clean_chain:
+    filtered = filtered[filtered["inventory_events_since_refill"] == 0]
+if use_max_hours_filter:
+    filtered = filtered[
+        filtered["hours_since_refill"].isna() |
+        (filtered["hours_since_refill"] <= max_hours_since_refill)
+    ]
 if hide_completed:
     filtered = filtered[~filtered["completed"]]
 
@@ -540,10 +698,28 @@ st.info(
 
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Verify Mismatches", f"{len(filtered):,}")
-m2.metric("Matched to Prior Refill", f"{int(filtered['has_prior_refill'].sum()):,}")
-m3.metric("Count Inventory Corrections", f"{int(filtered['has_count_inventory_correction'].sum()):,}")
-m4.metric("Prior Refill Users", f"{filtered['prior_refill_by'].nunique():,}")
+m2.metric("Strong Evidence", f"{int((filtered['evidence_status'] == 'Strong refill-entry pattern').sum()):,}")
+m3.metric("Possible Evidence", f"{int((filtered['evidence_status'] == 'Possible refill-entry pattern').sum()):,}")
+m4.metric("Clean Refill Chains", f"{int((filtered['inventory_events_since_refill'] == 0).sum()):,}")
 m5.metric("Total Qty Off", f"{filtered['abs_discrepancy_qty'].sum():,.0f}")
+
+if not filtered.empty:
+    evidence_summary = (
+        filtered.groupby("evidence_status")
+        .agg(rows=("pk", "count"), total_qty_off=("abs_discrepancy_qty", "sum"))
+        .reset_index()
+        .sort_values(["rows", "total_qty_off"], ascending=False)
+    )
+    st.dataframe(
+        evidence_summary,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "evidence_status": st.column_config.TextColumn("Evidence Type"),
+            "rows": st.column_config.NumberColumn("Rows", format="%d"),
+            "total_qty_off": st.column_config.NumberColumn("Total Qty Off", format="%.0f"),
+        },
+    )
 
 st.divider()
 
@@ -554,12 +730,15 @@ st.caption(
 )
 
 review_columns = [
-    "completed", "pk", "dt", "device", "med_id", "med_desc", "user_name",
+    "completed", "pk", "evidence_status", "evidence_reason", "dt", "device", "med_id", "med_desc", "user_name",
     "discrepancy_qty", "qty", "beginning_qty", "ending_qty", "discrepancy_reason",
     "prior_refill_dt", "prior_refill_by", "prior_refill_qty",
     "refill_date_pull_qty", "refill_qty_vs_pull", "refill_date_pull_lines",
     "refill_date_first_pull_dt", "refill_date_last_pull_dt", "refill_date_pull_users",
     "prior_refill_beginning_qty", "prior_refill_ending_qty", "prior_refill_event_type",
+    "inventory_events_since_refill", "last_inventory_event_dt", "last_inventory_event_by",
+    "last_inventory_event_type", "last_inventory_event_qty", "last_inventory_event_beginning_qty",
+    "last_inventory_event_ending_qty",
     "hours_since_refill", "correction_dt", "correction_by", "correction_qty",
     "correction_beginning_qty", "correction_ending_qty", "correction_event_type",
     "hours_until_correction", "verify_date_pull_qty", "verify_qty_vs_pull",
@@ -575,10 +754,11 @@ if len(filtered) > len(review_df):
     )
 
 review_grid_columns = [
-    "completed", "pk", "dt", "device", "med_id", "med_desc",
+    "completed", "pk", "evidence_status", "dt", "device", "med_id", "med_desc",
     "user_name", "discrepancy_qty", "qty", "verify_date_pull_qty",
     "verify_qty_vs_pull", "prior_refill_dt", "prior_refill_by",
     "prior_refill_qty", "refill_date_pull_qty", "refill_qty_vs_pull",
+    "inventory_events_since_refill", "last_inventory_event_type",
     "correction_dt", "correction_by", "correction_qty", "hours_since_refill",
 ]
 review_grid_df = review_df[review_grid_columns].copy()
@@ -590,6 +770,7 @@ edited_review_df = st.data_editor(
     column_config={
         "completed": st.column_config.CheckboxColumn("Complete", help="Check rows you have reviewed and want logged for coaching."),
         "pk": None,
+        "evidence_status": st.column_config.TextColumn("Evidence"),
         "dt": st.column_config.DatetimeColumn("Verify Time", format="MM/DD/YY HH:mm"),
         "device": st.column_config.TextColumn("Pyxis"),
         "med_id": st.column_config.TextColumn("Med ID"),
@@ -604,6 +785,8 @@ edited_review_df = st.data_editor(
         "prior_refill_qty": st.column_config.NumberColumn("Prior Refill Qty", format="%.0f"),
         "refill_date_pull_qty": st.column_config.NumberColumn("Refill-Date Pull Qty", format="%.0f"),
         "refill_qty_vs_pull": st.column_config.NumberColumn("Refill Qty vs Pull", format="%.0f"),
+        "inventory_events_since_refill": st.column_config.NumberColumn("Inv Events Since Refill", format="%d"),
+        "last_inventory_event_type": st.column_config.TextColumn("Last Inv Event"),
         "hours_since_refill": st.column_config.NumberColumn("Hours Since Refill", format="%.1f"),
         "correction_dt": st.column_config.DatetimeColumn("Count Inventory Time", format="MM/DD/YY HH:mm"),
         "correction_by": st.column_config.TextColumn("Count Inventory User"),
@@ -619,6 +802,7 @@ else:
             df["dt"].dt.strftime("%m/%d/%y %H:%M").fillna("No verify time") +
             " | " + df["device"].fillna("Unknown Pyxis").astype(str) +
             " | " + df["med_id"].fillna("").astype(str) +
+            " | " + df["evidence_status"].fillna("Review").astype(str) +
             " | off " + df["discrepancy_qty"].fillna(0).round(0).astype(int).astype(str) +
             " | prior " + df["prior_refill_by"].fillna("No prior refill").astype(str)
         )
@@ -631,12 +815,14 @@ else:
     selected_pk = detail_options.loc[detail_options["row_label"] == selected_label, "pk"].iloc[0]
     detail_row = review_df[review_df["pk"] == selected_pk].iloc[0]
 
-    verify_tab, prior_tab, correction_tab, raw_tab = st.tabs([
+    verify_tab, prior_tab, chain_tab, correction_tab, raw_tab = st.tabs([
         "Verify Count",
         "Prior Refill + Pull",
+        "Inventory Chain",
         "Count Inventory",
         "All Fields",
     ])
+    st.info(str(detail_row["evidence_reason"]))
     with verify_tab:
         st.dataframe(
             pd.DataFrame([{
@@ -680,6 +866,22 @@ else:
             use_container_width=True,
             hide_index=True,
         )
+    with chain_tab:
+        st.dataframe(
+            pd.DataFrame([{
+                "Evidence": detail_row["evidence_status"],
+                "Evidence Reason": detail_row["evidence_reason"],
+                "Inventory Events Since Refill": detail_row["inventory_events_since_refill"],
+                "Last Inventory Event Time": detail_row["last_inventory_event_dt"],
+                "Last Inventory Event User": detail_row["last_inventory_event_by"],
+                "Last Inventory Event Type": detail_row["last_inventory_event_type"],
+                "Last Inventory Event Qty": detail_row["last_inventory_event_qty"],
+                "Last Inventory Begin": detail_row["last_inventory_event_beginning_qty"],
+                "Last Inventory End": detail_row["last_inventory_event_ending_qty"],
+            }]),
+            use_container_width=True,
+            hide_index=True,
+        )
     with correction_tab:
         st.dataframe(
             pd.DataFrame([{
@@ -714,7 +916,7 @@ with st.form("verify_audit_completion_form", clear_on_submit=False):
         key="verify_audit_manual_correction_user",
     )
     submitted_completion = st.form_submit_button(
-        "Mark checked rows completed and send to coaching report",
+        "Mark checked rows reviewed",
         type="primary",
     )
 
@@ -731,7 +933,7 @@ if submitted_completion:
         inserted = save_completed_rows(new_completed, completion_note, manual_correction_by)
     if inserted:
         load_completed_audit_pks.clear()
-        st.success(f"Logged {inserted} completed row(s) to the coaching report.")
+        st.success(f"Marked {inserted} row(s) reviewed.")
         st.rerun()
     else:
         st.info("No new checked rows to log.")
