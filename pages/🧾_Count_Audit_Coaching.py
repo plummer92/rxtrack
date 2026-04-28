@@ -10,7 +10,7 @@ COACHING_LOG_TABLE = "verify_count_audit_coaching_log"
 
 st.set_page_config(
     page_title="Count Audit Coaching",
-    page_icon="!",
+    page_icon="🧾",
     layout="wide",
 )
 

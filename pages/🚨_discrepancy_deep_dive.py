@@ -34,7 +34,7 @@ MANUAL_CORRECTION_USERS = ["Jared Wolfe"]
 
 st.set_page_config(
     page_title="Verify Count Audit",
-    page_icon="!",
+    page_icon="🚨",
     layout="wide",
 )
 
