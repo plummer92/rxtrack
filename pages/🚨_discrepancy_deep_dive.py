@@ -470,9 +470,15 @@ def classify_evidence(row: pd.Series) -> pd.Series:
 
 
 def dedupe_verify_rows(audit_df: pd.DataFrame) -> pd.DataFrame:
-    if audit_df.empty or "pk" not in audit_df.columns:
+    if audit_df.empty:
         return audit_df
-    return audit_df.sort_values("dt", ascending=False).drop_duplicates(subset=["pk"], keep="first")
+    natural_key = ["dt", "device", "med_id", "user_name", "discrepancy_qty", "qty"]
+    dedupe_keys = [col for col in natural_key if col in audit_df.columns]
+    if dedupe_keys:
+        return audit_df.sort_values("dt", ascending=False).drop_duplicates(subset=dedupe_keys, keep="first")
+    if "pk" in audit_df.columns:
+        return audit_df.sort_values("dt", ascending=False).drop_duplicates(subset=["pk"], keep="first")
+    return audit_df
 
 
 def summarize_pulls_by_date(pulls: pd.DataFrame) -> pd.DataFrame:
@@ -955,10 +961,23 @@ st.download_button(
 st.divider()
 
 st.subheader("Prior Refill User Summary")
-st.caption("This is the coaching queue: users tied to the most prior refill/load before the count mismatch.")
+st.caption("This counts how many rows each prior refill/load user has in each evidence category.")
 if filtered.empty:
     st.info("No rows match the current filters.")
 else:
+    evidence_counts = (
+        filtered.pivot_table(
+            index="prior_refill_by",
+            columns="evidence_status",
+            values="pk",
+            aggfunc="count",
+            fill_value=0,
+        )
+        .reset_index()
+    )
+    for col in EVIDENCE_OPTIONS:
+        if col not in evidence_counts.columns:
+            evidence_counts[col] = 0
     user_summary = (
         filtered.groupby("prior_refill_by")
         .agg(
@@ -972,6 +991,14 @@ else:
         .reset_index()
         .sort_values(["mismatch_count", "total_qty_off"], ascending=False)
     )
+    user_summary = user_summary.merge(evidence_counts, on="prior_refill_by", how="left")
+    evidence_count_cols = [col for col in EVIDENCE_OPTIONS if col in user_summary.columns]
+    for col in evidence_count_cols:
+        user_summary[col] = user_summary[col].fillna(0).astype(int)
+    user_summary = user_summary.sort_values(
+        ["Strong refill-entry pattern", "Possible refill-entry pattern", "mismatch_count", "total_qty_off"],
+        ascending=False,
+    )
     st.dataframe(
         user_summary,
         use_container_width=True,
@@ -979,6 +1006,12 @@ else:
         column_config={
             "prior_refill_by": st.column_config.TextColumn("Prior Refill User"),
             "mismatch_count": st.column_config.NumberColumn("Mismatches", format="%d"),
+            "Strong refill-entry pattern": st.column_config.NumberColumn("Strong", format="%d"),
+            "Possible refill-entry pattern": st.column_config.NumberColumn("Possible", format="%d"),
+            "Needs inventory-chain review": st.column_config.NumberColumn("Chain Review", format="%d"),
+            "Missing pull data": st.column_config.NumberColumn("Missing Pull", format="%d"),
+            "Refill matched pull": st.column_config.NumberColumn("Matched Pull", format="%d"),
+            "No prior refill found": st.column_config.NumberColumn("No Prior", format="%d"),
             "total_qty_off": st.column_config.NumberColumn("Total Qty Off", format="%.0f"),
             "avg_qty_off": st.column_config.NumberColumn("Avg Qty Off", format="%.1f"),
             "unique_meds": st.column_config.NumberColumn("Meds", format="%d"),
