@@ -29,6 +29,7 @@ OTHER_MED_SECTION = "All Other Meds"
 REFILL_EVENT_PATTERN = "ARRAY['%restock%', '%refill%', '%load%', '%replenish%']"
 PATIENT_CASSETTE_PATTERN = r"patient\s*cass|cassette|cass\b"
 COACHING_LOG_TABLE = "verify_count_audit_coaching_log"
+MANUAL_CORRECTION_USERS = ["Jared Wolfe"]
 
 
 st.set_page_config(
@@ -65,11 +66,17 @@ def ensure_coaching_log_table():
             correction_dt TIMESTAMP,
             correction_by TEXT,
             correction_qty FLOAT,
+            refill_date_pull_qty FLOAT,
+            verify_date_pull_qty FLOAT,
+            refill_qty_vs_pull FLOAT,
             notes TEXT
         )
     """)
     with engine.begin() as conn:
         conn.execute(sql)
+        conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS refill_date_pull_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS verify_date_pull_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS refill_qty_vs_pull FLOAT"))
 
 
 def load_completed_audit_pks() -> set:
@@ -83,7 +90,7 @@ def db_value(value):
     return None if pd.isna(value) else value
 
 
-def save_completed_rows(rows: pd.DataFrame, notes: str = "") -> int:
+def save_completed_rows(rows: pd.DataFrame, notes: str = "", manual_correction_by: str | None = None) -> int:
     if rows.empty:
         return 0
     ensure_coaching_log_table()
@@ -91,18 +98,26 @@ def save_completed_rows(rows: pd.DataFrame, notes: str = "") -> int:
         INSERT INTO {COACHING_LOG_TABLE} (
             audit_pk, coaching_user, verify_dt, device, med_id, med_desc, qty_off,
             prior_refill_dt, prior_refill_qty, correction_dt, correction_by,
-            correction_qty, notes
+            correction_qty, refill_date_pull_qty, verify_date_pull_qty,
+            refill_qty_vs_pull, notes
         )
         VALUES (
             :audit_pk, :coaching_user, :verify_dt, :device, :med_id, :med_desc, :qty_off,
             :prior_refill_dt, :prior_refill_qty, :correction_dt, :correction_by,
-            :correction_qty, :notes
+            :correction_qty, :refill_date_pull_qty, :verify_date_pull_qty,
+            :refill_qty_vs_pull, :notes
         )
         ON CONFLICT (audit_pk) DO NOTHING
     """)
     inserted = 0
     with engine.begin() as conn:
         for _, row in rows.iterrows():
+            correction_by = row["correction_by"]
+            correction_dt = row["correction_dt"]
+            if manual_correction_by:
+                correction_by = manual_correction_by
+                if pd.isna(correction_dt):
+                    correction_dt = pd.Timestamp.now()
             result = conn.execute(sql, {
                 "audit_pk": row["pk"],
                 "coaching_user": row["prior_refill_by"],
@@ -113,9 +128,12 @@ def save_completed_rows(rows: pd.DataFrame, notes: str = "") -> int:
                 "qty_off": db_value(row["discrepancy_qty"]),
                 "prior_refill_dt": db_value(row["prior_refill_dt"]),
                 "prior_refill_qty": db_value(row["prior_refill_qty"]),
-                "correction_dt": db_value(row["correction_dt"]),
-                "correction_by": row["correction_by"],
+                "correction_dt": db_value(correction_dt),
+                "correction_by": correction_by,
                 "correction_qty": db_value(row["correction_qty"]),
+                "refill_date_pull_qty": db_value(row["refill_date_pull_qty"]),
+                "verify_date_pull_qty": db_value(row["verify_date_pull_qty"]),
+                "refill_qty_vs_pull": db_value(row["refill_qty_vs_pull"]),
                 "notes": notes,
             })
             inserted += result.rowcount or 0
@@ -217,6 +235,33 @@ def load_count_inventory_corrections(start, end, followup_days=14):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_pyxis_pulls(start, end, lookback_days=60):
+    """Carousel/Pyxis pull demand lines from pharmacy_orders."""
+    try:
+        lookback = start - timedelta(days=lookback_days)
+        sql = text("""
+            SELECT pk, dt, user_name, destination, med_id, med_desc, priority, qty
+            FROM pharmacy_orders
+            WHERE dt::date BETWEEN :lookback AND :end
+              AND priority ILIKE '%pyxis%pull%'
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"lookback": lookback, "end": end})
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["pull_date"] = df["dt"].dt.date
+        df["destination"] = df["destination"].fillna("Unknown").astype(str).str.strip()
+        df["med_id"] = df["med_id"].fillna("").astype(str).str.strip()
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        return df
+    except Exception as exc:
+        st.warning(f"[load_pyxis_pulls] {exc}")
+        return pd.DataFrame()
+
+
 def normalize_event_numbers(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -304,6 +349,36 @@ def empty_correction() -> pd.Series:
     })
 
 
+def pull_summary_for_date(row: pd.Series, pulls: pd.DataFrame, date_col: str, prefix: str) -> pd.Series:
+    if pulls.empty or pd.isna(row.get(date_col)):
+        return empty_pull_summary(prefix)
+    matches = pulls[
+        (pulls["pull_date"] == row[date_col]) &
+        (pulls["destination"] == str(row["device"]).strip()) &
+        (pulls["med_id"] == str(row["med_id"]).strip())
+    ].sort_values("dt")
+    if matches.empty:
+        return empty_pull_summary(prefix)
+
+    return pd.Series({
+        f"{prefix}_pull_qty": matches["qty"].sum(),
+        f"{prefix}_pull_lines": int(matches["pk"].count()),
+        f"{prefix}_first_pull_dt": matches["dt"].min(),
+        f"{prefix}_last_pull_dt": matches["dt"].max(),
+        f"{prefix}_pull_users": ", ".join(sorted(matches["user_name"].dropna().astype(str).unique())),
+    })
+
+
+def empty_pull_summary(prefix: str) -> pd.Series:
+    return pd.Series({
+        f"{prefix}_pull_qty": np.nan,
+        f"{prefix}_pull_lines": 0,
+        f"{prefix}_first_pull_dt": pd.NaT,
+        f"{prefix}_last_pull_dt": pd.NaT,
+        f"{prefix}_pull_users": "",
+    })
+
+
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Verify Count Audit",
@@ -322,6 +397,7 @@ with st.spinner("Building verify count audit..."):
     df_verify = load_verify_discrepancies(start_date, end_date)
     df_refills = load_prior_refills(start_date, end_date)
     df_corrections = load_count_inventory_corrections(start_date, end_date)
+    df_pulls = load_pyxis_pulls(start_date, end_date)
 
 if df_verify.empty:
     st.success("No Verify Inventory discrepancies found in the selected date range.")
@@ -335,6 +411,17 @@ audit_df["verify_date"] = audit_df["dt"].dt.date
 audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
 audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
 audit_df["has_count_inventory_correction"] = audit_df["correction_dt"].notna()
+refill_pull_cols = audit_df.apply(
+    lambda row: pull_summary_for_date(row, df_pulls, "prior_refill_date", "refill_date"),
+    axis=1,
+)
+verify_pull_cols = audit_df.apply(
+    lambda row: pull_summary_for_date(row, df_pulls, "verify_date", "verify_date"),
+    axis=1,
+)
+audit_df = pd.concat([audit_df, refill_pull_cols, verify_pull_cols], axis=1)
+audit_df["refill_qty_vs_pull"] = audit_df["prior_refill_qty"] - audit_df["refill_date_pull_qty"].fillna(0)
+audit_df["verify_qty_vs_pull"] = audit_df["qty"] - audit_df["verify_date_pull_qty"].fillna(0)
 audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
 completed_pks = load_completed_audit_pks()
 audit_df["completed"] = audit_df["pk"].isin(completed_pks)
@@ -423,10 +510,14 @@ review_columns = [
     "completed", "pk", "dt", "device", "med_id", "med_desc", "user_name",
     "discrepancy_qty", "qty", "beginning_qty", "ending_qty", "discrepancy_reason",
     "prior_refill_dt", "prior_refill_by", "prior_refill_qty",
+    "refill_date_pull_qty", "refill_qty_vs_pull", "refill_date_pull_lines",
+    "refill_date_first_pull_dt", "refill_date_last_pull_dt", "refill_date_pull_users",
     "prior_refill_beginning_qty", "prior_refill_ending_qty", "prior_refill_event_type",
     "hours_since_refill", "correction_dt", "correction_by", "correction_qty",
     "correction_beginning_qty", "correction_ending_qty", "correction_event_type",
-    "hours_until_correction", "med_section",
+    "hours_until_correction", "verify_date_pull_qty", "verify_qty_vs_pull",
+    "verify_date_pull_lines", "verify_date_first_pull_dt", "verify_date_last_pull_dt",
+    "verify_date_pull_users", "med_section",
 ]
 
 review_df = filtered[review_columns].sort_values("dt", ascending=False)
@@ -451,6 +542,12 @@ edited_review_df = st.data_editor(
         "prior_refill_dt": st.column_config.DatetimeColumn("Prior Refill Time", format="MM/DD/YY HH:mm"),
         "prior_refill_by": st.column_config.TextColumn("Prior Refill User"),
         "prior_refill_qty": st.column_config.NumberColumn("Prior Refill Qty", format="%.0f"),
+        "refill_date_pull_qty": st.column_config.NumberColumn("Refill-Date Pull Qty", format="%.0f"),
+        "refill_qty_vs_pull": st.column_config.NumberColumn("Refill Qty vs Pull", format="%.0f"),
+        "refill_date_pull_lines": st.column_config.NumberColumn("Refill-Date Pull Lines", format="%d"),
+        "refill_date_first_pull_dt": st.column_config.DatetimeColumn("Refill-Date First Pull", format="MM/DD/YY HH:mm"),
+        "refill_date_last_pull_dt": st.column_config.DatetimeColumn("Refill-Date Last Pull", format="MM/DD/YY HH:mm"),
+        "refill_date_pull_users": st.column_config.TextColumn("Refill-Date Pull Users"),
         "prior_refill_beginning_qty": st.column_config.NumberColumn("Prior Begin", format="%.0f"),
         "prior_refill_ending_qty": st.column_config.NumberColumn("Prior End", format="%.0f"),
         "prior_refill_event_type": st.column_config.TextColumn("Prior Event"),
@@ -462,6 +559,12 @@ edited_review_df = st.data_editor(
         "correction_ending_qty": st.column_config.NumberColumn("Count Inv End", format="%.0f"),
         "correction_event_type": st.column_config.TextColumn("Correction Event"),
         "hours_until_correction": st.column_config.NumberColumn("Hours to Correction", format="%.1f"),
+        "verify_date_pull_qty": st.column_config.NumberColumn("Verify-Date Pull Qty", format="%.0f"),
+        "verify_qty_vs_pull": st.column_config.NumberColumn("Verify Qty vs Pull", format="%.0f"),
+        "verify_date_pull_lines": st.column_config.NumberColumn("Verify-Date Pull Lines", format="%d"),
+        "verify_date_first_pull_dt": st.column_config.DatetimeColumn("Verify-Date First Pull", format="MM/DD/YY HH:mm"),
+        "verify_date_last_pull_dt": st.column_config.DatetimeColumn("Verify-Date Last Pull", format="MM/DD/YY HH:mm"),
+        "verify_date_pull_users": st.column_config.TextColumn("Verify-Date Pull Users"),
         "med_section": st.column_config.TextColumn("Med Section"),
     },
 )
@@ -471,12 +574,21 @@ completion_note = st.text_input(
     placeholder="Optional note to attach to newly completed rows",
     key="verify_audit_completion_note",
 )
+manual_correction_user = st.selectbox(
+    "Manual correction user for checked rows",
+    ["Keep Count Inventory user from table"] + MANUAL_CORRECTION_USERS,
+    help="Use this if the Count Inventory transaction has not appeared in the imported Pyxis data yet.",
+    key="verify_audit_manual_correction_user",
+)
+manual_correction_by = (
+    None if manual_correction_user == "Keep Count Inventory user from table" else manual_correction_user
+)
 new_completed = edited_review_df[
     (edited_review_df["completed"]) &
     (~edited_review_df["pk"].isin(completed_pks))
 ]
 if st.button("Mark checked rows completed and send to coaching report", type="primary"):
-    inserted = save_completed_rows(new_completed, completion_note)
+    inserted = save_completed_rows(new_completed, completion_note, manual_correction_by)
     if inserted:
         st.success(f"Logged {inserted} completed row(s) to the coaching report.")
         st.cache_data.clear()
