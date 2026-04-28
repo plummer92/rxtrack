@@ -69,6 +69,8 @@ def ensure_coaching_log_table():
             refill_date_pull_qty FLOAT,
             verify_date_pull_qty FLOAT,
             refill_qty_vs_pull FLOAT,
+            coaching_status TEXT DEFAULT 'Needs Coaching',
+            coaching_completed_at TIMESTAMP,
             notes TEXT
         )
     """)
@@ -77,8 +79,11 @@ def ensure_coaching_log_table():
         conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS refill_date_pull_qty FLOAT"))
         conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS verify_date_pull_qty FLOAT"))
         conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS refill_qty_vs_pull FLOAT"))
+        conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS coaching_status TEXT DEFAULT 'Needs Coaching'"))
+        conn.execute(text(f"ALTER TABLE {COACHING_LOG_TABLE} ADD COLUMN IF NOT EXISTS coaching_completed_at TIMESTAMP"))
 
 
+@st.cache_data(ttl=60)
 def load_completed_audit_pks() -> set:
     ensure_coaching_log_table()
     with engine.connect() as conn:
@@ -382,6 +387,39 @@ def empty_pull_summary(prefix: str) -> pd.Series:
     })
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def build_count_audit_dataset(start, end) -> pd.DataFrame:
+    df_verify = load_verify_discrepancies(start, end)
+    df_refills = load_prior_refills(start, end)
+    df_corrections = load_count_inventory_corrections(start, end)
+    df_pulls = load_pyxis_pulls(start, end)
+
+    if df_verify.empty:
+        return df_verify
+
+    df_verify[["med_section", "med_group"]] = df_verify.apply(classify_med_section, axis=1)
+    prior_cols = df_verify.apply(lambda row: find_prior_refill(row, df_refills), axis=1)
+    correction_cols = df_verify.apply(lambda row: find_next_correction(row, df_corrections), axis=1)
+    audit_df = pd.concat([df_verify, prior_cols, correction_cols], axis=1)
+    audit_df["verify_date"] = audit_df["dt"].dt.date
+    audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
+    audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
+    audit_df["has_count_inventory_correction"] = audit_df["correction_dt"].notna()
+    refill_pull_cols = audit_df.apply(
+        lambda row: pull_summary_for_date(row, df_pulls, "prior_refill_date", "refill_date"),
+        axis=1,
+    )
+    verify_pull_cols = audit_df.apply(
+        lambda row: pull_summary_for_date(row, df_pulls, "verify_date", "verify_date"),
+        axis=1,
+    )
+    audit_df = pd.concat([audit_df, refill_pull_cols, verify_pull_cols], axis=1)
+    audit_df["refill_qty_vs_pull"] = audit_df["prior_refill_qty"] - audit_df["refill_date_pull_qty"].fillna(0)
+    audit_df["verify_qty_vs_pull"] = audit_df["qty"] - audit_df["verify_date_pull_qty"].fillna(0)
+    audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
+    return audit_df
+
+
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Verify Count Audit",
@@ -397,35 +435,12 @@ else:
     _debug_panel("Discrepancy Deep Dive", intro_mode="fallback")
 
 with st.spinner("Building verify count audit..."):
-    df_verify = load_verify_discrepancies(start_date, end_date)
-    df_refills = load_prior_refills(start_date, end_date)
-    df_corrections = load_count_inventory_corrections(start_date, end_date)
-    df_pulls = load_pyxis_pulls(start_date, end_date)
+    audit_df = build_count_audit_dataset(start_date, end_date).copy()
 
-if df_verify.empty:
+if audit_df.empty:
     st.success("No Verify Inventory discrepancies found in the selected date range.")
     st.stop()
 
-df_verify[["med_section", "med_group"]] = df_verify.apply(classify_med_section, axis=1)
-prior_cols = df_verify.apply(lambda row: find_prior_refill(row, df_refills), axis=1)
-correction_cols = df_verify.apply(lambda row: find_next_correction(row, df_corrections), axis=1)
-audit_df = pd.concat([df_verify, prior_cols, correction_cols], axis=1)
-audit_df["verify_date"] = audit_df["dt"].dt.date
-audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
-audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
-audit_df["has_count_inventory_correction"] = audit_df["correction_dt"].notna()
-refill_pull_cols = audit_df.apply(
-    lambda row: pull_summary_for_date(row, df_pulls, "prior_refill_date", "refill_date"),
-    axis=1,
-)
-verify_pull_cols = audit_df.apply(
-    lambda row: pull_summary_for_date(row, df_pulls, "verify_date", "verify_date"),
-    axis=1,
-)
-audit_df = pd.concat([audit_df, refill_pull_cols, verify_pull_cols], axis=1)
-audit_df["refill_qty_vs_pull"] = audit_df["prior_refill_qty"] - audit_df["refill_date_pull_qty"].fillna(0)
-audit_df["verify_qty_vs_pull"] = audit_df["qty"] - audit_df["verify_date_pull_qty"].fillna(0)
-audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
 completed_pks = load_completed_audit_pks()
 audit_df["completed"] = audit_df["pk"].isin(completed_pks)
 
@@ -477,6 +492,15 @@ with st.sidebar:
         value=True,
         key="verify_audit_hide_completed",
     )
+    max_review_rows = st.number_input(
+        "Rows to show in review table",
+        min_value=50,
+        max_value=5000,
+        value=500,
+        step=50,
+        help="Keeping this lower makes checkbox edits and note entry much faster. Use filters if you need to narrow the list.",
+        key="verify_audit_max_review_rows",
+    )
 
 filtered = audit_df.copy()
 filtered = filtered[filtered["abs_discrepancy_qty"] >= min_qty_off]
@@ -523,7 +547,12 @@ review_columns = [
     "verify_date_pull_users", "med_section",
 ]
 
-review_df = filtered[review_columns].sort_values("dt", ascending=False)
+review_df = filtered[review_columns].sort_values("dt", ascending=False).head(int(max_review_rows))
+if len(filtered) > len(review_df):
+    st.caption(
+        f"Showing the newest {len(review_df):,} of {len(filtered):,} matching rows. "
+        "Raise the row limit or narrow the filters if needed."
+    )
 edited_review_df = st.data_editor(
     review_df,
     use_container_width=True,
@@ -572,17 +601,23 @@ edited_review_df = st.data_editor(
     },
 )
 
-completion_note = st.text_input(
-    "Completion note",
-    placeholder="Optional note to attach to newly completed rows",
-    key="verify_audit_completion_note",
-)
-manual_correction_user = st.selectbox(
-    "Manual correction user for checked rows",
-    ["Keep Count Inventory user from table"] + MANUAL_CORRECTION_USERS,
-    help="Use this if the Count Inventory transaction has not appeared in the imported Pyxis data yet.",
-    key="verify_audit_manual_correction_user",
-)
+with st.form("verify_audit_completion_form", clear_on_submit=False):
+    completion_note = st.text_input(
+        "Completion note",
+        placeholder="Optional note to attach to newly completed rows",
+        key="verify_audit_completion_note",
+    )
+    manual_correction_user = st.selectbox(
+        "Manual correction user for checked rows",
+        ["Keep Count Inventory user from table"] + MANUAL_CORRECTION_USERS,
+        help="Use this if the Count Inventory transaction has not appeared in the imported Pyxis data yet.",
+        key="verify_audit_manual_correction_user",
+    )
+    submitted_completion = st.form_submit_button(
+        "Mark checked rows completed and send to coaching report",
+        type="primary",
+    )
+
 manual_correction_by = (
     None if manual_correction_user == "Keep Count Inventory user from table" else manual_correction_user
 )
@@ -590,10 +625,11 @@ new_completed = edited_review_df[
     (edited_review_df["completed"]) &
     (~edited_review_df["pk"].isin(completed_pks))
 ]
-if st.button("Mark checked rows completed and send to coaching report", type="primary"):
+if submitted_completion:
     with st.spinner("Saving completed rows..."):
         inserted = save_completed_rows(new_completed, completion_note, manual_correction_by)
     if inserted:
+        load_completed_audit_pks.clear()
         st.success(f"Logged {inserted} completed row(s) to the coaching report.")
         st.rerun()
     else:
