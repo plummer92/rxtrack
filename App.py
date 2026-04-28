@@ -1825,6 +1825,7 @@ def render_page_links():
     safe_page_link("pages/📊_Workforce_Intelligence.py", label="Workforce Intelligence", icon="📊")
     safe_page_link("pages/📥_Pends_Analyzer.py", label="Pends Analyzer", icon="📥")
     safe_page_link("pages/🚨_discrepancy_deep_dive.py", label="Discrepancy Deep Dive", icon="🚨")
+    safe_page_link("pages/🧾_Count_Audit_Coaching.py", label="Count Audit Coaching", icon="!")
 
     st.markdown('<div class="rx-nav-label">Tools</div>', unsafe_allow_html=True)
     safe_page_link("pages/📊_Cycle_Count_Integrity.py", label="Cycle Count Integrity", icon="📊")

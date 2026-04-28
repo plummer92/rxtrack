@@ -28,6 +28,7 @@ SPECIAL_MED_SECTION = "Insulins & Inhalers"
 OTHER_MED_SECTION = "All Other Meds"
 REFILL_EVENT_PATTERN = "ARRAY['%restock%', '%refill%', '%load%', '%replenish%']"
 PATIENT_CASSETTE_PATTERN = r"patient\s*cass|cassette|cass\b"
+COACHING_LOG_TABLE = "verify_count_audit_coaching_log"
 
 
 st.set_page_config(
@@ -46,6 +47,79 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
     return buf.getvalue()
+
+
+def ensure_coaching_log_table():
+    sql = text(f"""
+        CREATE TABLE IF NOT EXISTS {COACHING_LOG_TABLE} (
+            audit_pk TEXT PRIMARY KEY,
+            completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            coaching_user TEXT,
+            verify_dt TIMESTAMP,
+            device TEXT,
+            med_id TEXT,
+            med_desc TEXT,
+            qty_off FLOAT,
+            prior_refill_dt TIMESTAMP,
+            prior_refill_qty FLOAT,
+            correction_dt TIMESTAMP,
+            correction_by TEXT,
+            correction_qty FLOAT,
+            notes TEXT
+        )
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql)
+
+
+def load_completed_audit_pks() -> set:
+    ensure_coaching_log_table()
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"SELECT audit_pk FROM {COACHING_LOG_TABLE}")).fetchall()
+    return {row[0] for row in rows}
+
+
+def db_value(value):
+    return None if pd.isna(value) else value
+
+
+def save_completed_rows(rows: pd.DataFrame, notes: str = "") -> int:
+    if rows.empty:
+        return 0
+    ensure_coaching_log_table()
+    sql = text(f"""
+        INSERT INTO {COACHING_LOG_TABLE} (
+            audit_pk, coaching_user, verify_dt, device, med_id, med_desc, qty_off,
+            prior_refill_dt, prior_refill_qty, correction_dt, correction_by,
+            correction_qty, notes
+        )
+        VALUES (
+            :audit_pk, :coaching_user, :verify_dt, :device, :med_id, :med_desc, :qty_off,
+            :prior_refill_dt, :prior_refill_qty, :correction_dt, :correction_by,
+            :correction_qty, :notes
+        )
+        ON CONFLICT (audit_pk) DO NOTHING
+    """)
+    inserted = 0
+    with engine.begin() as conn:
+        for _, row in rows.iterrows():
+            result = conn.execute(sql, {
+                "audit_pk": row["pk"],
+                "coaching_user": row["prior_refill_by"],
+                "verify_dt": db_value(row["dt"]),
+                "device": row["device"],
+                "med_id": row["med_id"],
+                "med_desc": row["med_desc"],
+                "qty_off": db_value(row["discrepancy_qty"]),
+                "prior_refill_dt": db_value(row["prior_refill_dt"]),
+                "prior_refill_qty": db_value(row["prior_refill_qty"]),
+                "correction_dt": db_value(row["correction_dt"]),
+                "correction_by": row["correction_by"],
+                "correction_qty": db_value(row["correction_qty"]),
+                "notes": notes,
+            })
+            inserted += result.rowcount or 0
+    return inserted
 
 
 def classify_med_section(row: pd.Series) -> pd.Series:
@@ -122,6 +196,27 @@ def load_prior_refills(start, end, lookback_days=60):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_count_inventory_corrections(start, end, followup_days=14):
+    """Count Inventory events entered after a mismatch to correct the Pyxis count."""
+    try:
+        followup_end = end + timedelta(days=followup_days)
+        sql = text("""
+            SELECT pk, dt, user_name, device, med_id, med_desc, event_type,
+                   qty, beginning_qty, ending_qty
+            FROM events
+            WHERE dt::date BETWEEN :start AND :followup_end
+              AND event_type ILIKE '%count inventory%'
+            ORDER BY dt ASC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"start": start, "followup_end": followup_end})
+        return normalize_event_numbers(df)
+    except Exception as exc:
+        st.warning(f"[load_count_inventory_corrections] {exc}")
+        return pd.DataFrame()
+
+
 def normalize_event_numbers(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -173,6 +268,42 @@ def empty_prior_refill() -> pd.Series:
     })
 
 
+def find_next_correction(verify_row: pd.Series, corrections: pd.DataFrame) -> pd.Series:
+    if corrections.empty:
+        return empty_correction()
+    matches = corrections[
+        (corrections["med_id"] == verify_row["med_id"]) &
+        (corrections["device"] == verify_row["device"]) &
+        (corrections["dt"] > verify_row["dt"])
+    ].sort_values("dt")
+    if matches.empty:
+        return empty_correction()
+
+    correction = matches.iloc[0]
+    hours_until = (correction["dt"] - verify_row["dt"]).total_seconds() / 3600
+    return pd.Series({
+        "correction_dt": correction["dt"],
+        "correction_by": str(correction.get("user_name") or "Unknown"),
+        "correction_qty": correction.get("qty", np.nan),
+        "correction_beginning_qty": correction.get("beginning_qty", np.nan),
+        "correction_ending_qty": correction.get("ending_qty", np.nan),
+        "correction_event_type": correction.get("event_type", ""),
+        "hours_until_correction": hours_until,
+    })
+
+
+def empty_correction() -> pd.Series:
+    return pd.Series({
+        "correction_dt": pd.NaT,
+        "correction_by": "No Count Inventory found",
+        "correction_qty": np.nan,
+        "correction_beginning_qty": np.nan,
+        "correction_ending_qty": np.nan,
+        "correction_event_type": "",
+        "hours_until_correction": np.nan,
+    })
+
+
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Verify Count Audit",
@@ -190,6 +321,7 @@ else:
 with st.spinner("Building verify count audit..."):
     df_verify = load_verify_discrepancies(start_date, end_date)
     df_refills = load_prior_refills(start_date, end_date)
+    df_corrections = load_count_inventory_corrections(start_date, end_date)
 
 if df_verify.empty:
     st.success("No Verify Inventory discrepancies found in the selected date range.")
@@ -197,11 +329,15 @@ if df_verify.empty:
 
 df_verify[["med_section", "med_group"]] = df_verify.apply(classify_med_section, axis=1)
 prior_cols = df_verify.apply(lambda row: find_prior_refill(row, df_refills), axis=1)
-audit_df = pd.concat([df_verify, prior_cols], axis=1)
+correction_cols = df_verify.apply(lambda row: find_next_correction(row, df_corrections), axis=1)
+audit_df = pd.concat([df_verify, prior_cols, correction_cols], axis=1)
 audit_df["verify_date"] = audit_df["dt"].dt.date
 audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
 audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
+audit_df["has_count_inventory_correction"] = audit_df["correction_dt"].notna()
 audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
+completed_pks = load_completed_audit_pks()
+audit_df["completed"] = audit_df["pk"].isin(completed_pks)
 
 max_qty_off = int(np.ceil(audit_df["abs_discrepancy_qty"].max())) if not audit_df.empty else 0
 min_qty_off = st.slider(
@@ -246,6 +382,11 @@ with st.sidebar:
         value=False,
         key="verify_audit_only_matched",
     )
+    hide_completed = st.checkbox(
+        "Hide completed coaching rows",
+        value=True,
+        key="verify_audit_hide_completed",
+    )
 
 filtered = audit_df.copy()
 filtered = filtered[filtered["abs_discrepancy_qty"] >= min_qty_off]
@@ -259,6 +400,8 @@ if refill_user_filter:
     filtered = filtered[filtered["prior_refill_by"].astype(str).isin(refill_user_filter)]
 if only_matched:
     filtered = filtered[filtered["has_prior_refill"]]
+if hide_completed:
+    filtered = filtered[~filtered["completed"]]
 
 st.info(
     "Pocket-level matching is approximated as same medication plus same Pyxis device because the imported events table does not store drawer/subdrawer/pocket."
@@ -267,7 +410,7 @@ st.info(
 m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("Verify Mismatches", f"{len(filtered):,}")
 m2.metric("Matched to Prior Refill", f"{int(filtered['has_prior_refill'].sum()):,}")
-m3.metric("Unmatched", f"{int((~filtered['has_prior_refill']).sum()):,}")
+m3.metric("Count Inventory Corrections", f"{int(filtered['has_count_inventory_correction'].sum()):,}")
 m4.metric("Prior Refill Users", f"{filtered['prior_refill_by'].nunique():,}")
 m5.metric("Total Qty Off", f"{filtered['abs_discrepancy_qty'].sum():,.0f}")
 
@@ -277,19 +420,24 @@ st.subheader("Rows to Review")
 st.caption("Each row is one Verify Inventory mismatch with the most recent prior refill/load for that same med and device.")
 
 review_columns = [
-    "dt", "device", "med_id", "med_desc", "user_name",
+    "completed", "pk", "dt", "device", "med_id", "med_desc", "user_name",
     "discrepancy_qty", "qty", "beginning_qty", "ending_qty", "discrepancy_reason",
     "prior_refill_dt", "prior_refill_by", "prior_refill_qty",
     "prior_refill_beginning_qty", "prior_refill_ending_qty", "prior_refill_event_type",
-    "hours_since_refill", "med_section",
+    "hours_since_refill", "correction_dt", "correction_by", "correction_qty",
+    "correction_beginning_qty", "correction_ending_qty", "correction_event_type",
+    "hours_until_correction", "med_section",
 ]
 
 review_df = filtered[review_columns].sort_values("dt", ascending=False)
-st.dataframe(
+edited_review_df = st.data_editor(
     review_df,
     use_container_width=True,
     hide_index=True,
+    disabled=[col for col in review_columns if col != "completed"],
     column_config={
+        "completed": st.column_config.CheckboxColumn("Complete", help="Check rows you have reviewed and want logged for coaching."),
+        "pk": None,
         "dt": st.column_config.DatetimeColumn("Verify Time", format="MM/DD/YY HH:mm"),
         "device": st.column_config.TextColumn("Pyxis"),
         "med_id": st.column_config.TextColumn("Med ID"),
@@ -307,13 +455,38 @@ st.dataframe(
         "prior_refill_ending_qty": st.column_config.NumberColumn("Prior End", format="%.0f"),
         "prior_refill_event_type": st.column_config.TextColumn("Prior Event"),
         "hours_since_refill": st.column_config.NumberColumn("Hours Since Refill", format="%.1f"),
+        "correction_dt": st.column_config.DatetimeColumn("Count Inventory Time", format="MM/DD/YY HH:mm"),
+        "correction_by": st.column_config.TextColumn("Count Inventory User"),
+        "correction_qty": st.column_config.NumberColumn("Count Inventory Qty", format="%.0f"),
+        "correction_beginning_qty": st.column_config.NumberColumn("Count Inv Begin", format="%.0f"),
+        "correction_ending_qty": st.column_config.NumberColumn("Count Inv End", format="%.0f"),
+        "correction_event_type": st.column_config.TextColumn("Correction Event"),
+        "hours_until_correction": st.column_config.NumberColumn("Hours to Correction", format="%.1f"),
         "med_section": st.column_config.TextColumn("Med Section"),
     },
 )
 
+completion_note = st.text_input(
+    "Completion note",
+    placeholder="Optional note to attach to newly completed rows",
+    key="verify_audit_completion_note",
+)
+new_completed = edited_review_df[
+    (edited_review_df["completed"]) &
+    (~edited_review_df["pk"].isin(completed_pks))
+]
+if st.button("Mark checked rows completed and send to coaching report", type="primary"):
+    inserted = save_completed_rows(new_completed, completion_note)
+    if inserted:
+        st.success(f"Logged {inserted} completed row(s) to the coaching report.")
+        st.cache_data.clear()
+        st.rerun()
+    else:
+        st.info("No new checked rows to log.")
+
 st.download_button(
     "Export Review Rows to Excel",
-    data=to_excel_bytes(review_df),
+    data=to_excel_bytes(review_df.drop(columns=["completed"], errors="ignore")),
     file_name="verify_count_audit_rows.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
