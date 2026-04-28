@@ -109,16 +109,17 @@ def save_completed_rows(rows: pd.DataFrame, notes: str = "", manual_correction_b
         )
         ON CONFLICT (audit_pk) DO NOTHING
     """)
-    inserted = 0
-    with engine.begin() as conn:
-        for _, row in rows.iterrows():
-            correction_by = row["correction_by"]
-            correction_dt = row["correction_dt"]
-            if manual_correction_by:
-                correction_by = manual_correction_by
-                if pd.isna(correction_dt):
-                    correction_dt = pd.Timestamp.now()
-            result = conn.execute(sql, {
+    payload = []
+    completed_at = pd.Timestamp.now()
+    for _, row in rows.iterrows():
+        correction_by = row["correction_by"]
+        correction_dt = row["correction_dt"]
+        if manual_correction_by:
+            correction_by = manual_correction_by
+            if pd.isna(correction_dt):
+                correction_dt = completed_at
+        payload.append(
+            {
                 "audit_pk": row["pk"],
                 "coaching_user": row["prior_refill_by"],
                 "verify_dt": db_value(row["dt"]),
@@ -135,9 +136,11 @@ def save_completed_rows(rows: pd.DataFrame, notes: str = "", manual_correction_b
                 "verify_date_pull_qty": db_value(row["verify_date_pull_qty"]),
                 "refill_qty_vs_pull": db_value(row["refill_qty_vs_pull"]),
                 "notes": notes,
-            })
-            inserted += result.rowcount or 0
-    return inserted
+            }
+        )
+    with engine.begin() as conn:
+        result = conn.execute(sql, payload)
+    return result.rowcount or 0
 
 
 def classify_med_section(row: pd.Series) -> pd.Series:
@@ -588,10 +591,10 @@ new_completed = edited_review_df[
     (~edited_review_df["pk"].isin(completed_pks))
 ]
 if st.button("Mark checked rows completed and send to coaching report", type="primary"):
-    inserted = save_completed_rows(new_completed, completion_note, manual_correction_by)
+    with st.spinner("Saving completed rows..."):
+        inserted = save_completed_rows(new_completed, completion_note, manual_correction_by)
     if inserted:
         st.success(f"Logged {inserted} completed row(s) to the coaching report.")
-        st.cache_data.clear()
         st.rerun()
     else:
         st.info("No new checked rows to log.")
