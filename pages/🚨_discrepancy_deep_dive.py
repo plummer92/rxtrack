@@ -357,34 +357,57 @@ def empty_correction() -> pd.Series:
     })
 
 
-def pull_summary_for_date(row: pd.Series, pulls: pd.DataFrame, date_col: str, prefix: str) -> pd.Series:
-    if pulls.empty or pd.isna(row.get(date_col)):
-        return empty_pull_summary(prefix)
-    matches = pulls[
-        (pulls["pull_date"] == row[date_col]) &
-        (pulls["destination"] == str(row["device"]).strip()) &
-        (pulls["med_id"] == str(row["med_id"]).strip())
-    ].sort_values("dt")
-    if matches.empty:
-        return empty_pull_summary(prefix)
+def summarize_pulls_by_date(pulls: pd.DataFrame) -> pd.DataFrame:
+    if pulls.empty:
+        return pd.DataFrame()
+    return (
+        pulls.groupby(["pull_date", "destination", "med_id"], dropna=False)
+        .agg(
+            pull_qty=("qty", "sum"),
+            pull_lines=("pk", "count"),
+            first_pull_dt=("dt", "min"),
+            last_pull_dt=("dt", "max"),
+            pull_users=("user_name", lambda s: ", ".join(sorted(s.dropna().astype(str).unique()))),
+        )
+        .reset_index()
+    )
 
-    return pd.Series({
-        f"{prefix}_pull_qty": matches["qty"].sum(),
-        f"{prefix}_pull_lines": int(matches["pk"].count()),
-        f"{prefix}_first_pull_dt": matches["dt"].min(),
-        f"{prefix}_last_pull_dt": matches["dt"].max(),
-        f"{prefix}_pull_users": ", ".join(sorted(matches["user_name"].dropna().astype(str).unique())),
+
+def add_pull_summary(audit_df: pd.DataFrame, pull_summary: pd.DataFrame, date_col: str, prefix: str) -> pd.DataFrame:
+    pull_cols = [
+        f"{prefix}_pull_qty",
+        f"{prefix}_pull_lines",
+        f"{prefix}_first_pull_dt",
+        f"{prefix}_last_pull_dt",
+        f"{prefix}_pull_users",
+    ]
+    if pull_summary.empty:
+        for col in pull_cols:
+            audit_df[col] = 0 if col.endswith("_lines") else np.nan
+        audit_df[f"{prefix}_pull_users"] = ""
+        return audit_df
+
+    key_cols = [f"{prefix}_date_key", f"{prefix}_device_key", f"{prefix}_med_key"]
+    summary = pull_summary.rename(columns={
+        "pull_date": key_cols[0],
+        "destination": key_cols[1],
+        "med_id": key_cols[2],
+        "pull_qty": f"{prefix}_pull_qty",
+        "pull_lines": f"{prefix}_pull_lines",
+        "first_pull_dt": f"{prefix}_first_pull_dt",
+        "last_pull_dt": f"{prefix}_last_pull_dt",
+        "pull_users": f"{prefix}_pull_users",
     })
-
-
-def empty_pull_summary(prefix: str) -> pd.Series:
-    return pd.Series({
-        f"{prefix}_pull_qty": np.nan,
-        f"{prefix}_pull_lines": 0,
-        f"{prefix}_first_pull_dt": pd.NaT,
-        f"{prefix}_last_pull_dt": pd.NaT,
-        f"{prefix}_pull_users": "",
-    })
+    audit_df = audit_df.merge(
+        summary,
+        how="left",
+        left_on=[date_col, "device", "med_id"],
+        right_on=key_cols,
+    )
+    audit_df = audit_df.drop(columns=key_cols)
+    audit_df[f"{prefix}_pull_lines"] = audit_df[f"{prefix}_pull_lines"].fillna(0).astype(int)
+    audit_df[f"{prefix}_pull_users"] = audit_df[f"{prefix}_pull_users"].fillna("")
+    return audit_df
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -405,15 +428,9 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
     audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
     audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
     audit_df["has_count_inventory_correction"] = audit_df["correction_dt"].notna()
-    refill_pull_cols = audit_df.apply(
-        lambda row: pull_summary_for_date(row, df_pulls, "prior_refill_date", "refill_date"),
-        axis=1,
-    )
-    verify_pull_cols = audit_df.apply(
-        lambda row: pull_summary_for_date(row, df_pulls, "verify_date", "verify_date"),
-        axis=1,
-    )
-    audit_df = pd.concat([audit_df, refill_pull_cols, verify_pull_cols], axis=1)
+    pull_summary = summarize_pulls_by_date(df_pulls)
+    audit_df = add_pull_summary(audit_df, pull_summary, "prior_refill_date", "refill_date")
+    audit_df = add_pull_summary(audit_df, pull_summary, "verify_date", "verify_date")
     audit_df["refill_qty_vs_pull"] = audit_df["prior_refill_qty"] - audit_df["refill_date_pull_qty"].fillna(0)
     audit_df["verify_qty_vs_pull"] = audit_df["qty"] - audit_df["verify_date_pull_qty"].fillna(0)
     audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
@@ -531,7 +548,10 @@ m5.metric("Total Qty Off", f"{filtered['abs_discrepancy_qty'].sum():,.0f}")
 st.divider()
 
 st.subheader("Rows to Review")
-st.caption("Each row is one Verify Inventory mismatch with the most recent prior refill/load for that same med and device.")
+st.caption(
+    "The review grid is intentionally narrow for speed. It keeps the verify count, verify-date pull, "
+    "prior refill quantity, and prior refill-date pull comparison visible for coaching."
+)
 
 review_columns = [
     "completed", "pk", "dt", "device", "med_id", "med_desc", "user_name",
@@ -553,11 +573,20 @@ if len(filtered) > len(review_df):
         f"Showing the newest {len(review_df):,} of {len(filtered):,} matching rows. "
         "Raise the row limit or narrow the filters if needed."
     )
+
+review_grid_columns = [
+    "completed", "pk", "dt", "device", "med_id", "med_desc",
+    "user_name", "discrepancy_qty", "qty", "verify_date_pull_qty",
+    "verify_qty_vs_pull", "prior_refill_dt", "prior_refill_by",
+    "prior_refill_qty", "refill_date_pull_qty", "refill_qty_vs_pull",
+    "correction_dt", "correction_by", "correction_qty", "hours_since_refill",
+]
+review_grid_df = review_df[review_grid_columns].copy()
 edited_review_df = st.data_editor(
-    review_df,
+    review_grid_df,
     use_container_width=True,
     hide_index=True,
-    disabled=[col for col in review_columns if col != "completed"],
+    disabled=[col for col in review_grid_columns if col != "completed"],
     column_config={
         "completed": st.column_config.CheckboxColumn("Complete", help="Check rows you have reviewed and want logged for coaching."),
         "pk": None,
@@ -568,38 +597,109 @@ edited_review_df = st.data_editor(
         "user_name": st.column_config.TextColumn("Verify User"),
         "discrepancy_qty": st.column_config.NumberColumn("Qty Off", format="%.0f"),
         "qty": st.column_config.NumberColumn("Verify Qty", format="%.0f"),
-        "beginning_qty": st.column_config.NumberColumn("Pyxis Begin", format="%.0f"),
-        "ending_qty": st.column_config.NumberColumn("Pyxis End", format="%.0f"),
-        "discrepancy_reason": st.column_config.TextColumn("Reason"),
+        "verify_date_pull_qty": st.column_config.NumberColumn("Verify-Date Pull Qty", format="%.0f"),
+        "verify_qty_vs_pull": st.column_config.NumberColumn("Verify Qty vs Pull", format="%.0f"),
         "prior_refill_dt": st.column_config.DatetimeColumn("Prior Refill Time", format="MM/DD/YY HH:mm"),
         "prior_refill_by": st.column_config.TextColumn("Prior Refill User"),
         "prior_refill_qty": st.column_config.NumberColumn("Prior Refill Qty", format="%.0f"),
         "refill_date_pull_qty": st.column_config.NumberColumn("Refill-Date Pull Qty", format="%.0f"),
         "refill_qty_vs_pull": st.column_config.NumberColumn("Refill Qty vs Pull", format="%.0f"),
-        "refill_date_pull_lines": st.column_config.NumberColumn("Refill-Date Pull Lines", format="%d"),
-        "refill_date_first_pull_dt": st.column_config.DatetimeColumn("Refill-Date First Pull", format="MM/DD/YY HH:mm"),
-        "refill_date_last_pull_dt": st.column_config.DatetimeColumn("Refill-Date Last Pull", format="MM/DD/YY HH:mm"),
-        "refill_date_pull_users": st.column_config.TextColumn("Refill-Date Pull Users"),
-        "prior_refill_beginning_qty": st.column_config.NumberColumn("Prior Begin", format="%.0f"),
-        "prior_refill_ending_qty": st.column_config.NumberColumn("Prior End", format="%.0f"),
-        "prior_refill_event_type": st.column_config.TextColumn("Prior Event"),
         "hours_since_refill": st.column_config.NumberColumn("Hours Since Refill", format="%.1f"),
         "correction_dt": st.column_config.DatetimeColumn("Count Inventory Time", format="MM/DD/YY HH:mm"),
         "correction_by": st.column_config.TextColumn("Count Inventory User"),
         "correction_qty": st.column_config.NumberColumn("Count Inventory Qty", format="%.0f"),
-        "correction_beginning_qty": st.column_config.NumberColumn("Count Inv Begin", format="%.0f"),
-        "correction_ending_qty": st.column_config.NumberColumn("Count Inv End", format="%.0f"),
-        "correction_event_type": st.column_config.TextColumn("Correction Event"),
-        "hours_until_correction": st.column_config.NumberColumn("Hours to Correction", format="%.1f"),
-        "verify_date_pull_qty": st.column_config.NumberColumn("Verify-Date Pull Qty", format="%.0f"),
-        "verify_qty_vs_pull": st.column_config.NumberColumn("Verify Qty vs Pull", format="%.0f"),
-        "verify_date_pull_lines": st.column_config.NumberColumn("Verify-Date Pull Lines", format="%d"),
-        "verify_date_first_pull_dt": st.column_config.DatetimeColumn("Verify-Date First Pull", format="MM/DD/YY HH:mm"),
-        "verify_date_last_pull_dt": st.column_config.DatetimeColumn("Verify-Date Last Pull", format="MM/DD/YY HH:mm"),
-        "verify_date_pull_users": st.column_config.TextColumn("Verify-Date Pull Users"),
-        "med_section": st.column_config.TextColumn("Med Section"),
     },
 )
+
+if review_df.empty:
+    st.info("No rows match the current filters.")
+else:
+    detail_options = review_df.assign(
+        row_label=lambda df: (
+            df["dt"].dt.strftime("%m/%d/%y %H:%M").fillna("No verify time") +
+            " | " + df["device"].fillna("Unknown Pyxis").astype(str) +
+            " | " + df["med_id"].fillna("").astype(str) +
+            " | off " + df["discrepancy_qty"].fillna(0).round(0).astype(int).astype(str) +
+            " | prior " + df["prior_refill_by"].fillna("No prior refill").astype(str)
+        )
+    )[["pk", "row_label"]]
+    selected_label = st.selectbox(
+        "Inspect full detail for one row",
+        detail_options["row_label"].tolist(),
+        key="verify_audit_detail_row",
+    )
+    selected_pk = detail_options.loc[detail_options["row_label"] == selected_label, "pk"].iloc[0]
+    detail_row = review_df[review_df["pk"] == selected_pk].iloc[0]
+
+    verify_tab, prior_tab, correction_tab, raw_tab = st.tabs([
+        "Verify Count",
+        "Prior Refill + Pull",
+        "Count Inventory",
+        "All Fields",
+    ])
+    with verify_tab:
+        st.dataframe(
+            pd.DataFrame([{
+                "Verify Time": detail_row["dt"],
+                "Verify User": detail_row["user_name"],
+                "Pyxis": detail_row["device"],
+                "Med ID": detail_row["med_id"],
+                "Medication": detail_row["med_desc"],
+                "Qty Off": detail_row["discrepancy_qty"],
+                "Verify Qty": detail_row["qty"],
+                "Pyxis Begin": detail_row["beginning_qty"],
+                "Pyxis End": detail_row["ending_qty"],
+                "Reason": detail_row["discrepancy_reason"],
+                "Verify-Date Pull Qty": detail_row["verify_date_pull_qty"],
+                "Verify Qty vs Pull": detail_row["verify_qty_vs_pull"],
+                "Verify-Date Pull Lines": detail_row["verify_date_pull_lines"],
+                "Verify-Date Pull Users": detail_row["verify_date_pull_users"],
+                "Verify-Date First Pull": detail_row["verify_date_first_pull_dt"],
+                "Verify-Date Last Pull": detail_row["verify_date_last_pull_dt"],
+            }]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    with prior_tab:
+        st.dataframe(
+            pd.DataFrame([{
+                "Prior Refill Time": detail_row["prior_refill_dt"],
+                "Prior Refill User": detail_row["prior_refill_by"],
+                "Prior Refill Qty": detail_row["prior_refill_qty"],
+                "Prior Begin": detail_row["prior_refill_beginning_qty"],
+                "Prior End": detail_row["prior_refill_ending_qty"],
+                "Prior Event": detail_row["prior_refill_event_type"],
+                "Hours Since Refill": detail_row["hours_since_refill"],
+                "Refill-Date Pull Qty": detail_row["refill_date_pull_qty"],
+                "Refill Qty vs Pull": detail_row["refill_qty_vs_pull"],
+                "Refill-Date Pull Lines": detail_row["refill_date_pull_lines"],
+                "Refill-Date Pull Users": detail_row["refill_date_pull_users"],
+                "Refill-Date First Pull": detail_row["refill_date_first_pull_dt"],
+                "Refill-Date Last Pull": detail_row["refill_date_last_pull_dt"],
+            }]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    with correction_tab:
+        st.dataframe(
+            pd.DataFrame([{
+                "Count Inventory Time": detail_row["correction_dt"],
+                "Count Inventory User": detail_row["correction_by"],
+                "Count Inventory Qty": detail_row["correction_qty"],
+                "Count Inv Begin": detail_row["correction_beginning_qty"],
+                "Count Inv End": detail_row["correction_ending_qty"],
+                "Correction Event": detail_row["correction_event_type"],
+                "Hours to Correction": detail_row["hours_until_correction"],
+            }]),
+            use_container_width=True,
+            hide_index=True,
+        )
+    with raw_tab:
+        st.dataframe(
+            detail_row.drop(labels=["completed"], errors="ignore").rename("Value").reset_index().rename(columns={"index": "Field"}),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 with st.form("verify_audit_completion_form", clear_on_submit=False):
     completion_note = st.text_input(
@@ -621,10 +721,11 @@ with st.form("verify_audit_completion_form", clear_on_submit=False):
 manual_correction_by = (
     None if manual_correction_user == "Keep Count Inventory user from table" else manual_correction_user
 )
-new_completed = edited_review_df[
+new_completed_pks = edited_review_df[
     (edited_review_df["completed"]) &
     (~edited_review_df["pk"].isin(completed_pks))
-]
+]["pk"]
+new_completed = review_df[review_df["pk"].isin(new_completed_pks)]
 if submitted_completion:
     with st.spinner("Saving completed rows..."):
         inserted = save_completed_rows(new_completed, completion_note, manual_correction_by)
