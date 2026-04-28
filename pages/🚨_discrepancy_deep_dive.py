@@ -469,6 +469,12 @@ def classify_evidence(row: pd.Series) -> pd.Series:
     return pd.Series({"evidence_status": status, "evidence_reason": reason})
 
 
+def dedupe_verify_rows(audit_df: pd.DataFrame) -> pd.DataFrame:
+    if audit_df.empty or "pk" not in audit_df.columns:
+        return audit_df
+    return audit_df.sort_values("dt", ascending=False).drop_duplicates(subset=["pk"], keep="first")
+
+
 def summarize_pulls_by_date(pulls: pd.DataFrame) -> pd.DataFrame:
     if pulls.empty:
         return pd.DataFrame()
@@ -553,6 +559,7 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
     audit_df["verify_qty_vs_pull"] = audit_df["qty"] - audit_df["verify_date_pull_qty"].fillna(0)
     audit_df[["evidence_status", "evidence_reason"]] = audit_df.apply(classify_evidence, axis=1)
     audit_df = audit_df[~audit_df.apply(is_patient_cassette, axis=1)].copy()
+    audit_df = dedupe_verify_rows(audit_df)
     return audit_df
 
 
