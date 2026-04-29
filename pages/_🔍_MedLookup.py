@@ -30,7 +30,7 @@ def get_matching_pyxis_events(med_desc, med_id, device, center_dt, hours_window)
             SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty,
                    beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
             FROM events
-            WHERE dt BETWEEN %s AND %s
+            WHERE dt::timestamp BETWEEN %s AND %s
               AND device = %s
               AND (med_desc = %s OR (%s IS NOT NULL AND med_id = %s))
             ORDER BY dt DESC
@@ -41,7 +41,7 @@ def get_matching_pyxis_events(med_desc, med_id, device, center_dt, hours_window)
             SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty,
                    beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
             FROM events
-            WHERE dt BETWEEN %s AND %s
+            WHERE dt::timestamp BETWEEN %s AND %s
               AND (med_desc = %s OR (%s IS NOT NULL AND med_id = %s))
             ORDER BY dt DESC
         """
