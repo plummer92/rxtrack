@@ -68,7 +68,12 @@ def fmt_qty(value) -> str:
     return f"{float(value):.0f}"
 
 
-def build_coaching_actions(filtered_df: pd.DataFrame, user_summary_df: pd.DataFrame, max_users: int = 10) -> pd.DataFrame:
+def build_coaching_actions(
+    filtered_df: pd.DataFrame,
+    user_summary_df: pd.DataFrame,
+    min_example_qty_off: int = 3,
+    max_users: int = 10,
+) -> pd.DataFrame:
     if filtered_df.empty or user_summary_df.empty:
         return pd.DataFrame()
 
@@ -87,8 +92,12 @@ def build_coaching_actions(filtered_df: pd.DataFrame, user_summary_df: pd.DataFr
         if signal_rows.empty:
             continue
 
+        example_rows = signal_rows[signal_rows["abs_discrepancy_qty"] >= min_example_qty_off]
+        if example_rows.empty:
+            example_rows = signal_rows
+
         examples = []
-        for _, row in signal_rows.head(3).iterrows():
+        for _, row in example_rows.head(3).iterrows():
             examples.append(
                 f"{row['med_id']} at {row['device']} on {row['dt']:%m/%d %H:%M}: "
                 f"refill entered {fmt_qty(row['prior_refill_qty'])}, "
@@ -109,6 +118,7 @@ def build_coaching_actions(filtered_df: pd.DataFrame, user_summary_df: pd.DataFr
             "total_rows": int(user["mismatch_count"]),
             "suggested_action": (
                 f"Review {strong} strong and {possible} possible refill-entry pattern(s). "
+                f"Use examples with quantity off >= {min_example_qty_off} when available. "
                 "Focus coaching on entering the actual loaded quantity from the Pyxis pull."
             ),
             "example_evidence": "\n".join(examples),
@@ -1086,7 +1096,16 @@ else:
     st.caption(
         "This reads the filtered table and turns strong/possible refill-entry patterns into a plain-English worklist."
     )
-    action_plan = build_coaching_actions(filtered, user_summary)
+    min_action_example_qty = st.number_input(
+        "Minimum quantity off for action-plan examples",
+        min_value=1,
+        max_value=50,
+        value=3,
+        step=1,
+        help="Counts still include all visible rows, but examples will prefer rows at or above this quantity off.",
+        key="verify_audit_action_plan_min_qty",
+    )
+    action_plan = build_coaching_actions(filtered, user_summary, int(min_action_example_qty))
     if action_plan.empty:
         st.info("No strong or possible refill-entry patterns are visible with the current filters.")
     else:
