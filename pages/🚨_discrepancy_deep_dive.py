@@ -1141,12 +1141,11 @@ else:
             (filtered["prior_refill_by"] == selected_action_user) &
             (filtered["evidence_status"].isin(["Strong refill-entry pattern", "Possible refill-entry pattern"]))
         ].sort_values(["evidence_status", "abs_discrepancy_qty"], ascending=[True, False])
-        preferred_occurrences = user_occurrences[user_occurrences["abs_discrepancy_qty"] >= min_action_example_qty]
-        if preferred_occurrences.empty:
-            st.caption(
-                "No occurrences for this user met the selected quantity threshold, so showing all strong/possible occurrences."
-            )
-            preferred_occurrences = user_occurrences
+        above_threshold = user_occurrences["abs_discrepancy_qty"] >= min_action_example_qty
+        st.caption(
+            f"Showing all {len(user_occurrences):,} strong/possible occurrence(s) for this user. "
+            f"{int(above_threshold.sum()):,} meet the current action-plan example threshold of {int(min_action_example_qty)}."
+        )
 
         drilldown_columns = [
             "evidence_status", "dt", "device", "med_id", "med_desc", "user_name",
@@ -1155,7 +1154,7 @@ else:
             "verify_qty_vs_pull", "inventory_events_since_refill", "evidence_reason",
         ]
         st.dataframe(
-            preferred_occurrences[drilldown_columns],
+            user_occurrences[drilldown_columns],
             use_container_width=True,
             hide_index=True,
             column_config={
@@ -1179,7 +1178,7 @@ else:
         )
         st.download_button(
             f"Export {selected_action_user} Occurrences to Excel",
-            data=to_excel_bytes(preferred_occurrences[drilldown_columns]),
+            data=to_excel_bytes(user_occurrences[drilldown_columns]),
             file_name=f"verify_count_audit_{selected_action_user.replace(',', '').replace(' ', '_').lower()}_occurrences.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
