@@ -98,9 +98,10 @@ def build_coaching_actions(
 
         examples = []
         for _, row in example_rows.head(3).iterrows():
+            prior_event = str(row.get("prior_refill_event_type") or "Refill/Load")
             examples.append(
                 f"{row['med_id']} at {row['device']} on {row['dt']:%m/%d %H:%M}: "
-                f"refill entered {fmt_qty(row['prior_refill_qty'])}, "
+                f"{prior_event.lower()} entered {fmt_qty(row['prior_refill_qty'])}, "
                 f"pull was {fmt_qty(row['refill_date_pull_qty'])}, "
                 f"later verify was off {fmt_qty(row['discrepancy_qty'])}."
             )
@@ -119,7 +120,7 @@ def build_coaching_actions(
             "suggested_action": (
                 f"Review {strong} strong and {possible} possible refill-entry pattern(s). "
                 f"Use examples with quantity off >= {min_example_qty_off} when available. "
-                "Focus coaching on entering the actual loaded quantity from the Pyxis pull."
+                "Focus coaching on entering the actual refill/load quantity from the Pyxis pull."
             ),
             "example_evidence": "\n".join(examples),
         })
@@ -1194,7 +1195,7 @@ else:
 
         drilldown_columns = [
             "evidence_status", "dt", "device", "med_id", "med_desc", "user_name",
-            "discrepancy_qty", "qty", "prior_refill_dt", "prior_refill_qty",
+            "discrepancy_qty", "qty", "prior_refill_dt", "prior_refill_event_type", "prior_refill_qty",
             "refill_date_pull_qty", "refill_qty_vs_pull", "verify_date_pull_qty",
             "verify_qty_vs_pull", "inventory_events_since_refill", "evidence_reason",
         ]
@@ -1211,10 +1212,11 @@ else:
                 "user_name": st.column_config.TextColumn("Verify User"),
                 "discrepancy_qty": st.column_config.NumberColumn("Qty Off", format="%.0f"),
                 "qty": st.column_config.NumberColumn("Verify Qty", format="%.0f"),
-                "prior_refill_dt": st.column_config.DatetimeColumn("Prior Refill Time", format="MM/DD/YY HH:mm"),
-                "prior_refill_qty": st.column_config.NumberColumn("Refill Entered", format="%.0f"),
+                "prior_refill_dt": st.column_config.DatetimeColumn("Prior Refill/Load Time", format="MM/DD/YY HH:mm"),
+                "prior_refill_event_type": st.column_config.TextColumn("Prior Event"),
+                "prior_refill_qty": st.column_config.NumberColumn("Refill/Load Entered", format="%.0f"),
                 "refill_date_pull_qty": st.column_config.NumberColumn("Pull Qty", format="%.0f"),
-                "refill_qty_vs_pull": st.column_config.NumberColumn("Refill vs Pull", format="%.0f"),
+                "refill_qty_vs_pull": st.column_config.NumberColumn("Refill/Load vs Pull", format="%.0f"),
                 "verify_date_pull_qty": st.column_config.NumberColumn("Verify-Date Pull", format="%.0f"),
                 "verify_qty_vs_pull": st.column_config.NumberColumn("Verify vs Pull", format="%.0f"),
                 "inventory_events_since_refill": st.column_config.NumberColumn("Inv Events Since", format="%d"),
