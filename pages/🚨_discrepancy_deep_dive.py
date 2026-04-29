@@ -1025,6 +1025,51 @@ st.download_button(
 
 st.divider()
 
+st.subheader("Verify User Catcher Summary")
+st.caption("This highlights who is finding count mismatches during Verify Inventory.")
+if filtered.empty:
+    st.info("No rows match the current filters.")
+else:
+    catcher_summary = (
+        filtered.groupby("user_name")
+        .agg(
+            caught_mismatches=("pk", "count"),
+            total_qty_caught=("abs_discrepancy_qty", "sum"),
+            avg_qty_caught=("abs_discrepancy_qty", "mean"),
+            strong_refill_patterns=("evidence_status", lambda s: (s == "Strong refill-entry pattern").sum()),
+            possible_refill_patterns=("evidence_status", lambda s: (s == "Possible refill-entry pattern").sum()),
+            clean_refill_chains=("inventory_events_since_refill", lambda s: (s == 0).sum()),
+            unique_meds=("med_id", "nunique"),
+            unique_devices=("device", "nunique"),
+        )
+        .reset_index()
+        .sort_values(["caught_mismatches", "total_qty_caught"], ascending=False)
+    )
+    st.dataframe(
+        catcher_summary,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "user_name": st.column_config.TextColumn("Verify User"),
+            "caught_mismatches": st.column_config.NumberColumn("Caught Mismatches", format="%d"),
+            "total_qty_caught": st.column_config.NumberColumn("Total Qty Caught", format="%.0f"),
+            "avg_qty_caught": st.column_config.NumberColumn("Avg Qty Caught", format="%.1f"),
+            "strong_refill_patterns": st.column_config.NumberColumn("Strong Refill Patterns", format="%d"),
+            "possible_refill_patterns": st.column_config.NumberColumn("Possible Refill Patterns", format="%d"),
+            "clean_refill_chains": st.column_config.NumberColumn("Clean Chains", format="%d"),
+            "unique_meds": st.column_config.NumberColumn("Meds", format="%d"),
+            "unique_devices": st.column_config.NumberColumn("Devices", format="%d"),
+        },
+    )
+    st.download_button(
+        "Export Verify User Catcher Summary to Excel",
+        data=to_excel_bytes(catcher_summary),
+        file_name="verify_count_audit_catcher_summary.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+st.divider()
+
 st.subheader("Prior Refill User Summary")
 st.caption("This counts how many rows each prior refill/load user has in each evidence category.")
 if filtered.empty:
