@@ -14,6 +14,41 @@ else:
 engine = App.engine
 normalize_name = App.normalize_name
 
+
+@st.cache_data(ttl=300)
+def get_matching_pyxis_events(med_desc, med_id, device, center_dt, hours_window):
+    if pd.isna(center_dt):
+        return pd.DataFrame()
+
+    start_dt = pd.to_datetime(center_dt) - pd.Timedelta(hours=hours_window)
+    end_dt = pd.to_datetime(center_dt) + pd.Timedelta(hours=hours_window)
+    med_id = None if pd.isna(med_id) else med_id
+    device = None if pd.isna(device) else device
+
+    if device:
+        query = """
+            SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty,
+                   beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
+            FROM events
+            WHERE dt BETWEEN %s AND %s
+              AND device = %s
+              AND (med_desc = %s OR (%s IS NOT NULL AND med_id = %s))
+            ORDER BY dt DESC
+        """
+        params = (start_dt, end_dt, device, med_desc, med_id, med_id)
+    else:
+        query = """
+            SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty,
+                   beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
+            FROM events
+            WHERE dt BETWEEN %s AND %s
+              AND (med_desc = %s OR (%s IS NOT NULL AND med_id = %s))
+            ORDER BY dt DESC
+        """
+        params = (start_dt, end_dt, med_desc, med_id, med_id)
+
+    return pd.read_sql(query, engine, params=params)
+
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Advanced Medication Audit",
@@ -210,10 +245,16 @@ c4.metric("Detected Pyxis Gaps", int((df_filtered['count_gap'].notna() & (df_fil
 # -------------------------------------------------
 st.subheader("📋 Audit Timeline")
 
-st.dataframe(
-    df_filtered[['dt', 'source', 'tech_name', 'device', 'event_type',
-                 'qty', 'beginning_qty', 'ending_qty', 'count_gap', 'queue_id']],
+timeline_display = df_filtered.reset_index(drop=True)
+timeline_cols = ['dt', 'source', 'tech_name', 'device', 'event_type',
+                 'qty', 'beginning_qty', 'ending_qty', 'count_gap', 'queue_id']
+
+timeline_event = st.dataframe(
+    timeline_display[timeline_cols],
     use_container_width=True,
+    hide_index=True,
+    on_select="rerun",
+    selection_mode="single-row",
     column_config={
         "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm:ss"),
         "source": "Source",
@@ -226,6 +267,63 @@ st.dataframe(
         "queue_id": "Queue ID"
     }
 )
+
+if len(timeline_event.selection.rows) > 0:
+    selected_idx = timeline_event.selection.rows[0]
+    selected_row = timeline_display.iloc[selected_idx]
+
+    st.divider()
+    st.subheader("Selected Row Pyxis Drilldown")
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Selected Source", selected_row.get("source", ""))
+    d2.metric("Device / Destination", selected_row.get("device", ""))
+    d3.metric("Action Qty", "" if pd.isna(selected_row.get("qty")) else f"{selected_row.get('qty'):g}")
+    d4.metric("Queue ID", selected_row.get("queue_id", "") or "")
+
+    hours_window = st.slider(
+        "Pyxis match window around selected row",
+        min_value=2,
+        max_value=72,
+        value=24,
+        step=2,
+        help="Use a wider window if the carousel pull happened long before the Pyxis load/refill."
+    )
+
+    pyxis_detail = get_matching_pyxis_events(
+        selected_row.get("med_desc"),
+        selected_row.get("med_id"),
+        selected_row.get("device"),
+        selected_row.get("dt"),
+        hours_window,
+    )
+
+    if pyxis_detail.empty:
+        st.info(
+            "No matching Pyxis cabinet events were found for this med/device inside the selected time window. "
+            "Try widening the window, or the carousel row may not have a matching cabinet transaction in the uploaded Pyxis data."
+        )
+    else:
+        pyxis_detail["tech_name"] = pyxis_detail["user_name"].apply(normalize_name)
+        st.caption(
+            "These are Pyxis cabinet events for the same medication and device/destination around the selected timeline row."
+        )
+        st.dataframe(
+            pyxis_detail[[
+                "dt", "tech_name", "device", "event_type", "qty",
+                "beginning_qty", "ending_qty", "discrepancy_qty", "discrepancy_reason"
+            ]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm:ss"),
+                "qty": st.column_config.NumberColumn("Action Qty", format="%.0f"),
+                "beginning_qty": "Beginning Count",
+                "ending_qty": "Ending Count",
+                "discrepancy_qty": st.column_config.NumberColumn("Discrepancy Qty", format="%.0f"),
+                "discrepancy_reason": "Discrepancy Reason",
+            }
+        )
 
 # -------------------------------------------------
 # 🔴 Gap Alert Section
