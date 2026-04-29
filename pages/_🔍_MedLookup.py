@@ -33,7 +33,12 @@ else:
 # -------------------------------------------------
 @st.cache_data(ttl=300)
 def get_med_list():
-    query = "SELECT DISTINCT med_desc FROM events ORDER BY med_desc"
+    query = """
+        SELECT DISTINCT med_desc FROM events WHERE med_desc IS NOT NULL
+        UNION
+        SELECT DISTINCT med_desc FROM pharmacy_orders WHERE med_desc IS NOT NULL
+        ORDER BY med_desc
+    """
     df = pd.read_sql(query, engine)
     return sorted(df['med_desc'].dropna().unique())
 
@@ -60,15 +65,56 @@ if not selected_med:
 # -------------------------------------------------
 # 3️⃣ Pull Data (Secure Query)
 # -------------------------------------------------
-query = """
-    SELECT *
+pyxis_query = """
+    SELECT
+        pk,
+        dt,
+        user_name,
+        device,
+        med_id,
+        med_desc,
+        event_type,
+        qty,
+        beginning_qty,
+        ending_qty,
+        discrepancy_qty,
+        discrepancy_reason,
+        resolution_dt,
+        'Pyxis Event' AS source,
+        NULL::TEXT AS queue_id
     FROM events
     WHERE med_desc = %s
     ORDER BY dt DESC
 """
 
+carousel_query = """
+    SELECT
+        pk,
+        dt,
+        user_name,
+        destination AS device,
+        med_id,
+        med_desc,
+        priority AS event_type,
+        qty,
+        NULL::FLOAT AS beginning_qty,
+        NULL::FLOAT AS ending_qty,
+        NULL::FLOAT AS discrepancy_qty,
+        NULL::TEXT AS discrepancy_reason,
+        NULL::TIMESTAMP AS resolution_dt,
+        'Carousel / Pyxis Pull' AS source,
+        queue_id
+    FROM pharmacy_orders
+    WHERE med_desc = %s
+    ORDER BY dt DESC
+"""
+
 with st.spinner("Scanning database..."):
-    df_raw = pd.read_sql(query, engine, params=(selected_med,))
+    pyxis_df = pd.read_sql(pyxis_query, engine, params=(selected_med,))
+    carousel_df = pd.read_sql(carousel_query, engine, params=(selected_med,))
+    df_raw = pd.concat([pyxis_df, carousel_df], ignore_index=True)
+    if not df_raw.empty:
+        df_raw = df_raw.sort_values("dt", ascending=False)
 
 if df_raw.empty:
     st.warning(f"No records found for '{selected_med}'.")
@@ -84,8 +130,14 @@ df_raw['tech_name'] = df_raw['user_name'].apply(normalize_name)
 # -------------------------------------------------
 st.sidebar.header("🎯 Refine Results")
 
+selected_sources = st.sidebar.multiselect(
+    "Filter by Source:",
+    options=sorted(df_raw['source'].dropna().unique()),
+    default=sorted(df_raw['source'].dropna().unique())
+)
+
 selected_devices = st.sidebar.multiselect(
-    "Filter by Device:",
+    "Filter by Device / Destination:",
     options=sorted(df_raw['device'].dropna().unique()),
     default=sorted(df_raw['device'].dropna().unique())
 )
@@ -97,7 +149,7 @@ selected_techs = st.sidebar.multiselect(
 )
 
 selected_events = st.sidebar.multiselect(
-    "Filter by Event Type:",
+    "Filter by Event / Priority:",
     options=sorted(df_raw['event_type'].dropna().unique()),
     default=sorted(df_raw['event_type'].dropna().unique())
 )
@@ -106,6 +158,7 @@ selected_events = st.sidebar.multiselect(
 # 6️⃣ Apply Filters
 # -------------------------------------------------
 df_filtered = df_raw[
+    (df_raw['source'].isin(selected_sources)) &
     (df_raw['device'].isin(selected_devices)) &
     (df_raw['tech_name'].isin(selected_techs)) &
     (df_raw['event_type'].isin(selected_events))
@@ -120,25 +173,37 @@ if df_filtered.empty:
 # -------------------------------------------------
 df_filtered = df_filtered.sort_values(['device', 'med_id', 'dt'], ascending=[True, True, False])
 
-df_filtered['prev_ending'] = (
-    df_filtered.groupby(['device', 'med_id'])['ending_qty']
-    .shift(-1)
-)
+df_filtered['prev_ending'] = pd.NA
+df_filtered['count_gap'] = pd.NA
+pyxis_mask = df_filtered['source'].eq('Pyxis Event')
+pyxis_events = df_filtered.loc[pyxis_mask].copy()
 
-df_filtered['count_gap'] = (
-    df_filtered['beginning_qty'] - df_filtered['prev_ending']
-)
+if not pyxis_events.empty:
+    pyxis_events['prev_ending'] = (
+        pyxis_events.groupby(['device', 'med_id'])['ending_qty']
+        .shift(-1)
+    )
 
-df_filtered['count_gap'] = df_filtered['count_gap'].fillna(0)
+    pyxis_events['count_gap'] = (
+        pyxis_events['beginning_qty'] - pyxis_events['prev_ending']
+    )
+
+    df_filtered.loc[pyxis_events.index, 'prev_ending'] = pyxis_events['prev_ending']
+    df_filtered.loc[pyxis_events.index, 'count_gap'] = pyxis_events['count_gap']
+
+df_filtered['prev_ending'] = pd.to_numeric(df_filtered['prev_ending'], errors='coerce')
+df_filtered['count_gap'] = pd.to_numeric(df_filtered['count_gap'], errors='coerce')
+df_filtered = df_filtered.sort_values("dt", ascending=False)
 
 # -------------------------------------------------
 # 8️⃣ Metrics Overview
 # -------------------------------------------------
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 
 c1.metric("Matches Found", len(df_filtered))
-c2.metric("Unique Devices", df_filtered['device'].nunique())
-c3.metric("Detected Gaps", int((df_filtered['count_gap'] != 0).sum()))
+c2.metric("Pyxis Events", int(df_filtered['source'].eq('Pyxis Event').sum()))
+c3.metric("Carousel / Pull Rows", int(df_filtered['source'].eq('Carousel / Pyxis Pull').sum()))
+c4.metric("Detected Pyxis Gaps", int((df_filtered['count_gap'].notna() & (df_filtered['count_gap'] != 0)).sum()))
 
 # -------------------------------------------------
 # 9️⃣ Timeline Display
@@ -146,34 +211,39 @@ c3.metric("Detected Gaps", int((df_filtered['count_gap'] != 0).sum()))
 st.subheader("📋 Audit Timeline")
 
 st.dataframe(
-    df_filtered[['dt', 'tech_name', 'device', 'event_type',
-                 'qty', 'beginning_qty', 'ending_qty', 'count_gap']],
+    df_filtered[['dt', 'source', 'tech_name', 'device', 'event_type',
+                 'qty', 'beginning_qty', 'ending_qty', 'count_gap', 'queue_id']],
     use_container_width=True,
     column_config={
         "dt": st.column_config.DatetimeColumn("Time", format="MM/DD HH:mm:ss"),
+        "source": "Source",
+        "device": "Device / Destination",
+        "event_type": "Event / Priority",
         "qty": st.column_config.NumberColumn("Action Qty", format="%.0f"),
         "count_gap": st.column_config.NumberColumn("Inventory Gap", format="%.0f"),
         "beginning_qty": "Beginning Count",
-        "ending_qty": "Ending Count"
+        "ending_qty": "Ending Count",
+        "queue_id": "Queue ID"
     }
 )
 
 # -------------------------------------------------
 # 🔴 Gap Alert Section
 # -------------------------------------------------
-gaps = df_filtered[df_filtered['count_gap'] != 0]
+gaps = df_filtered[df_filtered['count_gap'].notna() & (df_filtered['count_gap'] != 0)]
 
 if not gaps.empty:
     st.error("🚨 Inventory Gaps Detected — Possible Count Integrity Issues")
 
     st.dataframe(
-        gaps[['dt', 'tech_name', 'device', 'count_gap']],
+        gaps[['dt', 'tech_name', 'device', 'event_type', 'qty', 'beginning_qty', 'ending_qty', 'count_gap']],
         use_container_width=True
     )
 
     st.caption(
         "A non-zero gap indicates the beginning count did not match the previous ending count "
-        "for that medication in that device."
+        "for that medication in that Pyxis device. Carousel / Pyxis Pull rows are shown for context "
+        "but are not included in this gap calculation."
     )
 else:
     st.success("✅ No inventory discrepancies detected for selected filters.")
