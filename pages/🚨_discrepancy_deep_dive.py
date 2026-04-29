@@ -62,6 +62,61 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def fmt_qty(value) -> str:
+    if pd.isna(value):
+        return "missing"
+    return f"{float(value):.0f}"
+
+
+def build_coaching_actions(filtered_df: pd.DataFrame, user_summary_df: pd.DataFrame, max_users: int = 10) -> pd.DataFrame:
+    if filtered_df.empty or user_summary_df.empty:
+        return pd.DataFrame()
+
+    action_rows = []
+    prioritized_users = user_summary_df[
+        (user_summary_df["Strong refill-entry pattern"] > 0) |
+        (user_summary_df["Possible refill-entry pattern"] > 0)
+    ].head(max_users)
+
+    for _, user in prioritized_users.iterrows():
+        user_name = user["prior_refill_by"]
+        user_rows = filtered_df[filtered_df["prior_refill_by"] == user_name].copy()
+        signal_rows = user_rows[
+            user_rows["evidence_status"].isin(["Strong refill-entry pattern", "Possible refill-entry pattern"])
+        ].sort_values(["evidence_status", "abs_discrepancy_qty"], ascending=[True, False])
+        if signal_rows.empty:
+            continue
+
+        examples = []
+        for _, row in signal_rows.head(3).iterrows():
+            examples.append(
+                f"{row['med_id']} at {row['device']} on {row['dt']:%m/%d %H:%M}: "
+                f"refill entered {fmt_qty(row['prior_refill_qty'])}, "
+                f"pull was {fmt_qty(row['refill_date_pull_qty'])}, "
+                f"later verify was off {fmt_qty(row['discrepancy_qty'])}."
+            )
+
+        strong = int(user.get("Strong refill-entry pattern", 0))
+        possible = int(user.get("Possible refill-entry pattern", 0))
+        chain_review = int(user.get("Needs inventory-chain review", 0))
+        priority = "Coach now" if strong >= 2 or (strong >= 1 and possible >= 1) else "Review examples first"
+        action_rows.append({
+            "priority": priority,
+            "prior_refill_user": user_name,
+            "strong": strong,
+            "possible": possible,
+            "chain_review": chain_review,
+            "total_rows": int(user["mismatch_count"]),
+            "suggested_action": (
+                f"Review {strong} strong and {possible} possible refill-entry pattern(s). "
+                "Focus coaching on entering the actual loaded quantity from the Pyxis pull."
+            ),
+            "example_evidence": "\n".join(examples),
+        })
+
+    return pd.DataFrame(action_rows)
+
+
 def ensure_coaching_log_table():
     sql = text(f"""
         CREATE TABLE IF NOT EXISTS {COACHING_LOG_TABLE} (
@@ -1025,4 +1080,35 @@ else:
         file_name="verify_count_audit_user_summary.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+    st.divider()
+    st.subheader("Automated Coaching Action Plan")
+    st.caption(
+        "This reads the filtered table and turns strong/possible refill-entry patterns into a plain-English worklist."
+    )
+    action_plan = build_coaching_actions(filtered, user_summary)
+    if action_plan.empty:
+        st.info("No strong or possible refill-entry patterns are visible with the current filters.")
+    else:
+        st.dataframe(
+            action_plan,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "priority": st.column_config.TextColumn("Priority"),
+                "prior_refill_user": st.column_config.TextColumn("User"),
+                "strong": st.column_config.NumberColumn("Strong", format="%d"),
+                "possible": st.column_config.NumberColumn("Possible", format="%d"),
+                "chain_review": st.column_config.NumberColumn("Chain Review", format="%d"),
+                "total_rows": st.column_config.NumberColumn("Total Rows", format="%d"),
+                "suggested_action": st.column_config.TextColumn("What To Do"),
+                "example_evidence": st.column_config.TextColumn("Examples To Review"),
+            },
+        )
+        st.download_button(
+            "Export Coaching Action Plan to Excel",
+            data=to_excel_bytes(action_plan),
+            file_name="verify_count_audit_action_plan.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
