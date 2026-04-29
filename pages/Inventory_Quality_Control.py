@@ -17,16 +17,15 @@ start_date, end_date = App.render_sidebar()
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Inventory Quality Control",
-        "Track receiving checks, cancelled transactions, discrepancy resolutions, and lifecycle risk from the data already flowing through RxTrack.",
+        "Use the daily pharmacy workflow orders as the receiving signal, then compare inventory age, Pyxis activity, returns, and cancellations to find medication lifecycle risk.",
         kicker="Operations Control",
     )
 else:
     st.header("Inventory Quality Control")
-    st.caption("Receiving checks, cancellations, resolution logging, and medication lifecycle risk.")
+    st.caption("Daily receiving/orders, lifecycle risk, receiving checks, and cancellation patterns.")
 
 
 RECEIVING_TABLE = "inventory_quality_receiving_log"
-RESOLUTION_TABLE = "discrepancy_resolution_log"
 CANCEL_REVIEW_TABLE = "cancelled_transaction_review_log"
 
 
@@ -58,27 +57,6 @@ def ensure_quality_tables():
                 returns_processed BOOLEAN DEFAULT FALSE,
                 notes TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """))
-        conn.execute(text(f"""
-            CREATE TABLE IF NOT EXISTS {RESOLUTION_TABLE} (
-                id SERIAL PRIMARY KEY,
-                source_pk TEXT UNIQUE,
-                found_date DATE NOT NULL,
-                resolved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                med_id TEXT,
-                med_desc TEXT,
-                device TEXT,
-                pocket_location TEXT,
-                issue_type TEXT,
-                associated_user TEXT,
-                how_found TEXT,
-                root_cause TEXT,
-                severity TEXT,
-                resolution_action TEXT,
-                coaching_needed BOOLEAN DEFAULT FALSE,
-                follow_up_complete BOOLEAN DEFAULT FALSE,
-                notes TEXT
             )
         """))
         conn.execute(text(f"""
@@ -144,12 +122,6 @@ def load_receiving_log():
 
 
 @st.cache_data(ttl=60)
-def load_resolution_log():
-    with engine.connect() as conn:
-        return pd.read_sql(text(f"SELECT * FROM {RESOLUTION_TABLE} ORDER BY resolved_at DESC, id DESC"), conn)
-
-
-@st.cache_data(ttl=60)
 def load_cancel_review_log():
     with engine.connect() as conn:
         return pd.read_sql(text(f"SELECT * FROM {CANCEL_REVIEW_TABLE} ORDER BY reviewed_at DESC, id DESC"), conn)
@@ -157,7 +129,6 @@ def load_cancel_review_log():
 
 def clear_quality_caches():
     load_receiving_log.clear()
-    load_resolution_log.clear()
     load_cancel_review_log.clear()
     load_events.clear()
     load_orders.clear()
@@ -194,23 +165,6 @@ def build_cancel_analysis(events):
         return cancels
     cancels["likely_category"] = cancels.apply(classify_cancel, axis=1)
     return cancels
-
-
-def build_discrepancy_candidates(events):
-    if events.empty:
-        return pd.DataFrame()
-    df = events.copy()
-    df["event_norm"] = event_text(df)
-    mask = (
-        df["discrepancy_qty"].fillna(0).ne(0)
-        | df["discrepancy_reason"].notna()
-        | df["event_norm"].str.contains("verify|count inventory|adjust|discrep", na=False)
-    )
-    out = df[mask].copy()
-    if out.empty:
-        return out
-    out["abs_qty_off"] = out["discrepancy_qty"].abs().fillna(0)
-    return out.sort_values(["abs_qty_off", "dt"], ascending=[False, False])
 
 
 def merge_frames(frames):
@@ -318,12 +272,85 @@ events = load_events(start_date, end_date)
 orders = load_orders(start_date, end_date)
 inventory = load_inventory()
 
-tab_receive, tab_cancel, tab_discrepancy, tab_lifecycle = st.tabs([
+tab_lifecycle, tab_orders, tab_receive, tab_cancel = st.tabs([
+    "Lifecycle Risk",
+    "Daily Receiving / Orders",
     "Receiving QC",
     "Cancelled Transactions",
-    "Discrepancy Resolution",
-    "Lifecycle Risk",
 ])
+
+
+with tab_orders:
+    st.subheader("Daily Pharmacy Workflow Orders")
+    st.caption("These rows come from the Pharmacy Workflow upload and act as the receiving/order stream for lifecycle risk.")
+
+    if orders.empty:
+        st.info("No pharmacy workflow orders found in the selected date range.")
+    else:
+        order_view = orders.copy()
+        order_view["dt"] = pd.to_datetime(order_view["dt"], errors="coerce")
+        order_view["order_date"] = order_view["dt"].dt.date
+        order_view["priority"] = order_view["priority"].fillna("Unknown").astype(str)
+        order_view["destination"] = order_view["destination"].fillna("Unknown").astype(str)
+        order_view["user_name"] = order_view["user_name"].fillna("Unknown").astype(str)
+        order_view["med_id"] = order_view["med_id"].fillna("").astype(str)
+        order_view["med_desc"] = order_view["med_desc"].fillna("").astype(str)
+        order_view["qty"] = pd.to_numeric(order_view["qty"], errors="coerce").fillna(0)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Order Rows", f"{len(order_view):,}")
+        c2.metric("Unique Meds", f"{order_view['med_id'].nunique():,}")
+        c3.metric("Total Qty", f"{order_view['qty'].sum():,.0f}")
+        c4.metric("Destinations", f"{order_view['destination'].nunique():,}")
+
+        f1, f2, f3 = st.columns(3)
+        selected_priorities = f1.multiselect(
+            "Priority / transaction type",
+            sorted(order_view["priority"].dropna().unique()),
+        )
+        selected_destinations = f2.multiselect(
+            "Destination",
+            sorted(order_view["destination"].dropna().unique()),
+        )
+        med_search = f3.text_input("Medication search")
+
+        if selected_priorities:
+            order_view = order_view[order_view["priority"].isin(selected_priorities)]
+        if selected_destinations:
+            order_view = order_view[order_view["destination"].isin(selected_destinations)]
+        if med_search:
+            med_mask = (
+                order_view["med_desc"].str.contains(med_search, case=False, na=False)
+                | order_view["med_id"].str.contains(med_search, case=False, na=False)
+            )
+            order_view = order_view[med_mask]
+
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            daily = order_view.groupby("order_date", dropna=False).agg(
+                orders=("pk", "count"),
+                quantity=("qty", "sum"),
+            ).reset_index()
+            st.plotly_chart(px.bar(daily, x="order_date", y="orders"), width="stretch")
+        with chart_col2:
+            top_meds = order_view.groupby(["med_id", "med_desc"], dropna=False).agg(
+                orders=("pk", "count"),
+                quantity=("qty", "sum"),
+                last_received=("dt", "max"),
+            ).reset_index().sort_values(["orders", "quantity"], ascending=[False, False]).head(20)
+            top_meds["med_label"] = top_meds["med_desc"].fillna(top_meds["med_id"]).astype(str).str.slice(0, 55)
+            st.plotly_chart(px.bar(top_meds.sort_values("orders"), x="orders", y="med_label", orientation="h"), width="stretch")
+
+        st.markdown("##### Receiving/order rows")
+        display_cols = ["dt", "queue_id", "priority", "med_id", "med_desc", "destination", "user_name", "qty"]
+        st.dataframe(order_view[display_cols], width="stretch", hide_index=True)
+
+        st.download_button(
+            "Download filtered receiving/orders CSV",
+            data=order_view[display_cols].to_csv(index=False).encode("utf-8"),
+            file_name="daily_receiving_orders.csv",
+            mime="text/csv",
+        )
 
 
 with tab_receive:
@@ -477,127 +504,6 @@ with tab_cancel:
             width="stretch",
             hide_index=True,
         )
-
-
-with tab_discrepancy:
-    st.subheader("Discrepancy Resolution Log")
-    st.caption("Use this after the deep dive confirms what happened at the pocket, then file it for coaching and pattern review.")
-
-    candidates = build_discrepancy_candidates(events)
-    resolution_log = load_resolution_log()
-    logged_pks = set(resolution_log["source_pk"].dropna()) if not resolution_log.empty else set()
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Candidate Issues", f"{len(candidates):,}")
-    m2.metric("Logged Resolutions", f"{len(resolution_log):,}")
-    m3.metric("Coaching Needed", f"{int(resolution_log['coaching_needed'].sum()) if not resolution_log.empty else 0:,}")
-
-    if candidates.empty:
-        st.info("No discrepancy candidates found in the selected date range.")
-    else:
-        candidates["logged"] = candidates["pk"].isin(logged_pks)
-        open_candidates = candidates[~candidates["logged"]].copy()
-        option_df = open_candidates if not open_candidates.empty else candidates
-        option_df["label"] = option_df.apply(
-            lambda r: f"{r['dt']} | {r['device']} | {r['med_desc']} | off {r.get('discrepancy_qty', '')} | {r['user_name']}",
-            axis=1,
-        )
-        issue_label_map = dict(zip(option_df["pk"], option_df["label"]))
-        selected_issue_pk = st.selectbox("Issue row from Pyxis data", option_df["pk"], format_func=issue_label_map.get)
-        selected_issue = candidates[candidates["pk"] == selected_issue_pk].iloc[0]
-
-        with st.form("resolution_form", clear_on_submit=True):
-            c1, c2, c3 = st.columns(3)
-            found_date = c1.date_input("Found date", value=date.today())
-            issue_type = c2.selectbox(
-                "Issue type",
-                ["Count incorrect", "Expired item", "Wrong pocket", "Return issue", "Restock issue", "Packaging issue", "Other"],
-            )
-            severity = c3.selectbox("Severity", ["Low", "Medium", "High"])
-
-            c4, c5, c6 = st.columns(3)
-            associated_user = c4.text_input("Associated user", value=str(selected_issue.get("user_name") or ""))
-            pocket_location = c5.text_input("Pocket/location", value="")
-            how_found = c6.selectbox("How found", ["Discrepancy Deep Dive", "Cycle count", "Cancelled transaction", "Random audit", "Other"])
-
-            root_cause = st.selectbox(
-                "Root cause",
-                [
-                    "Incorrect count entered",
-                    "Missed expiration check",
-                    "Incorrect restock",
-                    "Return not processed correctly",
-                    "Wrong item/pocket",
-                    "Packaging issue",
-                    "System/data issue",
-                    "Unknown",
-                ],
-            )
-            resolution_action = st.text_area("Resolution action", placeholder="Example: verified pocket and adjusted count from 12 to 8.")
-            c7, c8 = st.columns(2)
-            coaching_needed = c7.checkbox("Coaching needed")
-            follow_up_complete = c8.checkbox("Follow-up complete")
-            notes = st.text_area("Notes")
-            save_resolution = st.form_submit_button("Save resolution")
-
-        if save_resolution:
-            with engine.begin() as conn:
-                conn.execute(text(f"""
-                    INSERT INTO {RESOLUTION_TABLE} (
-                        source_pk, found_date, med_id, med_desc, device, pocket_location,
-                        issue_type, associated_user, how_found, root_cause, severity,
-                        resolution_action, coaching_needed, follow_up_complete, notes
-                    )
-                    VALUES (
-                        :source_pk, :found_date, :med_id, :med_desc, :device, :pocket_location,
-                        :issue_type, :associated_user, :how_found, :root_cause, :severity,
-                        :resolution_action, :coaching_needed, :follow_up_complete, :notes
-                    )
-                    ON CONFLICT (source_pk) DO UPDATE SET
-                        resolved_at = CURRENT_TIMESTAMP,
-                        found_date = EXCLUDED.found_date,
-                        issue_type = EXCLUDED.issue_type,
-                        associated_user = EXCLUDED.associated_user,
-                        how_found = EXCLUDED.how_found,
-                        root_cause = EXCLUDED.root_cause,
-                        severity = EXCLUDED.severity,
-                        resolution_action = EXCLUDED.resolution_action,
-                        coaching_needed = EXCLUDED.coaching_needed,
-                        follow_up_complete = EXCLUDED.follow_up_complete,
-                        notes = EXCLUDED.notes
-                """), {
-                    "source_pk": selected_issue["pk"],
-                    "found_date": found_date,
-                    "med_id": selected_issue["med_id"],
-                    "med_desc": selected_issue["med_desc"],
-                    "device": selected_issue["device"],
-                    "pocket_location": pocket_location,
-                    "issue_type": issue_type,
-                    "associated_user": associated_user,
-                    "how_found": how_found,
-                    "root_cause": root_cause,
-                    "severity": severity,
-                    "resolution_action": resolution_action,
-                    "coaching_needed": coaching_needed,
-                    "follow_up_complete": follow_up_complete,
-                    "notes": notes,
-                })
-            clear_quality_caches()
-            st.success("Resolution saved.")
-            st.rerun()
-
-        st.markdown("##### Candidate rows")
-        st.dataframe(
-            candidates[["logged", "dt", "user_name", "device", "med_id", "med_desc", "event_type", "qty", "beginning_qty", "ending_qty", "discrepancy_qty", "discrepancy_reason"]],
-            width="stretch",
-            hide_index=True,
-        )
-
-    st.markdown("##### Resolution history")
-    if resolution_log.empty:
-        st.info("No saved resolutions yet.")
-    else:
-        st.dataframe(resolution_log, width="stretch", hide_index=True)
 
 
 with tab_lifecycle:
