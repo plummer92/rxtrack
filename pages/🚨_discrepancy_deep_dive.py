@@ -1131,3 +1131,56 @@ else:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+        st.markdown("#### Coaching Drilldown")
+        selected_action_user = st.selectbox(
+            "Show occurrences for user",
+            action_plan["prior_refill_user"].tolist(),
+            key="verify_audit_action_plan_user_drilldown",
+        )
+        user_occurrences = filtered[
+            (filtered["prior_refill_by"] == selected_action_user) &
+            (filtered["evidence_status"].isin(["Strong refill-entry pattern", "Possible refill-entry pattern"]))
+        ].sort_values(["evidence_status", "abs_discrepancy_qty"], ascending=[True, False])
+        preferred_occurrences = user_occurrences[user_occurrences["abs_discrepancy_qty"] >= min_action_example_qty]
+        if preferred_occurrences.empty:
+            st.caption(
+                "No occurrences for this user met the selected quantity threshold, so showing all strong/possible occurrences."
+            )
+            preferred_occurrences = user_occurrences
+
+        drilldown_columns = [
+            "evidence_status", "dt", "device", "med_id", "med_desc", "user_name",
+            "discrepancy_qty", "qty", "prior_refill_dt", "prior_refill_qty",
+            "refill_date_pull_qty", "refill_qty_vs_pull", "verify_date_pull_qty",
+            "verify_qty_vs_pull", "inventory_events_since_refill", "evidence_reason",
+        ]
+        st.dataframe(
+            preferred_occurrences[drilldown_columns],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "evidence_status": st.column_config.TextColumn("Evidence"),
+                "dt": st.column_config.DatetimeColumn("Verify Time", format="MM/DD/YY HH:mm"),
+                "device": st.column_config.TextColumn("Pyxis"),
+                "med_id": st.column_config.TextColumn("Med ID"),
+                "med_desc": st.column_config.TextColumn("Medication"),
+                "user_name": st.column_config.TextColumn("Verify User"),
+                "discrepancy_qty": st.column_config.NumberColumn("Qty Off", format="%.0f"),
+                "qty": st.column_config.NumberColumn("Verify Qty", format="%.0f"),
+                "prior_refill_dt": st.column_config.DatetimeColumn("Prior Refill Time", format="MM/DD/YY HH:mm"),
+                "prior_refill_qty": st.column_config.NumberColumn("Refill Entered", format="%.0f"),
+                "refill_date_pull_qty": st.column_config.NumberColumn("Pull Qty", format="%.0f"),
+                "refill_qty_vs_pull": st.column_config.NumberColumn("Refill vs Pull", format="%.0f"),
+                "verify_date_pull_qty": st.column_config.NumberColumn("Verify-Date Pull", format="%.0f"),
+                "verify_qty_vs_pull": st.column_config.NumberColumn("Verify vs Pull", format="%.0f"),
+                "inventory_events_since_refill": st.column_config.NumberColumn("Inv Events Since", format="%d"),
+                "evidence_reason": st.column_config.TextColumn("Why It Matched"),
+            },
+        )
+        st.download_button(
+            f"Export {selected_action_user} Occurrences to Excel",
+            data=to_excel_bytes(preferred_occurrences[drilldown_columns]),
+            file_name=f"verify_count_audit_{selected_action_user.replace(',', '').replace(' ', '_').lower()}_occurrences.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
