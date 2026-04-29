@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -104,29 +104,27 @@ ensure_quality_tables()
 
 @st.cache_data(ttl=60)
 def load_events(start, end):
-    end_next = pd.to_datetime(end) + timedelta(days=1)
     sql = text("""
-        SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty,
+        SELECT pk, dt::timestamp AS dt, user_name, device, med_id, med_desc, event_type, qty,
                beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason, resolution_dt
         FROM events
-        WHERE dt >= :start_dt AND dt < :end_dt
-        ORDER BY dt DESC
+        WHERE dt::date BETWEEN :start_dt AND :end_dt
+        ORDER BY dt::timestamp DESC
     """)
     with engine.connect() as conn:
-        return pd.read_sql(sql, conn, params={"start_dt": start, "end_dt": end_next})
+        return pd.read_sql(sql, conn, params={"start_dt": start, "end_dt": end})
 
 
 @st.cache_data(ttl=60)
 def load_orders(start, end):
-    end_next = pd.to_datetime(end) + timedelta(days=1)
     sql = text("""
-        SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+        SELECT pk, queue_id, priority, dt::timestamp AS dt, med_id, med_desc, destination, user_name, qty
         FROM pharmacy_orders
-        WHERE dt >= :start_dt AND dt < :end_dt
-        ORDER BY dt DESC
+        WHERE dt::date BETWEEN :start_dt AND :end_dt
+        ORDER BY dt::timestamp DESC
     """)
     with engine.connect() as conn:
-        return pd.read_sql(sql, conn, params={"start_dt": start, "end_dt": end_next})
+        return pd.read_sql(sql, conn, params={"start_dt": start, "end_dt": end})
 
 
 @st.cache_data(ttl=60)
