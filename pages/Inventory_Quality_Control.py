@@ -152,9 +152,27 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts):
     base["current_count"] = pd.to_numeric(base["current_count"], errors="coerce").fillna(0)
     base["pocket_count"] = pd.to_numeric(base["pocket_count"], errors="coerce").fillna(0).astype(int)
     base["receiving_status"] = base["last_received"].apply(lambda value: "No Receiving Match" if pd.isna(value) else "Matched")
+    base["receiving_age_bucket"] = pd.cut(
+        base["days_since_last_received"],
+        bins=[-1, 30, 60, 90, 180, 99999],
+        labels=["0-30", "31-60", "61-90", "91-180", "180+"],
+    ).astype("object")
+    base["receiving_age_bucket"] = base["receiving_age_bucket"].where(
+        base["receiving_status"].eq("Matched"),
+        "No Receiving Match",
+    )
+    priority_map = {
+        "0-30": "Fresh",
+        "31-60": "Normal",
+        "61-90": "Watch",
+        "91-180": "Review",
+        "180+": "High Review",
+        "No Receiving Match": "Review Mapping / Legacy Item",
+    }
+    base["receiving_review_priority"] = base["receiving_age_bucket"].map(priority_map).fillna("Review")
 
     return base.sort_values(
-        ["receiving_status", "days_since_last_received", "isa_name", "med_desc"],
+        ["receiving_age_bucket", "days_since_last_received", "isa_name", "med_desc"],
         ascending=[True, False, True, True],
     )
 
@@ -190,18 +208,22 @@ h1, h2 = st.columns(2)
 h1.metric("Oldest Receiving Row", oldest_receipt.strftime("%m/%d/%Y") if pd.notna(oldest_receipt) else "Unknown")
 h2.metric("Newest Receiving Row", newest_receipt.strftime("%m/%d/%Y") if pd.notna(newest_receipt) else "Unknown")
 
-filter_col1, filter_col2, filter_col3 = st.columns(3)
+filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
 isa_options = sorted(isa_lifecycle["isa_name"].dropna().unique())
 selected_isas = filter_col1.multiselect("ISA", isa_options, default=isa_options[:1] if isa_options else [])
 status_options = ["Matched", "No Receiving Match"]
 selected_statuses = filter_col2.multiselect("Receiving status", status_options, default=status_options)
-med_search = filter_col3.text_input("Medication search")
+bucket_order = ["0-30", "31-60", "61-90", "91-180", "180+", "No Receiving Match"]
+selected_buckets = filter_col3.multiselect("Receiving age bucket", bucket_order, default=bucket_order)
+med_search = filter_col4.text_input("Medication search")
 
 view = isa_lifecycle.copy()
 if selected_isas:
     view = view[view["isa_name"].isin(selected_isas)]
 if selected_statuses:
     view = view[view["receiving_status"].isin(selected_statuses)]
+if selected_buckets:
+    view = view[view["receiving_age_bucket"].isin(selected_buckets)]
 if med_search:
     med_mask = (
         view["med_id"].str.contains(med_search, case=False, na=False)
@@ -220,18 +242,15 @@ v4.metric("Current Count", f"{view['current_count'].sum():,.0f}")
 
 chart_col1, chart_col2 = st.columns(2)
 with chart_col1:
-    aging = view[view["days_since_last_received"].notna()].copy()
-    if aging.empty:
-        st.info("No matched receiving dates to chart.")
-    else:
-        aging["aging_bucket"] = pd.cut(
-            aging["days_since_last_received"],
-            bins=[-1, 30, 60, 90, 180, 365, 99999],
-            labels=["0-30", "31-60", "61-90", "91-180", "181-365", "365+"],
-        )
-        bucket_summary = aging.groupby("aging_bucket", observed=False).size().reset_index(name="item_count")
-        st.markdown("##### Items by Days Since Last Received")
-        st.plotly_chart(px.bar(bucket_summary, x="aging_bucket", y="item_count"), width="stretch")
+    bucket_summary = (
+        view.groupby("receiving_age_bucket", dropna=False)
+        .size()
+        .reindex(bucket_order, fill_value=0)
+        .reset_index(name="item_count")
+        .rename(columns={"index": "receiving_age_bucket"})
+    )
+    st.markdown("##### Items by Receiving Age Bucket")
+    st.plotly_chart(px.bar(bucket_summary, x="receiving_age_bucket", y="item_count"), width="stretch")
 
 with chart_col2:
     top_old = (
@@ -260,6 +279,8 @@ display_cols = [
     "pocket_count",
     "last_received",
     "days_since_last_received",
+    "receiving_age_bucket",
+    "receiving_review_priority",
     "first_received",
     "days_since_first_received",
     "receiving_events",
