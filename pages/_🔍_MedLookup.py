@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+from sqlalchemy import bindparam, text
 import App
 
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
@@ -48,6 +49,35 @@ def get_matching_pyxis_events(med_desc, med_id, device, center_dt, hours_window)
         params = (start_dt, end_dt, med_desc, med_id, med_id)
 
     return pd.read_sql(query, engine, params=params)
+
+
+@st.cache_data(ttl=300)
+def get_current_pyxis_stock(med_desc, med_ids):
+    med_ids = [str(med_id).strip() for med_id in med_ids if pd.notna(med_id) and str(med_id).strip()]
+    if not med_ids:
+        med_ids = ["__NO_MED_ID__"]
+
+    query = text("""
+        SELECT
+            station,
+            med_id,
+            med_desc,
+            current_count,
+            pocket_location,
+            unit_cost,
+            current_count * COALESCE(unit_cost, 0) AS inventory_value
+        FROM inventory_detailed
+        WHERE COALESCE(current_count, 0) > 0
+          AND COALESCE(station, '') NOT ILIKE 'CAR%%'
+          AND (
+              med_desc = :med_desc
+              OR med_id IN :med_ids
+          )
+        ORDER BY station, pocket_location
+    """).bindparams(bindparam("med_ids", expanding=True))
+
+    with engine.connect() as conn:
+        return pd.read_sql(query, conn, params={"med_desc": med_desc, "med_ids": med_ids})
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
@@ -239,6 +269,46 @@ c1.metric("Matches Found", len(df_filtered))
 c2.metric("Pyxis Events", int(df_filtered['source'].eq('Pyxis Event').sum()))
 c3.metric("Carousel / Pull Rows", int(df_filtered['source'].eq('Carousel / Pyxis Pull').sum()))
 c4.metric("Detected Pyxis Gaps", int((df_filtered['count_gap'].notna() & (df_filtered['count_gap'] != 0)).sum()))
+
+# -------------------------------------------------
+# 8.5 Current Pyxis Stocking
+# -------------------------------------------------
+selected_med_ids = sorted(df_raw["med_id"].dropna().astype(str).str.strip().unique().tolist())
+stock_df = get_current_pyxis_stock(selected_med, selected_med_ids)
+
+st.subheader("Current Pyxis Stocking")
+st.caption(
+    "Current non-carousel locations from the detailed inventory upload. "
+    "Stations beginning with CAR are excluded so this focuses on Pyxis cabinet stock."
+)
+
+if stock_df.empty:
+    st.info("No current Pyxis stock was found for this medication in the latest detailed inventory upload.")
+else:
+    stock_df["current_count"] = pd.to_numeric(stock_df["current_count"], errors="coerce").fillna(0)
+    stock_df["unit_cost"] = pd.to_numeric(stock_df["unit_cost"], errors="coerce").fillna(0)
+    stock_df["inventory_value"] = pd.to_numeric(stock_df["inventory_value"], errors="coerce").fillna(0)
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Stocked Pyxis Machines", f"{stock_df['station'].nunique():,}")
+    s2.metric("Total Pyxis Count", f"{stock_df['current_count'].sum():,.0f}")
+    s3.metric("Estimated Value", f"${stock_df['inventory_value'].sum():,.2f}")
+
+    st.dataframe(
+        stock_df[[
+            "station", "pocket_location", "med_id", "med_desc",
+            "current_count", "unit_cost", "inventory_value"
+        ]],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "station": "Pyxis Machine",
+            "pocket_location": "Pocket",
+            "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
+            "unit_cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+            "inventory_value": st.column_config.NumberColumn("Value", format="$%.2f"),
+        },
+    )
 
 # -------------------------------------------------
 # 9️⃣ Timeline Display
