@@ -175,6 +175,27 @@ def init_db():
             packaged_by TEXT,
             confirmer TEXT
         );""",
+        """CREATE TABLE IF NOT EXISTS device_inventory (
+            pk TEXT PRIMARY KEY,
+            med_desc TEXT,
+            device TEXT,
+            zone TEXT,
+            pocket_location TEXT,
+            status TEXT,
+            brand_name TEXT,
+            med_id TEXT,
+            med_class TEXT,
+            current_quantity FLOAT,
+            min_qty FLOAT,
+            max_qty FLOAT,
+            outdate_tracking TEXT,
+            loaded_as_fraction TEXT,
+            backordered TEXT,
+            standard_stock TEXT,
+            active_orders TEXT,
+            days_unused FLOAT,
+            snapshot_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );""",
         """CREATE TABLE IF NOT EXISTS iv_room_workload (
             pk TEXT PRIMARY KEY,
             facility_name TEXT,
@@ -1216,6 +1237,62 @@ def clean_packaging_report(file_obj):
                 str(row["reception_num"]),
                 str(row["med_id"]),
                 str(row["hospital_lot_number"]),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    return df[["pk"] + required]
+
+
+def clean_device_inventory(df):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    med_desc_col = "MedDescription.1" if "MedDescription.1" in df.columns else "MedDescription"
+    colmap = {
+        med_desc_col: "med_desc",
+        "Device": "device",
+        "Zone": "zone",
+        "DrwSubDrwPkt": "pocket_location",
+        "Status": "status",
+        "BrandName": "brand_name",
+        "MedID": "med_id",
+        "MedClass": "med_class",
+        "CurrentQuantity": "current_quantity",
+        "Min": "min_qty",
+        "Max": "max_qty",
+        "OutdateTracking": "outdate_tracking",
+        "LoadedAsFraction": "loaded_as_fraction",
+        "Backordered": "backordered",
+        "StandardStock": "standard_stock",
+        "ActiveOrders": "active_orders",
+        "DaysUnused": "days_unused",
+    }
+    df = df.rename(columns=colmap)
+
+    required = list(colmap.values())
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    for col in [
+        "med_desc", "device", "zone", "pocket_location", "status", "brand_name",
+        "med_id", "med_class", "outdate_tracking", "loaded_as_fraction",
+        "backordered", "standard_stock", "active_orders",
+    ]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+
+    df["med_id"] = df["med_id"].str.upper()
+    for col in ["current_quantity", "min_qty", "max_qty", "days_unused"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    df = df[df["device"].ne("") & df["med_id"].ne("")].copy()
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                row["device"],
+                row["med_id"],
+                row["pocket_location"],
             ]).encode()
         ).hexdigest(),
         axis=1,
@@ -2310,7 +2387,7 @@ if _is_main:
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model",
-            "Days Since Last Cycle Count Report", "Packaging Report"
+            "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded = st.file_uploader(f"Upload {u_type}", type=upload_types)
@@ -2389,6 +2466,38 @@ if _is_main:
                                      %(unit_cost)s, %(current_count)s, %(pocket_location)s)
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Detailed Inventory")
+
+                elif u_type == "Device Inventory List":
+                    clean = clean_device_inventory(raw)
+                    sql = """INSERT INTO device_inventory
+                             (pk, med_desc, device, zone, pocket_location, status, brand_name, med_id, med_class,
+                              current_quantity, min_qty, max_qty, outdate_tracking, loaded_as_fraction,
+                              backordered, standard_stock, active_orders, days_unused, snapshot_dt)
+                             VALUES (%(pk)s, %(med_desc)s, %(device)s, %(zone)s, %(pocket_location)s, %(status)s,
+                                     %(brand_name)s, %(med_id)s, %(med_class)s, %(current_quantity)s, %(min_qty)s,
+                                     %(max_qty)s, %(outdate_tracking)s, %(loaded_as_fraction)s, %(backordered)s,
+                                     %(standard_stock)s, %(active_orders)s, %(days_unused)s, NOW())
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 med_desc = EXCLUDED.med_desc,
+                                 zone = EXCLUDED.zone,
+                                 status = EXCLUDED.status,
+                                 brand_name = EXCLUDED.brand_name,
+                                 med_class = EXCLUDED.med_class,
+                                 current_quantity = EXCLUDED.current_quantity,
+                                 min_qty = EXCLUDED.min_qty,
+                                 max_qty = EXCLUDED.max_qty,
+                                 outdate_tracking = EXCLUDED.outdate_tracking,
+                                 loaded_as_fraction = EXCLUDED.loaded_as_fraction,
+                                 backordered = EXCLUDED.backordered,
+                                 standard_stock = EXCLUDED.standard_stock,
+                                 active_orders = EXCLUDED.active_orders,
+                                 days_unused = EXCLUDED.days_unused,
+                                 snapshot_dt = NOW();"""
+                    with db_cursor() as (conn, cur):
+                        cur.execute("DELETE FROM device_inventory;")
+                        conn.commit()
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Device Inventory")
+
                 elif u_type == "Days Since Last Cycle Count Report":
                     clean = clean_cycle_count_status_report(uploaded)
                     sql = """INSERT INTO cycle_count_status
