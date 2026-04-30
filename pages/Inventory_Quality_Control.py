@@ -112,6 +112,26 @@ def load_inventory_counts():
 
 
 @st.cache_data(ttl=60)
+def load_current_pyxis_inventory():
+    sql = text("""
+        SELECT
+            station,
+            med_id,
+            med_desc,
+            current_count,
+            pocket_location,
+            unit_cost,
+            current_count * COALESCE(unit_cost, 0) AS inventory_value
+        FROM inventory_detailed
+        WHERE COALESCE(current_count, 0) > 0
+          AND COALESCE(station, '') NOT ILIKE 'CAR%%'
+        ORDER BY station, pocket_location
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
 def load_packaging_history():
     sql = text("""
         SELECT
@@ -175,6 +195,20 @@ def prep_packaging(df):
     out["qty_per_pack"] = pd.to_numeric(out["qty_per_pack"], errors="coerce").fillna(0)
     out["qoh"] = pd.to_numeric(out["qoh"], errors="coerce").fillna(0)
     return out.dropna(subset=["dispense_dt"])
+
+
+def prep_pyxis_inventory(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    out["station"] = out["station"].fillna("").astype(str).str.strip()
+    out["med_id"] = out["med_id"].fillna("").astype(str).str.strip().str.upper()
+    out["med_desc"] = out["med_desc"].fillna("").astype(str).str.strip()
+    out["pocket_location"] = out["pocket_location"].fillna("").astype(str).str.strip()
+    out["current_count"] = pd.to_numeric(out["current_count"], errors="coerce").fillna(0)
+    out["unit_cost"] = pd.to_numeric(out["unit_cost"], errors="coerce").fillna(0)
+    out["inventory_value"] = pd.to_numeric(out["inventory_value"], errors="coerce").fillna(0)
+    return out
 
 
 def build_receiving_summary(receiving):
@@ -293,6 +327,7 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
 receiving = prep_receiving(load_receiving_history())
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
+pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
 packaging = prep_packaging(load_packaging_history())
 receiving_summary = build_receiving_summary(receiving)
 packaging_summary = build_packaging_summary(packaging)
@@ -439,7 +474,77 @@ display_cols = [
     "last_packaged_by",
     "latest_hospital_lot_number",
 ]
-st.dataframe(view[display_cols], width="stretch", hide_index=True)
+selected_table = st.dataframe(
+    view[display_cols],
+    width="stretch",
+    hide_index=True,
+    on_select="rerun",
+    selection_mode="single-row",
+    column_config={
+        "last_received": st.column_config.DatetimeColumn("Last Received", format="MM/DD/YYYY HH:mm"),
+        "first_received": st.column_config.DatetimeColumn("First Received", format="MM/DD/YYYY HH:mm"),
+        "last_packaged": st.column_config.DatetimeColumn("Last Packaged", format="MM/DD/YYYY HH:mm"),
+        "latest_packaged_expire_date": st.column_config.DatetimeColumn("Packaged Expire", format="MM/DD/YYYY"),
+        "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
+        "pocket_count": st.column_config.NumberColumn("Carousel Pockets", format="%d"),
+        "days_since_last_received": st.column_config.NumberColumn("Days Since Received", format="%.0f"),
+        "days_until_packaged_expire": st.column_config.NumberColumn("Days Until Packaged Expire", format="%.0f"),
+    },
+)
+
+if selected_table.selection.rows:
+    selected_row = view[display_cols].reset_index(drop=True).iloc[selected_table.selection.rows[0]]
+    selected_med_id = str(selected_row["med_id"]).strip().upper()
+    selected_med_desc = selected_row["med_desc"]
+    pyxis_matches = pyxis_inventory[pyxis_inventory["med_id"].eq(selected_med_id)].copy()
+
+    st.divider()
+    st.subheader("Selected Med Current Pyxis Stocking")
+    st.caption(
+        "These are current non-carousel Pyxis locations for the selected ISA item. "
+        "`CAR` stations are excluded because they are carousel/pharmacy inventory."
+    )
+
+    detail_1, detail_2, detail_3, detail_4 = st.columns(4)
+    detail_1.metric("Selected Med", selected_med_id)
+    detail_2.metric("Receiving Bucket", selected_row.get("receiving_age_bucket", ""))
+    detail_3.metric(
+        "Days Since Received",
+        "N/A" if pd.isna(selected_row.get("days_since_last_received")) else f"{selected_row.get('days_since_last_received'):.0f}",
+    )
+    detail_4.metric("Pyxis Machines Stocking", f"{pyxis_matches['station'].nunique() if not pyxis_matches.empty else 0:,}")
+
+    st.markdown(f"**{selected_med_desc}**")
+
+    if pyxis_matches.empty:
+        st.info("This selected med is not currently stocked in any non-carousel Pyxis machine in the latest detailed inventory upload.")
+    else:
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Total Pyxis Count", f"{pyxis_matches['current_count'].sum():,.0f}")
+        p2.metric("Pyxis Pockets", f"{len(pyxis_matches):,}")
+        p3.metric("Estimated Value", f"${pyxis_matches['inventory_value'].sum():,.2f}")
+
+        pyxis_cols = [
+            "station",
+            "pocket_location",
+            "med_id",
+            "med_desc",
+            "current_count",
+            "unit_cost",
+            "inventory_value",
+        ]
+        st.dataframe(
+            pyxis_matches[pyxis_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "station": "Pyxis Machine",
+                "pocket_location": "Pocket",
+                "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
+                "unit_cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                "inventory_value": st.column_config.NumberColumn("Value", format="$%.2f"),
+            },
+        )
 
 st.download_button(
     "Download ISA receiving lifecycle CSV",
