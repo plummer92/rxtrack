@@ -22,6 +22,35 @@ else:
     st.caption("Days since last received by ISA item.")
 
 
+def ensure_packaging_table():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS packaged_meds (
+                pk TEXT PRIMARY KEY,
+                dispense_dt TIMESTAMP,
+                reception_num TEXT,
+                med_id TEXT,
+                med_desc TEXT,
+                dose_form TEXT,
+                qty_per_pack FLOAT,
+                qoh FLOAT,
+                manufacturer TEXT,
+                ndc TEXT,
+                mfg_lot_number TEXT,
+                mfg_expire_date DATE,
+                device_id TEXT,
+                hospital_lot_number TEXT,
+                hospital_expire_date DATE,
+                bud DATE,
+                packaged_by TEXT,
+                confirmer TEXT
+            )
+        """))
+
+
+ensure_packaging_table()
+
+
 @st.cache_data(ttl=60)
 def load_receiving_history():
     sql = text("""
