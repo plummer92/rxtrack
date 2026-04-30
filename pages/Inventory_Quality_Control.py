@@ -14,12 +14,12 @@ start_date, end_date = App.render_sidebar()
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Inventory Quality Control",
-        "Start with the daily pharmacy workflow orders that represent medication receiving into the carousel.",
-        kicker="Receiving Orders",
+        "Start with true Receiving rows from the pharmacy workflow table, with the option to inspect the broader carousel workflow event mix.",
+        kicker="Carousel Workflow",
     )
 else:
     st.header("Inventory Quality Control")
-    st.caption("Receiving orders into the carousel by event type.")
+    st.caption("Carousel workflow events with a default focus on true receiving.")
 
 
 @st.cache_data(ttl=60)
@@ -77,8 +77,8 @@ def prep_orders(df):
 orders = prep_orders(load_pharmacy_orders(start_date, end_date))
 bounds = load_all_pharmacy_order_bounds()
 
-st.subheader("Receiving Orders Into Carousel")
-st.caption("This table uses the Pharmacy Workflow upload. In that file, `Priority` is treated as the event type.")
+st.subheader("Carousel Workflow Events")
+st.caption("This table uses the Pharmacy Workflow upload. `Priority` is the event type; true receiving rows are `Receiving`.")
 
 if bounds.empty or int(bounds.loc[0, "order_rows"] or 0) == 0:
     st.warning("No pharmacy workflow order data is loaded yet.")
@@ -90,23 +90,31 @@ first_loaded = pd.to_datetime(bounds.loc[0, "first_order_dt"], errors="coerce")
 last_loaded = pd.to_datetime(bounds.loc[0, "last_order_dt"], errors="coerce")
 
 g1, g2, g3, g4 = st.columns(4)
-g1.metric("All Loaded Order Rows", f"{total_rows:,}")
+g1.metric("All Loaded Workflow Rows", f"{total_rows:,}")
 g2.metric("All Loaded Meds", f"{total_meds:,}")
 g3.metric("Oldest Loaded Order", first_loaded.strftime("%m/%d/%Y") if pd.notna(first_loaded) else "Unknown")
 g4.metric("Newest Loaded Order", last_loaded.strftime("%m/%d/%Y") if pd.notna(last_loaded) else "Unknown")
 
 if orders.empty:
-    st.info("No receiving orders found for the selected date range.")
+    st.info("No pharmacy workflow rows found for the selected date range.")
     st.stop()
 
 all_event_types = sorted(orders["event_type"].dropna().unique())
 all_destinations = sorted(orders["destination"].dropna().unique())
+receiving_event_types = [event_type for event_type in all_event_types if event_type.lower() == "receiving"]
+default_event_types = receiving_event_types or all_event_types
+
+show_all_events = st.toggle(
+    "Show all workflow event types",
+    value=False,
+    help="Off = true Receiving rows only. On = inspect every Pharmacy Workflow event type in the selected date range.",
+)
 
 f1, f2, f3 = st.columns(3)
 selected_event_types = f1.multiselect(
     "Event type",
     all_event_types,
-    default=all_event_types,
+    default=all_event_types if show_all_events else default_event_types,
 )
 selected_destinations = f2.multiselect("Destination", all_destinations)
 med_search = f3.text_input("Medication search")
@@ -129,6 +137,9 @@ m2.metric("Filtered Meds", f"{view['med_id'].nunique():,}")
 m3.metric("Filtered Qty", f"{view['qty'].sum():,.0f}")
 m4.metric("Event Types", f"{view['event_type'].nunique():,}")
 
+if not receiving_event_types:
+    st.warning("No `Receiving` event type was found in this date range. Turn on all workflow event types or expand the date range.")
+
 chart_col1, chart_col2 = st.columns(2)
 with chart_col1:
     event_summary = (
@@ -137,7 +148,7 @@ with chart_col1:
         .reset_index()
         .sort_values("order_rows", ascending=False)
     )
-    st.markdown("##### Orders by Event Type")
+    st.markdown("##### Workflow Rows by Event Type")
     st.plotly_chart(
         px.bar(event_summary, x="order_rows", y="event_type", orientation="h"),
         width="stretch",
@@ -150,12 +161,12 @@ with chart_col2:
         .reset_index()
         .sort_values("order_date")
     )
-    st.markdown("##### Daily Receiving Volume")
+    st.markdown("##### Daily Volume")
     st.plotly_chart(px.bar(daily_summary, x="order_date", y="order_rows"), width="stretch")
 
 detail_col1, detail_col2 = st.columns(2)
 with detail_col1:
-    st.markdown("##### Top Meds Received")
+    st.markdown("##### Top Meds")
     med_summary = (
         view.groupby(["med_id", "med_desc"], dropna=False)
         .agg(order_rows=("pk", "count"), total_qty=("qty", "sum"), last_received=("dt", "max"))
@@ -176,13 +187,13 @@ with detail_col2:
     )
     st.dataframe(dest_summary, width="stretch", hide_index=True)
 
-st.markdown("##### Receiving Order Detail")
+st.markdown("##### Workflow Detail")
 display_cols = ["dt", "queue_id", "event_type", "med_id", "med_desc", "destination", "user_name", "qty"]
 st.dataframe(view[display_cols], width="stretch", hide_index=True)
 
 st.download_button(
-    "Download filtered receiving orders CSV",
+    "Download filtered workflow CSV",
     data=view[display_cols].to_csv(index=False).encode("utf-8"),
-    file_name="receiving_orders_by_event_type.csv",
+    file_name="carousel_workflow_events.csv",
     mime="text/csv",
 )
