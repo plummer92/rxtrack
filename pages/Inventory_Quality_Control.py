@@ -106,6 +106,18 @@ def load_orders(start, end):
 
 
 @st.cache_data(ttl=60)
+def load_all_orders():
+    sql = text("""
+        SELECT pk, queue_id, priority, dt::timestamp AS dt, med_id, med_desc, destination, user_name, qty
+        FROM pharmacy_orders
+        WHERE dt IS NOT NULL
+        ORDER BY dt::timestamp DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
 def load_inventory():
     sql = text("""
         SELECT station, med_id, med_desc, unit_cost, current_count, pocket_location
@@ -132,6 +144,7 @@ def clear_quality_caches():
     load_cancel_review_log.clear()
     load_events.clear()
     load_orders.clear()
+    load_all_orders.clear()
     load_inventory.clear()
 
 
@@ -269,7 +282,8 @@ def build_lifecycle_risk(events, orders, inventory):
 
 
 events = load_events(start_date, end_date)
-orders = load_orders(start_date, end_date)
+orders_in_range = load_orders(start_date, end_date)
+all_orders = load_all_orders()
 inventory = load_inventory()
 
 tab_lifecycle, tab_orders, tab_receive, tab_cancel = st.tabs([
@@ -284,10 +298,10 @@ with tab_orders:
     st.subheader("Daily Pharmacy Workflow Orders")
     st.caption("These rows come from the Pharmacy Workflow upload and act as the receiving/order stream for lifecycle risk.")
 
-    if orders.empty:
+    if orders_in_range.empty:
         st.info("No pharmacy workflow orders found in the selected date range.")
     else:
-        order_view = orders.copy()
+        order_view = orders_in_range.copy()
         order_view["dt"] = pd.to_datetime(order_view["dt"], errors="coerce")
         order_view["order_date"] = order_view["dt"].dt.date
         order_view["priority"] = order_view["priority"].fillna("Unknown").astype(str)
@@ -351,6 +365,19 @@ with tab_orders:
             file_name="daily_receiving_orders.csv",
             mime="text/csv",
         )
+
+    st.markdown("##### Full receiving history loaded into lifecycle risk")
+    if all_orders.empty:
+        st.info("No pharmacy workflow receiving/order history is loaded.")
+    else:
+        all_order_view = all_orders.copy()
+        all_order_view["dt"] = pd.to_datetime(all_order_view["dt"], errors="coerce")
+        all_order_view["qty"] = pd.to_numeric(all_order_view["qty"], errors="coerce").fillna(0)
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("All Receiving Rows", f"{len(all_order_view):,}")
+        h2.metric("All Unique Meds", f"{all_order_view['med_id'].nunique():,}")
+        h3.metric("Oldest Receipt", all_order_view["dt"].min().strftime("%m/%d/%Y") if all_order_view["dt"].notna().any() else "Unknown")
+        h4.metric("Newest Receipt", all_order_view["dt"].max().strftime("%m/%d/%Y") if all_order_view["dt"].notna().any() else "Unknown")
 
 
 with tab_receive:
@@ -508,11 +535,11 @@ with tab_cancel:
 
 with tab_lifecycle:
     st.subheader("Medication Lifecycle Risk")
-    st.caption("This first model uses order/restock timestamps as the lifecycle start signal until exact manufacturer expiration dates are added.")
+    st.caption("Risk scoring uses all loaded pharmacy workflow receiving/order history, plus Pyxis activity from the selected date range.")
 
-    risk = build_lifecycle_risk(events, orders, inventory)
+    risk = build_lifecycle_risk(events, all_orders, inventory)
     if risk.empty:
-        st.info("No lifecycle data available for the selected date range.")
+        st.info("No lifecycle data available yet. Load pharmacy workflow receiving/orders first.")
     else:
         level_filter = st.multiselect(
             "Risk level",
@@ -521,11 +548,12 @@ with tab_lifecycle:
         )
         filtered_risk = risk[risk["risk_level"].isin(level_filter)].copy() if level_filter else risk.copy()
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Meds Scored", f"{len(risk):,}")
         c2.metric("Critical", f"{int((risk['risk_level'] == 'Critical').sum()):,}")
         c3.metric("High", f"{int((risk['risk_level'] == 'High').sum()):,}")
         c4.metric("With Current Stock", f"{int((risk['current_count'] > 0).sum()):,}")
+        c5.metric("Receiving Rows Used", f"{len(all_orders):,}")
 
         chart_df = filtered_risk.head(20).copy()
         chart_df["med_label"] = chart_df["med_desc"].fillna(chart_df["med_id"]).astype(str).str.slice(0, 55)
