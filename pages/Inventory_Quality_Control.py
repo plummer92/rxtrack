@@ -82,6 +82,31 @@ def load_inventory_counts():
         return pd.read_sql(sql, conn)
 
 
+@st.cache_data(ttl=60)
+def load_packaging_history():
+    sql = text("""
+        SELECT
+            dispense_dt,
+            med_id,
+            med_desc,
+            dose_form,
+            qty_per_pack,
+            qoh,
+            manufacturer,
+            mfg_expire_date,
+            hospital_lot_number,
+            hospital_expire_date,
+            bud,
+            packaged_by,
+            confirmer
+        FROM packaged_meds
+        WHERE dispense_dt IS NOT NULL
+        ORDER BY dispense_dt DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
 def prep_receiving(df):
     if df.empty:
         return df
@@ -107,6 +132,22 @@ def prep_isa_items(df):
     return out
 
 
+def prep_packaging(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    out["dispense_dt"] = pd.to_datetime(out["dispense_dt"], errors="coerce")
+    out["med_id"] = out["med_id"].fillna("").astype(str).str.strip().str.upper()
+    out["med_desc"] = out["med_desc"].fillna("").astype(str).str.strip()
+    out["hospital_expire_date"] = pd.to_datetime(out["hospital_expire_date"], errors="coerce")
+    out["bud"] = pd.to_datetime(out["bud"], errors="coerce")
+    out["packaged_expire_date"] = out["hospital_expire_date"].fillna(out["bud"])
+    out["packaged_expire_date"] = out["packaged_expire_date"].fillna(out["dispense_dt"] + pd.Timedelta(days=365))
+    out["qty_per_pack"] = pd.to_numeric(out["qty_per_pack"], errors="coerce").fillna(0)
+    out["qoh"] = pd.to_numeric(out["qoh"], errors="coerce").fillna(0)
+    return out.dropna(subset=["dispense_dt"])
+
+
 def build_receiving_summary(receiving):
     if receiving.empty:
         return pd.DataFrame(columns=[
@@ -127,11 +168,39 @@ def build_receiving_summary(receiving):
     return summary.merge(last_rows, on="med_id", how="left")
 
 
-def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts):
+def build_packaging_summary(packaging):
+    if packaging.empty:
+        return pd.DataFrame(columns=[
+            "med_id", "last_packaged", "packaging_events", "latest_packaged_expire_date",
+            "last_packaged_by", "latest_hospital_lot_number",
+        ])
+
+    sorted_packaging = packaging.sort_values("dispense_dt")
+    summary = sorted_packaging.groupby("med_id", dropna=False).agg(
+        last_packaged=("dispense_dt", "max"),
+        first_packaged=("dispense_dt", "min"),
+        packaging_events=("dispense_dt", "count"),
+        latest_packaged_expire_date=("packaged_expire_date", "max"),
+    ).reset_index()
+
+    last_rows = sorted_packaging.groupby("med_id", dropna=False).tail(1)[[
+        "med_id", "packaged_by", "hospital_lot_number", "manufacturer",
+    ]]
+    last_rows = last_rows.rename(columns={
+        "packaged_by": "last_packaged_by",
+        "hospital_lot_number": "latest_hospital_lot_number",
+        "manufacturer": "latest_packaged_manufacturer",
+    })
+    return summary.merge(last_rows, on="med_id", how="left")
+
+
+def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary):
     if isa_items.empty:
         return pd.DataFrame()
 
     base = isa_items.merge(receiving_summary, on="med_id", how="left")
+    if not packaging_summary.empty:
+        base = base.merge(packaging_summary, on="med_id", how="left")
     if not inventory_counts.empty:
         inv = inventory_counts.copy()
         inv["isa_name"] = inv["isa_name"].fillna("").astype(str).str.strip()
@@ -143,8 +212,22 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts):
     base["first_received"] = pd.to_datetime(base["first_received"], errors="coerce")
     base["days_since_last_received"] = (today - base["last_received"]).dt.days
     base["days_since_first_received"] = (today - base["first_received"]).dt.days
+    if "last_packaged" not in base.columns:
+        base["last_packaged"] = pd.NaT
+    if "latest_packaged_expire_date" not in base.columns:
+        base["latest_packaged_expire_date"] = pd.NaT
+    base["last_packaged"] = pd.to_datetime(base["last_packaged"], errors="coerce")
+    base["latest_packaged_expire_date"] = pd.to_datetime(base["latest_packaged_expire_date"], errors="coerce")
+    base["days_since_last_packaged"] = (today - base["last_packaged"]).dt.days
+    base["days_until_packaged_expire"] = (base["latest_packaged_expire_date"] - today).dt.days
     base["receiving_events"] = pd.to_numeric(base["receiving_events"], errors="coerce").fillna(0).astype(int)
     base["total_received_qty"] = pd.to_numeric(base["total_received_qty"], errors="coerce").fillna(0)
+    if "packaging_events" not in base.columns:
+        base["packaging_events"] = 0
+    for col in ["last_packaged_by", "latest_hospital_lot_number", "latest_packaged_manufacturer"]:
+        if col not in base.columns:
+            base[col] = ""
+    base["packaging_events"] = pd.to_numeric(base["packaging_events"], errors="coerce").fillna(0).astype(int)
     if "current_count" not in base.columns:
         base["current_count"] = 0
     if "pocket_count" not in base.columns:
@@ -152,6 +235,7 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts):
     base["current_count"] = pd.to_numeric(base["current_count"], errors="coerce").fillna(0)
     base["pocket_count"] = pd.to_numeric(base["pocket_count"], errors="coerce").fillna(0).astype(int)
     base["receiving_status"] = base["last_received"].apply(lambda value: "No Receiving Match" if pd.isna(value) else "Matched")
+    base["packaging_status"] = base["last_packaged"].apply(lambda value: "Packaged" if pd.notna(value) else "Not Packaged")
     base["receiving_age_bucket"] = pd.cut(
         base["days_since_last_received"],
         bins=[-1, 30, 60, 90, 180, 99999],
@@ -180,8 +264,10 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts):
 receiving = prep_receiving(load_receiving_history())
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
+packaging = prep_packaging(load_packaging_history())
 receiving_summary = build_receiving_summary(receiving)
-isa_lifecycle = build_isa_lifecycle(isa_items, receiving_summary, inventory_counts)
+packaging_summary = build_packaging_summary(packaging)
+isa_lifecycle = build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary)
 
 st.subheader("ISA Receiving Lifecycle")
 st.caption("This starts the med lifecycle clock from Pharmacy Workflow rows where event type is exactly `Receiving`.")
@@ -204,9 +290,10 @@ m2.metric("Items With Receiving Match", f"{int((isa_lifecycle['receiving_status'
 m3.metric("Receiving Rows Loaded", f"{len(receiving):,}")
 m4.metric("ISA Snapshot", snapshot_date.strftime("%m/%d/%Y") if pd.notna(snapshot_date) else "Unknown")
 
-h1, h2 = st.columns(2)
+h1, h2, h3 = st.columns(3)
 h1.metric("Oldest Receiving Row", oldest_receipt.strftime("%m/%d/%Y") if pd.notna(oldest_receipt) else "Unknown")
 h2.metric("Newest Receiving Row", newest_receipt.strftime("%m/%d/%Y") if pd.notna(newest_receipt) else "Unknown")
+h3.metric("Packaged ISA Items", f"{int((isa_lifecycle['packaging_status'] == 'Packaged').sum()):,}")
 
 filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
 isa_options = sorted(isa_lifecycle["isa_name"].dropna().unique())
@@ -217,6 +304,12 @@ bucket_order = ["0-30", "31-60", "61-90", "91-180", "180+", "No Receiving Match"
 selected_buckets = filter_col3.multiselect("Receiving age bucket", bucket_order, default=bucket_order)
 med_search = filter_col4.text_input("Medication search")
 
+pack_filter = st.segmented_control(
+    "Packaging filter",
+    ["All", "Packaged only", "Not packaged only"],
+    default="All",
+)
+
 view = isa_lifecycle.copy()
 if selected_isas:
     view = view[view["isa_name"].isin(selected_isas)]
@@ -224,6 +317,10 @@ if selected_statuses:
     view = view[view["receiving_status"].isin(selected_statuses)]
 if selected_buckets:
     view = view[view["receiving_age_bucket"].isin(selected_buckets)]
+if pack_filter == "Packaged only":
+    view = view[view["packaging_status"].eq("Packaged")]
+elif pack_filter == "Not packaged only":
+    view = view[view["packaging_status"].eq("Not Packaged")]
 if med_search:
     med_mask = (
         view["med_id"].str.contains(med_search, case=False, na=False)
@@ -269,6 +366,23 @@ with chart_col2:
             width="stretch",
         )
 
+packaged_review = view[
+    view["packaging_status"].eq("Packaged")
+    & view["days_until_packaged_expire"].notna()
+    & (view["days_until_packaged_expire"] <= 90)
+].copy()
+if not packaged_review.empty:
+    st.markdown("##### Packaged Items Expiring Within 90 Days")
+    exp_cols = [
+        "isa_name", "location", "med_id", "med_desc", "last_packaged",
+        "latest_packaged_expire_date", "days_until_packaged_expire", "last_packaged_by",
+    ]
+    st.dataframe(
+        packaged_review.sort_values("days_until_packaged_expire")[exp_cols],
+        width="stretch",
+        hide_index=True,
+    )
+
 st.markdown("##### ISA Item Lifecycle Table")
 display_cols = [
     "isa_name",
@@ -287,6 +401,14 @@ display_cols = [
     "total_received_qty",
     "last_received_by",
     "receiving_status",
+    "packaging_status",
+    "last_packaged",
+    "days_since_last_packaged",
+    "latest_packaged_expire_date",
+    "days_until_packaged_expire",
+    "packaging_events",
+    "last_packaged_by",
+    "latest_hospital_lot_number",
 ]
 st.dataframe(view[display_cols], width="stretch", hide_index=True)
 
@@ -300,3 +422,13 @@ st.download_button(
 with st.expander("Raw receiving rows"):
     raw_cols = ["received_dt", "queue_id", "med_id", "med_desc", "user_name", "qty"]
     st.dataframe(receiving[raw_cols], width="stretch", hide_index=True)
+
+with st.expander("Raw packaging rows"):
+    if packaging.empty:
+        st.info("No packaging report rows are loaded yet.")
+    else:
+        package_cols = [
+            "dispense_dt", "med_id", "med_desc", "qty_per_pack", "qoh",
+            "manufacturer", "hospital_lot_number", "packaged_expire_date", "packaged_by", "confirmer",
+        ]
+        st.dataframe(packaging[package_cols], width="stretch", hide_index=True)

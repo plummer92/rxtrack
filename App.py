@@ -155,6 +155,26 @@ def init_db():
             days_since_last_count FLOAT,
             days_over_due FLOAT
         );""",
+        """CREATE TABLE IF NOT EXISTS packaged_meds (
+            pk TEXT PRIMARY KEY,
+            dispense_dt TIMESTAMP,
+            reception_num TEXT,
+            med_id TEXT,
+            med_desc TEXT,
+            dose_form TEXT,
+            qty_per_pack FLOAT,
+            qoh FLOAT,
+            manufacturer TEXT,
+            ndc TEXT,
+            mfg_lot_number TEXT,
+            mfg_expire_date DATE,
+            device_id TEXT,
+            hospital_lot_number TEXT,
+            hospital_expire_date DATE,
+            bud DATE,
+            packaged_by TEXT,
+            confirmer TEXT
+        );""",
         """CREATE TABLE IF NOT EXISTS iv_room_workload (
             pk TEXT PRIMARY KEY,
             facility_name TEXT,
@@ -1127,6 +1147,80 @@ def clean_cycle_count_status_report(file_obj):
     df = df.astype(object)
     df = df.where(pd.notna(df), None)
     return df[["pk", "snapshot_date", "source_filename"] + required]
+
+
+def clean_packaging_report(file_obj):
+    file_obj.seek(0)
+    name = getattr(file_obj, "name", "packaging_report")
+
+    if str(name).lower().endswith(".xlsx"):
+        df = pd.read_excel(file_obj)
+    else:
+        raw_bytes = file_obj.read()
+        text = raw_bytes.decode("utf-8-sig", errors="replace")
+        lines = text.splitlines()
+        header_idx = next(
+            (idx for idx, line in enumerate(lines) if "Dispense Time" in line and "Med ID" in line),
+            0,
+        )
+        df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])), sep="\t", dtype=str)
+
+    df.columns = [str(c).strip() for c in df.columns]
+    colmap = {
+        "Dispense Time": "dispense_dt",
+        "Reception num.": "reception_num",
+        "Med ID": "med_id",
+        "Medicine Name": "med_desc",
+        "Dose Form": "dose_form",
+        "Qty per Pack": "qty_per_pack",
+        "QOH": "qoh",
+        "Manufacturer": "manufacturer",
+        "NDC": "ndc",
+        "MFG Lot Number": "mfg_lot_number",
+        "MFG Expire Date": "mfg_expire_date",
+        "Dev.ID": "device_id",
+        "Hospital Lot Number": "hospital_lot_number",
+        "Hospital Expire Date": "hospital_expire_date",
+        "BUD": "bud",
+        "User Name": "packaged_by",
+        "Confirmer": "confirmer",
+    }
+    df = df.rename(columns=colmap)
+
+    required = list(colmap.values())
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    df["dispense_dt"] = pd.to_datetime(df["dispense_dt"], errors="coerce")
+    df = df.dropna(subset=["dispense_dt"]).copy()
+    df["med_id"] = df["med_id"].fillna("").astype(str).str.strip().str.upper()
+    df["med_desc"] = df["med_desc"].fillna("").astype(str).str.strip()
+    df["reception_num"] = df["reception_num"].fillna("").astype(str).str.strip()
+    df["qty_per_pack"] = pd.to_numeric(df["qty_per_pack"], errors="coerce").fillna(0)
+    df["qoh"] = pd.to_numeric(df["qoh"], errors="coerce").fillna(0)
+    df["mfg_expire_date"] = pd.to_datetime(df["mfg_expire_date"], errors="coerce").dt.date
+    df["hospital_expire_date"] = pd.to_datetime(df["hospital_expire_date"], errors="coerce").dt.date
+    df["bud"] = pd.to_datetime(df["bud"], errors="coerce").dt.date
+
+    for col in [
+        "dose_form", "manufacturer", "ndc", "mfg_lot_number", "device_id",
+        "hospital_lot_number", "packaged_by", "confirmer",
+    ]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row["dispense_dt"]),
+                str(row["reception_num"]),
+                str(row["med_id"]),
+                str(row["hospital_lot_number"]),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    return df[["pk"] + required]
 
 
 def clean_iv_room_report(df):
@@ -2216,14 +2310,15 @@ if _is_main:
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model",
-            "Days Since Last Cycle Count Report"
+            "Days Since Last Cycle Count Report", "Packaging Report"
         ])
-        uploaded = st.file_uploader(f"Upload {u_type}", type=["csv", "xlsx"])
+        upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
+        uploaded = st.file_uploader(f"Upload {u_type}", type=upload_types)
         if uploaded and st.button(f"Process {u_type}"):
             try:
                 processed_count = 0
                 # 1. Load raw file
-                if u_type in {"IV Overnight Cartfill Model", "Days Since Last Cycle Count Report"}:
+                if u_type in {"IV Overnight Cartfill Model", "Days Since Last Cycle Count Report", "Packaging Report"}:
                     raw = None
                 elif uploaded.name.endswith('.xlsx'):
                     raw = pd.read_excel(uploaded)
@@ -2311,6 +2406,34 @@ if _is_main:
                                  days_since_last_count = EXCLUDED.days_since_last_count,
                                  days_over_due = EXCLUDED.days_over_due;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cycle Count Status")
+
+                elif u_type == "Packaging Report":
+                    clean = clean_packaging_report(uploaded)
+                    sql = """INSERT INTO packaged_meds
+                             (pk, dispense_dt, reception_num, med_id, med_desc, dose_form, qty_per_pack, qoh,
+                              manufacturer, ndc, mfg_lot_number, mfg_expire_date, device_id,
+                              hospital_lot_number, hospital_expire_date, bud, packaged_by, confirmer)
+                             VALUES (%(pk)s, %(dispense_dt)s, %(reception_num)s, %(med_id)s, %(med_desc)s,
+                                     %(dose_form)s, %(qty_per_pack)s, %(qoh)s, %(manufacturer)s, %(ndc)s,
+                                     %(mfg_lot_number)s, %(mfg_expire_date)s, %(device_id)s,
+                                     %(hospital_lot_number)s, %(hospital_expire_date)s, %(bud)s,
+                                     %(packaged_by)s, %(confirmer)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 med_desc = EXCLUDED.med_desc,
+                                 dose_form = EXCLUDED.dose_form,
+                                 qty_per_pack = EXCLUDED.qty_per_pack,
+                                 qoh = EXCLUDED.qoh,
+                                 manufacturer = EXCLUDED.manufacturer,
+                                 ndc = EXCLUDED.ndc,
+                                 mfg_lot_number = EXCLUDED.mfg_lot_number,
+                                 mfg_expire_date = EXCLUDED.mfg_expire_date,
+                                 device_id = EXCLUDED.device_id,
+                                 hospital_lot_number = EXCLUDED.hospital_lot_number,
+                                 hospital_expire_date = EXCLUDED.hospital_expire_date,
+                                 bud = EXCLUDED.bud,
+                                 packaged_by = EXCLUDED.packaged_by,
+                                 confirmer = EXCLUDED.confirmer;"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Packaging Report")
 
                 elif u_type in {"IV Room Workload", "IV Room Batching"}:
                     clean = clean_iv_room_report(raw)
