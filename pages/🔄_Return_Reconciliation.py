@@ -229,6 +229,119 @@ m7.metric("Eject Events (excl.)", int(eject_qty))
 st.divider()
 st.caption("Reconciliation totals use all qualifying Pyxis removals and carousel return transactions in the date range. The user filter narrows detail tables only.")
 
+# --- User Return Lookup ---
+
+st.subheader("Carousel Returns by User")
+
+return_users = sorted(
+    detail_pharm_return["user_name"].dropna().astype(str).unique().tolist()
+) if not detail_pharm_return.empty and "user_name" in detail_pharm_return.columns else []
+
+selected_return_user = st.selectbox(
+    "Select a user to review carousel returns",
+    options=["All Users"] + return_users,
+    index=0,
+)
+
+user_returns = detail_pharm_return.copy()
+if selected_return_user != "All Users" and not user_returns.empty:
+    user_returns = user_returns[user_returns["user_name"].astype(str) == selected_return_user]
+
+if user_returns.empty:
+    st.info("No carousel return rows found for this selection.")
+else:
+    user_returns = user_returns.sort_values("dt", ascending=False)
+    total_user_return_qty = user_returns["qty"].sum() if "qty" in user_returns.columns else 0
+    unique_return_meds = user_returns["med_id"].nunique() if "med_id" in user_returns.columns else 0
+    active_return_days = user_returns["date"].nunique() if "date" in user_returns.columns else 0
+
+    u1, u2, u3, u4 = st.columns(4)
+    u1.metric("Return Rows", f"{len(user_returns):,}")
+    u2.metric("Return Qty", f"{total_user_return_qty:,.0f}")
+    u3.metric("Unique Meds", f"{unique_return_meds:,}")
+    u4.metric("Active Return Days", f"{active_return_days:,}")
+
+    display_cols = [
+        c for c in [
+            "dt", "date", "user_name", "workflow_type", "med_id", "med_desc",
+            "destination", "qty", "priority", "queue_id"
+        ]
+        if c in user_returns.columns
+    ]
+    st.dataframe(
+        user_returns[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "dt": st.column_config.DatetimeColumn("Date / Time"),
+            "date": st.column_config.DateColumn("Date"),
+            "user_name": "User",
+            "workflow_type": "Return Type",
+            "med_id": "Med ID",
+            "med_desc": "Medication",
+            "destination": "Destination",
+            "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+            "priority": "Priority",
+            "queue_id": "Queue ID",
+        },
+    )
+
+st.divider()
+st.subheader("Pyxis Unloads by User")
+
+unload_users = sorted(
+    detail_pyxis_unload["user_name"].dropna().astype(str).unique().tolist()
+) if not detail_pyxis_unload.empty and "user_name" in detail_pyxis_unload.columns else []
+
+selected_unload_user = st.selectbox(
+    "Select a user to review Pyxis unloads",
+    options=["All Users"] + unload_users,
+    index=0,
+)
+
+user_unloads = detail_pyxis_unload.copy()
+if selected_unload_user != "All Users" and not user_unloads.empty:
+    user_unloads = user_unloads[user_unloads["user_name"].astype(str) == selected_unload_user]
+
+if user_unloads.empty:
+    st.info("No Pyxis unload rows found for this selection.")
+else:
+    user_unloads = user_unloads.sort_values("dt", ascending=False)
+    total_user_unload_qty = user_unloads["qty"].sum() if "qty" in user_unloads.columns else 0
+    unique_unload_meds = user_unloads["med_id"].nunique() if "med_id" in user_unloads.columns else 0
+    active_unload_days = user_unloads["date"].nunique() if "date" in user_unloads.columns else 0
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Unload Rows", f"{len(user_unloads):,}")
+    p2.metric("Unload Qty", f"{total_user_unload_qty:,.0f}")
+    p3.metric("Unique Meds", f"{unique_unload_meds:,}")
+    p4.metric("Active Unload Days", f"{active_unload_days:,}")
+
+    unload_display_cols = [
+        c for c in [
+            "dt", "date", "user_name", "device", "event_type", "med_id",
+            "med_desc", "qty", "beginning_qty", "ending_qty"
+        ]
+        if c in user_unloads.columns
+    ]
+    st.dataframe(
+        user_unloads[unload_display_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "dt": st.column_config.DatetimeColumn("Date / Time"),
+            "date": st.column_config.DateColumn("Date"),
+            "user_name": "User",
+            "device": "Device",
+            "event_type": "Event Type",
+            "med_id": "Med ID",
+            "med_desc": "Medication",
+            "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+            "beginning_qty": st.column_config.NumberColumn("Beginning Qty", format="%.0f"),
+            "ending_qty": st.column_config.NumberColumn("Ending Qty", format="%.0f"),
+        },
+    )
+
 # --- Variance Table + Drilldown ---
 
 st.subheader("🚨 Unmatched Workflow Events")
