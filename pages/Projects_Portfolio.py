@@ -119,17 +119,29 @@ PROJECTS = [
         ],
     },
     {
-        "name": "Return Reconciliation",
-        "status": "In production",
+        "name": "Return Reconciliation Safety Improvement",
+        "status": "In progress",
         "timeframe": "Ongoing",
-        "area": "Medication Returns",
-        "problem": "Returned medication movement was difficult to follow from Pyxis activity back to carousel handling.",
-        "action": "Built views to compare return/removal activity and supporting transaction detail.",
-        "impact": "Improves accountability and makes return-process gaps easier to review.",
+        "area": "Medication Safety / Return Accuracy",
+        "problem": (
+            "Pyxis unloads and empty return-bin activity did not always match carousel return transactions. "
+            "A low match rate means medication may have been returned incorrectly, creating preventable risk "
+            "for wrong medication placement and downstream administration errors."
+        ),
+        "action": (
+            "Built a reconciliation workflow that compares Pyxis removals to carousel return activity and used the "
+            "match rate as the safety signal. Process changes pushed technicians away from basic return behavior "
+            "and toward more scan-heavy instant return and restock workflows."
+        ),
+        "impact": (
+            "Improves return accuracy, creates a clear exception list for follow-up, and shows whether process "
+            "changes are increasing return match rate over time."
+        ),
         "proof_points": [
-            "Matched vs unmatched return activity.",
-            "High-volume medications or devices in the return path.",
-            "Follow-up actions from reconciliation review.",
+            "Match rate trend over time.",
+            "Unmatched med-days trend over time.",
+            "Workflow mix shift toward Instant Return and Instant Restock.",
+            "Medication-level and user-level drilldowns for exceptions.",
         ],
     },
 ]
@@ -360,6 +372,110 @@ def build_unload_window_impact(
     }
 
 
+def build_return_reconciliation_trends(start_date, end_date, interval="W", exclude_dummy=True):
+    df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
+    for df in [df_events, df_pharm]:
+        if not df.empty and "dt" in df.columns:
+            df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+            df["date"] = df["dt"].dt.date
+
+    pyxis_unload = pd.DataFrame()
+    if not df_events.empty and "event_type" in df_events.columns:
+        pyxis_all = df_events[
+            df_events["event_type"].astype(str).str.contains("empty|unload|return bin|destock", case=False, na=False)
+            & ~df_events["event_type"].astype(str).str.contains("cancel", case=False, na=False)
+        ].copy()
+        pyxis_unload = pyxis_all[
+            ~pyxis_all["event_type"].astype(str).str.contains("eject", case=False, na=False)
+        ].copy()
+        if "device" in pyxis_unload.columns:
+            pyxis_unload = pyxis_unload[
+                ~pyxis_unload["device"].astype(str).str.contains("cass|patient", case=False, na=False)
+            ]
+
+    pharm_all = pd.DataFrame()
+    if not df_pharm.empty:
+        pharm_df = df_pharm.copy()
+        event_col = "event_type" if "event_type" in pharm_df.columns else "priority"
+        pharm_all = pharm_df[
+            pharm_df[event_col].astype(str).str.contains("return|restock|instant|inventory", case=False, na=False)
+        ].copy()
+        if not pharm_all.empty:
+            pharm_all["workflow_type"] = pharm_all.apply(classify_return_workflow, axis=1)
+
+    included_return_types = {"Return", "Instant Return", "Instant Restock"}
+    pharm_return = (
+        pharm_all[pharm_all["workflow_type"].isin(included_return_types)].copy()
+        if not pharm_all.empty
+        else pd.DataFrame()
+    )
+
+    if exclude_dummy:
+        pyxis_unload = remove_dummy_meds(pyxis_unload)
+        pharm_return = remove_dummy_meds(pharm_return)
+        pharm_all = remove_dummy_meds(pharm_all)
+
+    def safe_group(df, qty_name):
+        if df.empty or not {"med_id", "med_desc", "date", "qty"}.issubset(df.columns):
+            return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
+        df = df.copy()
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        return (
+            df.groupby(["med_id", "med_desc", "date"], dropna=False)["qty"]
+            .sum()
+            .reset_index()
+            .rename(columns={"qty": qty_name})
+        )
+
+    pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
+    pharm_sum = safe_group(pharm_return, "qty_pharm")
+    recon = pd.merge(
+        pyxis_sum.drop(columns=["med_desc"], errors="ignore"),
+        pharm_sum.drop(columns=["med_desc"], errors="ignore"),
+        on=["med_id", "date"],
+        how="outer",
+    )
+    if recon.empty:
+        trend = pd.DataFrame(columns=["period", "qty_pyxis", "qty_pharm", "matched_qty", "match_rate", "unmatched_med_days"])
+    else:
+        recon[["qty_pyxis", "qty_pharm"]] = recon[["qty_pyxis", "qty_pharm"]].fillna(0)
+        recon["matched_qty"] = recon[["qty_pyxis", "qty_pharm"]].min(axis=1)
+        recon["unmatched"] = recon["qty_pyxis"] != recon["qty_pharm"]
+        recon["period"] = pd.to_datetime(recon["date"]).dt.to_period(interval).dt.start_time.dt.date
+        trend = (
+            recon.groupby("period")
+            .agg(
+                qty_pyxis=("qty_pyxis", "sum"),
+                qty_pharm=("qty_pharm", "sum"),
+                matched_qty=("matched_qty", "sum"),
+                unmatched_med_days=("unmatched", "sum"),
+            )
+            .reset_index()
+        )
+        trend["match_rate"] = (trend["matched_qty"] / trend["qty_pyxis"] * 100).where(trend["qty_pyxis"] > 0, 100)
+
+    if pharm_all.empty or "workflow_type" not in pharm_all.columns:
+        workflow_mix = pd.DataFrame(columns=["period", "workflow_type", "rows", "qty"])
+    else:
+        pharm_all = pharm_all.copy()
+        pharm_all["qty"] = pd.to_numeric(pharm_all["qty"], errors="coerce").fillna(0)
+        pharm_all["period"] = pd.to_datetime(pharm_all["date"]).dt.to_period(interval).dt.start_time.dt.date
+        workflow_mix = (
+            pharm_all.groupby(["period", "workflow_type"], dropna=False)
+            .agg(rows=("workflow_type", "size"), qty=("qty", "sum"))
+            .reset_index()
+        )
+
+    totals = {
+        "pyxis_qty": float(trend["qty_pyxis"].sum()) if not trend.empty else 0,
+        "carousel_qty": float(trend["qty_pharm"].sum()) if not trend.empty else 0,
+        "matched_qty": float(trend["matched_qty"].sum()) if not trend.empty else 0,
+        "unmatched_med_days": int(trend["unmatched_med_days"].sum()) if not trend.empty else 0,
+    }
+    totals["match_rate"] = (totals["matched_qty"] / totals["pyxis_qty"] * 100) if totals["pyxis_qty"] > 0 else 100
+    return trend, workflow_mix, totals
+
+
 def render_project_card(project):
     with st.container(border=True):
         top = st.columns([2.2, 1, 1])
@@ -580,8 +696,134 @@ with st.expander("Weekend Runner Staffing Calculator", expanded=True):
 
 st.divider()
 
+st.subheader("Featured Safety Project")
+render_project_card(PROJECTS[-1])
+
+with st.expander("Return Reconciliation Improvement Trend", expanded=True):
+    st.caption(
+        "Tracks whether Pyxis unload and empty return-bin quantities are matching carousel return transactions more accurately over time."
+    )
+
+    r1, r2, r3 = st.columns([1, 1, 1])
+    recon_start = r1.date_input("Trend start date", value=date.today() - pd.Timedelta(days=179), key="return_recon_start")
+    recon_end = r2.date_input("Trend end date", value=date.today(), key="return_recon_end")
+    interval_label = r3.selectbox("Trend grouping", options=["Weekly", "Monthly"], index=0)
+    recon_exclude_dummy = st.checkbox("Exclude dummy/cassette medications from return trend", value=True)
+    interval = "W" if interval_label == "Weekly" else "M"
+
+    if recon_start > recon_end:
+        st.warning("Trend start date must be before trend end date.")
+    else:
+        trend, workflow_mix, totals = build_return_reconciliation_trends(
+            recon_start,
+            recon_end,
+            interval=interval,
+            exclude_dummy=recon_exclude_dummy,
+        )
+
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Overall Match Rate", f"{totals['match_rate']:.1f}%")
+        s2.metric("Pyxis Removal Qty", f"{totals['pyxis_qty']:,.0f}")
+        s3.metric("Carousel Return Qty", f"{totals['carousel_qty']:,.0f}")
+        s4.metric("Unmatched Med-Days", f"{totals['unmatched_med_days']:,}")
+
+        st.caption(
+            "Safety interpretation: higher match rate means the Pyxis removal record and carousel return workflow are lining up. "
+            "Unmatched rows are the exception list because incorrect return handling can put the wrong med back into circulation."
+        )
+
+        if trend.empty:
+            st.info("No reconciliation trend data found for this date range.")
+        else:
+            trend_display = trend.copy()
+            trend_display["period"] = pd.to_datetime(trend_display["period"])
+            fig_match = px.line(
+                trend_display,
+                x="period",
+                y="match_rate",
+                markers=True,
+                labels={"period": "", "match_rate": "Match rate (%)"},
+            )
+            fig_match.update_layout(height=360, yaxis_range=[0, 105], margin=dict(l=10, r=20, t=20, b=10))
+            st.plotly_chart(fig_match, use_container_width=True)
+
+            t1, t2 = st.columns(2)
+            fig_unmatched = px.bar(
+                trend_display,
+                x="period",
+                y="unmatched_med_days",
+                labels={"period": "", "unmatched_med_days": "Unmatched med-days"},
+                color="unmatched_med_days",
+                color_continuous_scale="Reds",
+            )
+            fig_unmatched.update_layout(height=340, coloraxis_showscale=False, margin=dict(l=10, r=20, t=20, b=10))
+            t1.plotly_chart(fig_unmatched, use_container_width=True)
+
+            volume_long = trend_display.melt(
+                id_vars=["period"],
+                value_vars=["qty_pyxis", "qty_pharm"],
+                var_name="Source",
+                value_name="Qty",
+            )
+            volume_long["Source"] = volume_long["Source"].replace(
+                {"qty_pyxis": "Pyxis removals", "qty_pharm": "Carousel returns"}
+            )
+            fig_volume = px.bar(
+                volume_long,
+                x="period",
+                y="Qty",
+                color="Source",
+                barmode="group",
+                labels={"period": ""},
+            )
+            fig_volume.update_layout(height=340, margin=dict(l=10, r=20, t=20, b=10))
+            t2.plotly_chart(fig_volume, use_container_width=True)
+
+            st.dataframe(
+                trend_display.rename(
+                    columns={
+                        "period": "Period",
+                        "qty_pyxis": "Pyxis Removal Qty",
+                        "qty_pharm": "Carousel Return Qty",
+                        "matched_qty": "Matched Qty",
+                        "match_rate": "Match Rate",
+                        "unmatched_med_days": "Unmatched Med-Days",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Match Rate": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Pyxis Removal Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Carousel Return Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Matched Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Unmatched Med-Days": st.column_config.NumberColumn(format="%.0f"),
+                },
+            )
+
+        if workflow_mix.empty:
+            st.info("No carousel workflow mix data found for this date range.")
+        else:
+            workflow_mix_display = workflow_mix.copy()
+            workflow_mix_display["period"] = pd.to_datetime(workflow_mix_display["period"])
+            fig_mix = px.bar(
+                workflow_mix_display,
+                x="period",
+                y="rows",
+                color="workflow_type",
+                labels={"period": "", "rows": "Workflow rows", "workflow_type": "Workflow type"},
+            )
+            fig_mix.update_layout(height=380, margin=dict(l=10, r=20, t=20, b=10))
+            st.plotly_chart(fig_mix, use_container_width=True)
+
+            st.caption(
+                "Process-change signal: increased Instant Return and Instant Restock activity should show more scan-based handling over time."
+            )
+
+st.divider()
+
 st.subheader("Other Projects So Far")
-for project in PROJECTS[2:]:
+for project in PROJECTS[2:-1]:
     render_project_card(project)
 
 st.divider()
