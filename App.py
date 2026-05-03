@@ -1795,6 +1795,7 @@ def render_page_links():
 
     st.markdown('<div class="rx-nav-label">Core</div>', unsafe_allow_html=True)
     safe_page_link("App.py", label="Overview Hub", icon="🏠")
+    safe_page_link("pages/Projects_Portfolio.py", label="Projects Portfolio", icon="📁")
     safe_page_link("pages/🧪_Workflow_Experiments.py", label="Workflow Experiments", icon="🧪")
     safe_page_link("pages/🧭_Pilot_Monitor.py", label="Pilot Monitor", icon="🧭")
     safe_page_link("pages/⚖️_Workload_Capacity_Simulator.py", label="Ops Simulator", icon="⚖️")
