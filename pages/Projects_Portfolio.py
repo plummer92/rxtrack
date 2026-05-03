@@ -29,12 +29,16 @@ else:
 engine = App.engine
 load_data = App.load_data
 
+UNLOAD_PROJECT_START = date(2025, 12, 15)
+UNLOAD_PROJECT_END = date(2026, 1, 5)
+UNLOAD_PROJECT_USERS = ["Isaac Vizral", "Jaycie Cole", "Lauren Voudrie"]
+
 
 PROJECTS = [
     {
         "name": "Unload Window Optimization",
         "status": "Completed",
-        "timeframe": "Recent process change",
+        "timeframe": "Dec 15, 2025 to Jan 5, 2026",
         "area": "Inventory Rotation / Carousel Stocking",
         "problem": (
             "The unload process was waiting 45 days before medications rotated back through the pharmacy workflow. "
@@ -135,6 +139,28 @@ def remove_dummy_meds(df):
     return df[~df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)]
 
 
+def matches_project_user(user_name, project_users):
+    raw = str(user_name or "").strip().lower()
+    if not raw:
+        return False
+    compact = raw.replace(",", " ")
+    tokens = {part for part in compact.split() if part}
+    normalized = App.normalize_name(raw)
+
+    for project_user in project_users:
+        first, *rest = project_user.lower().split()
+        last = rest[-1] if rest else ""
+        full = f"{first} {last}".strip()
+        comma_name = f"{last}, {first}".strip(", ")
+        if raw in {full, comma_name} or full in compact:
+            return True
+        if first in tokens and (not last or last in tokens):
+            return True
+        if normalized == first:
+            return True
+    return False
+
+
 @st.cache_data(ttl=300)
 def load_med_costs():
     try:
@@ -150,7 +176,13 @@ def load_med_costs():
         return pd.DataFrame(columns=["med_id", "cost_per_unit"])
 
 
-def build_unload_window_impact(start_date, end_date, exclude_dummy=True, savings_capture_pct=100):
+def build_unload_window_impact(
+    start_date,
+    end_date,
+    exclude_dummy=True,
+    savings_capture_pct=100,
+    project_users=None,
+):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
     for df in [df_events, df_pharm]:
         if not df.empty and "dt" in df.columns:
@@ -188,26 +220,60 @@ def build_unload_window_impact(start_date, end_date, exclude_dummy=True, savings
         pyxis_unload = remove_dummy_meds(pyxis_unload)
         pharm_return = remove_dummy_meds(pharm_return)
 
+    if project_users:
+        if not pyxis_unload.empty and "user_name" in pyxis_unload.columns:
+            pyxis_unload = pyxis_unload[
+                pyxis_unload["user_name"].apply(lambda value: matches_project_user(value, project_users))
+            ]
+        if not pharm_return.empty and "user_name" in pharm_return.columns:
+            pharm_return = pharm_return[
+                pharm_return["user_name"].apply(lambda value: matches_project_user(value, project_users))
+            ]
+
     costs = load_med_costs()
+    project_source = pyxis_unload.copy()
+    if not project_source.empty:
+        project_source["med_id"] = project_source["med_id"].astype(str).str.strip()
+        project_source["qty"] = pd.to_numeric(project_source["qty"], errors="coerce").fillna(0)
+        returned = (
+            project_source.groupby(["med_id", "med_desc"], dropna=False)
+            .agg(
+                returned_qty=("qty", "sum"),
+                unload_rows=("qty", "size"),
+                users=("user_name", lambda values: ", ".join(sorted({str(v) for v in values if pd.notna(v)}))),
+                devices=("device", lambda values: ", ".join(sorted({str(v) for v in values if pd.notna(v)}))),
+            )
+            .reset_index()
+        )
+    else:
+        returned = pd.DataFrame(columns=["med_id", "med_desc", "returned_qty", "unload_rows", "users", "devices"])
+
     if not pharm_return.empty:
         pharm_return["med_id"] = pharm_return["med_id"].astype(str).str.strip()
         pharm_return["qty"] = pd.to_numeric(pharm_return["qty"], errors="coerce").fillna(0)
-        returned = (
+        carousel_returned = (
             pharm_return.groupby(["med_id", "med_desc"], dropna=False)["qty"]
             .sum()
-            .reset_index(name="returned_qty")
+            .reset_index(name="carousel_return_qty")
         )
     else:
-        returned = pd.DataFrame(columns=["med_id", "med_desc", "returned_qty"])
+        carousel_returned = pd.DataFrame(columns=["med_id", "med_desc", "carousel_return_qty"])
 
     returned = returned.merge(costs, on="med_id", how="left")
+    returned = returned.merge(
+        carousel_returned.drop(columns=["med_desc"], errors="ignore"),
+        on="med_id",
+        how="left",
+    )
     returned["cost_per_unit"] = returned["cost_per_unit"].fillna(0)
+    returned["carousel_return_qty"] = returned["carousel_return_qty"].fillna(0)
     returned["returned_value"] = returned["returned_qty"] * returned["cost_per_unit"]
     returned = returned.sort_values("returned_value", ascending=False)
 
     days = max((pd.to_datetime(end_date).date() - pd.to_datetime(start_date).date()).days + 1, 1)
     capture_rate = savings_capture_pct / 100
     returned_units = float(returned["returned_qty"].sum()) if not returned.empty else 0
+    carousel_units = float(returned["carousel_return_qty"].sum()) if not returned.empty else 0
     returned_value = float(returned["returned_value"].sum()) if not returned.empty else 0
     annualized_units = returned_units / days * 365
     annualized_value = returned_value / days * 365 * capture_rate
@@ -218,6 +284,7 @@ def build_unload_window_impact(start_date, end_date, exclude_dummy=True, savings
         "detail": returned,
         "days": days,
         "returned_units": returned_units,
+        "carousel_units": carousel_units,
         "returned_value": returned_value,
         "annualized_units": annualized_units,
         "annualized_value": annualized_value,
@@ -265,14 +332,20 @@ render_project_card(PROJECTS[0])
 
 with st.expander("Unload Window Impact Calculator", expanded=True):
     st.caption(
-        "Uses the same return/reconciliation source data: Pyxis unload activity, carousel return workflow activity, and med cost data."
+        "Project mode values the Pyxis unload transactions completed by Isaac Vizral, Jaycie Cole, and Lauren Voudrie from Dec 15, 2025 through Jan 5, 2026."
+    )
+
+    use_project_scope = st.checkbox(
+        "Use unload-window project scope",
+        value=True,
+        help="Dec 15, 2025 to Jan 5, 2026; Isaac Vizral, Jaycie Cole, and Lauren Voudrie.",
     )
 
     f1, f2, f3 = st.columns([1, 1, 1])
-    default_end = date.today()
-    default_start = default_end - pd.Timedelta(days=89)
-    impact_start = f1.date_input("Impact start date", value=default_start.date())
-    impact_end = f2.date_input("Impact end date", value=default_end)
+    default_start = UNLOAD_PROJECT_START if use_project_scope else date.today() - pd.Timedelta(days=89)
+    default_end = UNLOAD_PROJECT_END if use_project_scope else date.today()
+    impact_start = f1.date_input("Impact start date", value=default_start, disabled=use_project_scope)
+    impact_end = f2.date_input("Impact end date", value=default_end, disabled=use_project_scope)
     capture_pct = f3.slider(
         "Savings capture assumption",
         min_value=0,
@@ -282,32 +355,40 @@ with st.expander("Unload Window Impact Calculator", expanded=True):
         help="Use 100% when every returned unit is assumed to offset a future purchase. Lower it if only some returned stock prevents ordering.",
     )
     exclude_dummy = st.checkbox("Exclude dummy/cassette medications", value=True)
+    project_users = UNLOAD_PROJECT_USERS if use_project_scope else None
+    if use_project_scope:
+        st.caption("Included project users: " + ", ".join(UNLOAD_PROJECT_USERS))
 
     if impact_start > impact_end:
         st.warning("Start date must be before end date.")
     else:
-        impact = build_unload_window_impact(impact_start, impact_end, exclude_dummy, capture_pct)
+        impact = build_unload_window_impact(impact_start, impact_end, exclude_dummy, capture_pct, project_users)
         detail = impact["detail"]
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Carousel Return Units", f"{impact['returned_units']:,.0f}")
-        m2.metric("Returned Inventory Value", f"${impact['returned_value']:,.2f}")
-        m3.metric("Projected 12-Mo Units", f"{impact['annualized_units']:,.0f}")
-        m4.metric("Projected 12-Mo Value", f"${impact['annualized_value']:,.2f}")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Project Unload Units", f"{impact['returned_units']:,.0f}")
+        m2.metric("Carousel Return Units", f"{impact['carousel_units']:,.0f}")
+        m3.metric("Returned Inventory Value", f"${impact['returned_value']:,.2f}")
+        m4.metric("Projected 12-Mo Units", f"{impact['annualized_units']:,.0f}")
+        m5.metric("Projected 12-Mo Value", f"${impact['annualized_value']:,.2f}")
 
         st.caption(
             f"Projection is annualized from {impact['days']} selected day(s) at a {capture_pct}% capture assumption. "
-            "Treat this as avoided purchasing opportunity, not booked savings, until purchasing data confirms the offset."
+            "Treat this as avoided purchasing opportunity from rotating 28-to-45-day Pyxis inventory back into usable stock, not booked savings, until purchasing data confirms the offset."
         )
 
         if detail.empty:
-            st.info("No qualifying carousel return rows found for this date range.")
+            st.info("No qualifying project unload rows found for this date range and user scope.")
         else:
             table = detail.rename(
                 columns={
                     "med_id": "Med ID",
                     "med_desc": "Medication",
-                    "returned_qty": "Returned Qty",
+                    "returned_qty": "Project Unload Qty",
+                    "carousel_return_qty": "Carousel Return Qty",
+                    "unload_rows": "Unload Rows",
+                    "users": "Users",
+                    "devices": "Devices",
                     "cost_per_unit": "Unit Cost",
                     "returned_value": "Returned Value",
                     "projected_12mo_value": "Projected 12-Mo Value",
@@ -318,7 +399,9 @@ with st.expander("Unload Window Impact Calculator", expanded=True):
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Returned Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Project Unload Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Carousel Return Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Unload Rows": st.column_config.NumberColumn(format="%.0f"),
                     "Unit Cost": st.column_config.NumberColumn(format="$%.2f"),
                     "Returned Value": st.column_config.NumberColumn(format="$%.2f"),
                     "Projected 12-Mo Value": st.column_config.NumberColumn(format="$%.2f"),
