@@ -289,7 +289,7 @@ def load_refills(sel_date):
             FROM events
             WHERE dt::date = :d
               AND event_type = 'Refill'
-              AND UPPER(med_id) != 'PATCAS'
+              AND COALESCE(UPPER(med_id), '') != 'PATCAS'
         """)
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
@@ -361,7 +361,7 @@ def load_available_drop_dates(start_date, end_date):
                 FROM events
                 WHERE dt::date BETWEEN :start_date AND :end_date
                   AND event_type = 'Refill'
-                  AND UPPER(med_id) != 'PATCAS'
+                  AND COALESCE(UPPER(med_id), '') != 'PATCAS'
             ),
             pull_days AS (
                 SELECT DISTINCT dt::date AS activity_date
