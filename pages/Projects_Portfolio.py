@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import datetime, date
 
 import pandas as pd
 import plotly.express as px
@@ -33,6 +33,9 @@ UNLOAD_PROJECT_START = date(2025, 12, 15)
 UNLOAD_PROJECT_END = date(2026, 1, 5)
 UNLOAD_PROJECT_USERS = ["Isaac Vizral", "Jaycie Cole", "Lauren Voudrie"]
 FLOVENT_PUFFS_PER_INHALER = 124
+WEEKEND_OLD_MORNING_SHIFT = ("07:00", "15:30")
+WEEKEND_OLD_EVENING_SHIFT = ("13:00", "21:30")
+WEEKEND_NEW_HYBRID_SHIFT = ("10:00", "18:30")
 
 
 PROJECTS = [
@@ -58,6 +61,33 @@ PROJECTS = [
             "Track medications reordered while usable stock existed in Pyxis.",
             "Monitor unload volume and carousel restock volume by week.",
             "Estimate avoided orders or avoided dollars once cost data is available.",
+        ],
+    },
+    {
+        "name": "Weekend Runner Staffing Redesign",
+        "status": "Completed",
+        "timeframe": "Weekend schedule redesign",
+        "area": "Staffing / Delivery Workflow",
+        "problem": (
+            "Weekend coverage used two runner/delivery positions: a 0700 shift and a 1300-2130 shift. "
+            "The late Sunday shift was especially hard on pharmacy students commuting from St. Louis, so full-time "
+            "staff carried more weekend nights."
+        ),
+        "action": (
+            "Condensed the two weekend runner positions into one 1000-1830 hybrid position. Kept the same delivery, "
+            "stat-med, odd-job, and cartfill support covered by reallocating some work to another position that had "
+            "available time."
+        ),
+        "impact": (
+            "Eliminated one weekend schedule position while keeping pharmacy operations smooth. The hybrid shift made "
+            "the role more workable for students, reduced full-time staff weekend-night pressure, and opened room to "
+            "expand weekend rotation fairness."
+        ),
+        "proof_points": [
+            "Old schedule: 0700 runner plus 1300-2130 runner/delivery coverage.",
+            "New schedule: one 1000-1830 hybrid position.",
+            "Weekend position count reduced by one while core weekend delivery work remains covered.",
+            "Track annualized hours removed and estimated labor-dollar opportunity.",
         ],
     },
     {
@@ -117,6 +147,15 @@ def project_dataframe(projects):
             for p in projects
         ]
     )
+
+
+def shift_hours(start_time, end_time):
+    start = datetime.strptime(start_time, "%H:%M")
+    end = datetime.strptime(end_time, "%H:%M")
+    hours = (end - start).total_seconds() / 3600
+    if hours < 0:
+        hours += 24
+    return hours
 
 
 def classify_return_workflow(row):
@@ -458,8 +497,91 @@ with st.expander("Unload Window Impact Calculator", expanded=True):
 
 st.divider()
 
+st.subheader("Featured Staffing Project")
+render_project_card(PROJECTS[1])
+
+with st.expander("Weekend Runner Staffing Calculator", expanded=True):
+    st.caption(
+        "Models the weekend schedule change from two runner/delivery positions to one 1000-1830 hybrid position."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    old_morning_start = c1.text_input("Old morning start", value=WEEKEND_OLD_MORNING_SHIFT[0])
+    old_morning_end = c1.text_input("Old morning end", value=WEEKEND_OLD_MORNING_SHIFT[1])
+    old_evening_start = c2.text_input("Old evening start", value=WEEKEND_OLD_EVENING_SHIFT[0])
+    old_evening_end = c2.text_input("Old evening end", value=WEEKEND_OLD_EVENING_SHIFT[1])
+    new_hybrid_start = c3.text_input("New hybrid start", value=WEEKEND_NEW_HYBRID_SHIFT[0])
+    new_hybrid_end = c3.text_input("New hybrid end", value=WEEKEND_NEW_HYBRID_SHIFT[1])
+
+    a1, a2, a3 = st.columns(3)
+    weekend_days = a1.number_input("Weekend days per week", min_value=1, max_value=7, value=2, step=1)
+    hourly_rate = a2.number_input(
+        "Fully loaded hourly rate",
+        min_value=0.0,
+        value=0.0,
+        step=1.0,
+        help="Optional. Enter wage plus benefits to estimate annual labor-dollar opportunity.",
+    )
+    weeks_per_year = a3.number_input("Weeks per year", min_value=1, max_value=53, value=52, step=1)
+
+    try:
+        old_daily_hours = shift_hours(old_morning_start, old_morning_end) + shift_hours(old_evening_start, old_evening_end)
+        new_daily_hours = shift_hours(new_hybrid_start, new_hybrid_end)
+        daily_hours_removed = max(old_daily_hours - new_daily_hours, 0)
+        weekly_hours_removed = daily_hours_removed * weekend_days
+        annual_hours_removed = weekly_hours_removed * weeks_per_year
+        annual_labor_opportunity = annual_hours_removed * hourly_rate
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Old Weekend Hours / Day", f"{old_daily_hours:.1f}")
+        m2.metric("New Weekend Hours / Day", f"{new_daily_hours:.1f}")
+        m3.metric("Hours Removed / Week", f"{weekly_hours_removed:.1f}")
+        m4.metric("Annual Hours Removed", f"{annual_hours_removed:,.0f}")
+
+        if hourly_rate > 0:
+            st.metric("Estimated Annual Labor-Dollar Opportunity", f"${annual_labor_opportunity:,.2f}")
+
+        schedule_df = pd.DataFrame(
+            [
+                {"Schedule": "Old", "Position": "0700 runner / delivery", "Start": old_morning_start, "End": old_morning_end, "Hours": shift_hours(old_morning_start, old_morning_end)},
+                {"Schedule": "Old", "Position": "1300-2130 runner / delivery", "Start": old_evening_start, "End": old_evening_end, "Hours": shift_hours(old_evening_start, old_evening_end)},
+                {"Schedule": "New", "Position": "1000-1830 hybrid runner / delivery", "Start": new_hybrid_start, "End": new_hybrid_end, "Hours": new_daily_hours},
+            ]
+        )
+        st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+
+        chart_df = pd.DataFrame(
+            [
+                {"Schedule": "Old two-position coverage", "Hours per weekend day": old_daily_hours},
+                {"Schedule": "New hybrid coverage", "Hours per weekend day": new_daily_hours},
+            ]
+        )
+        fig = px.bar(
+            chart_df,
+            x="Schedule",
+            y="Hours per weekend day",
+            text="Hours per weekend day",
+            color="Schedule",
+            color_discrete_map={
+                "Old two-position coverage": "#ef4444",
+                "New hybrid coverage": "#14b8a6",
+            },
+        )
+        fig.update_layout(height=340, showlegend=False, margin=dict(l=10, r=20, t=20, b=10))
+        fig.update_traces(texttemplate="%{text:.1f} hrs", textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption(
+            "Operational narrative: the late 1300-2130 weekend shift became a 1000-1830 hybrid role, making the "
+            "position easier for pharmacy students to work and reducing full-time staff weekend-night burden."
+        )
+    except ValueError:
+        st.warning("Use 24-hour HH:MM times, such as 07:00, 13:00, or 18:30.")
+
+st.divider()
+
 st.subheader("Other Projects So Far")
-for project in PROJECTS[1:]:
+for project in PROJECTS[2:]:
     render_project_card(project)
 
 st.divider()
