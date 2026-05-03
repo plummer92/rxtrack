@@ -32,6 +32,7 @@ load_data = App.load_data
 UNLOAD_PROJECT_START = date(2025, 12, 15)
 UNLOAD_PROJECT_END = date(2026, 1, 5)
 UNLOAD_PROJECT_USERS = ["Isaac Vizral", "Jaycie Cole", "Lauren Voudrie"]
+FLOVENT_PUFFS_PER_INHALER = 124
 
 
 PROJECTS = [
@@ -139,6 +140,18 @@ def remove_dummy_meds(df):
     return df[~df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)]
 
 
+def impact_unit_divisor(row):
+    med_desc = str(row.get("med_desc", "")).lower()
+    if (
+        "fluticasone propionate" in med_desc
+        and "flovent hfa" in med_desc
+        and "puff" in med_desc
+        and ("110 mcg" in med_desc or "220 mcg" in med_desc)
+    ):
+        return FLOVENT_PUFFS_PER_INHALER
+    return 1
+
+
 def matches_project_user(user_name, project_users):
     raw = str(user_name or "").strip().lower()
     if not raw:
@@ -235,10 +248,14 @@ def build_unload_window_impact(
     if not project_source.empty:
         project_source["med_id"] = project_source["med_id"].astype(str).str.strip()
         project_source["qty"] = pd.to_numeric(project_source["qty"], errors="coerce").fillna(0)
+        project_source["impact_unit_divisor"] = project_source.apply(impact_unit_divisor, axis=1)
+        project_source["impact_qty"] = project_source["qty"] / project_source["impact_unit_divisor"]
         returned = (
             project_source.groupby(["med_id", "med_desc"], dropna=False)
             .agg(
                 returned_qty=("qty", "sum"),
+                impact_qty=("impact_qty", "sum"),
+                impact_unit_divisor=("impact_unit_divisor", "max"),
                 unload_rows=("qty", "size"),
                 users=("user_name", lambda values: ", ".join(sorted({str(v) for v in values if pd.notna(v)}))),
                 devices=("device", lambda values: ", ".join(sorted({str(v) for v in values if pd.notna(v)}))),
@@ -246,7 +263,12 @@ def build_unload_window_impact(
             .reset_index()
         )
     else:
-        returned = pd.DataFrame(columns=["med_id", "med_desc", "returned_qty", "unload_rows", "users", "devices"])
+        returned = pd.DataFrame(
+            columns=[
+                "med_id", "med_desc", "returned_qty", "impact_qty", "impact_unit_divisor",
+                "unload_rows", "users", "devices"
+            ]
+        )
 
     if not pharm_return.empty:
         pharm_return["med_id"] = pharm_return["med_id"].astype(str).str.strip()
@@ -267,15 +289,21 @@ def build_unload_window_impact(
     )
     returned["cost_per_unit"] = returned["cost_per_unit"].fillna(0)
     returned["carousel_return_qty"] = returned["carousel_return_qty"].fillna(0)
-    returned["returned_value"] = returned["returned_qty"] * returned["cost_per_unit"]
+    returned["impact_qty"] = returned["impact_qty"].fillna(returned["returned_qty"])
+    returned["impact_unit_divisor"] = returned["impact_unit_divisor"].fillna(1)
+    returned["impact_unit_note"] = returned["impact_unit_divisor"].apply(
+        lambda divisor: f"{int(divisor)} puffs = 1 inhaler" if divisor > 1 else "Each"
+    )
+    returned["returned_value"] = returned["impact_qty"] * returned["cost_per_unit"]
     returned = returned.sort_values("returned_value", ascending=False)
 
     days = max((pd.to_datetime(end_date).date() - pd.to_datetime(start_date).date()).days + 1, 1)
     capture_rate = savings_capture_pct / 100
     returned_units = float(returned["returned_qty"].sum()) if not returned.empty else 0
+    impact_units = float(returned["impact_qty"].sum()) if not returned.empty else 0
     carousel_units = float(returned["carousel_return_qty"].sum()) if not returned.empty else 0
     returned_value = float(returned["returned_value"].sum()) if not returned.empty else 0
-    annualized_units = returned_units / days * 365
+    annualized_units = impact_units / days * 365
     annualized_value = returned_value / days * 365 * capture_rate
     pyxis_units = float(pyxis_unload["qty"].sum()) if not pyxis_unload.empty and "qty" in pyxis_unload.columns else 0
 
@@ -284,6 +312,7 @@ def build_unload_window_impact(
         "detail": returned,
         "days": days,
         "returned_units": returned_units,
+        "impact_units": impact_units,
         "carousel_units": carousel_units,
         "returned_value": returned_value,
         "annualized_units": annualized_units,
@@ -366,10 +395,10 @@ with st.expander("Unload Window Impact Calculator", expanded=True):
         detail = impact["detail"]
 
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Project Unload Units", f"{impact['returned_units']:,.0f}")
+        m1.metric("Project Unload Qty", f"{impact['returned_units']:,.0f}")
         m2.metric("Carousel Return Units", f"{impact['carousel_units']:,.0f}")
         m3.metric("Returned Inventory Value", f"${impact['returned_value']:,.2f}")
-        m4.metric("Projected 12-Mo Units", f"{impact['annualized_units']:,.0f}")
+        m4.metric("Projected 12-Mo Impact Units", f"{impact['annualized_units']:,.0f}")
         m5.metric("Projected 12-Mo Value", f"${impact['annualized_value']:,.2f}")
 
         st.caption(
@@ -384,7 +413,9 @@ with st.expander("Unload Window Impact Calculator", expanded=True):
                 columns={
                     "med_id": "Med ID",
                     "med_desc": "Medication",
-                    "returned_qty": "Project Unload Qty",
+                    "returned_qty": "Raw Unload Qty",
+                    "impact_qty": "Impact Units",
+                    "impact_unit_note": "Unit Conversion",
                     "carousel_return_qty": "Carousel Return Qty",
                     "unload_rows": "Unload Rows",
                     "users": "Users",
@@ -399,7 +430,8 @@ with st.expander("Unload Window Impact Calculator", expanded=True):
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Project Unload Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Raw Unload Qty": st.column_config.NumberColumn(format="%.0f"),
+                    "Impact Units": st.column_config.NumberColumn(format="%.2f"),
                     "Carousel Return Qty": st.column_config.NumberColumn(format="%.0f"),
                     "Unload Rows": st.column_config.NumberColumn(format="%.0f"),
                     "Unit Cost": st.column_config.NumberColumn(format="$%.2f"),
@@ -415,13 +447,13 @@ with st.expander("Unload Window Impact Calculator", expanded=True):
                 x="returned_value",
                 y="label",
                 orientation="h",
-                text="returned_qty",
+                text="impact_qty",
                 labels={"returned_value": "Returned inventory value", "label": ""},
                 color="returned_value",
                 color_continuous_scale="Teal",
             )
             fig.update_layout(height=420, coloraxis_showscale=False, margin=dict(l=10, r=20, t=20, b=10))
-            fig.update_traces(texttemplate="%{text:.0f} units", textposition="outside")
+            fig.update_traces(texttemplate="%{text:.2f} impact units", textposition="outside")
             st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
