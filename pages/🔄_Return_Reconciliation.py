@@ -49,6 +49,8 @@ with st.sidebar:
     selected_users   = st.multiselect("Filter by User", options=all_users)
     exclude_controls = st.checkbox("Exclude Controlled Substances")
     exclude_dummy    = st.checkbox("Exclude Dummy Medications", value=True)
+    exclude_pat_refs = st.checkbox("Exclude PAT/ref med IDs (9000...)", value=True)
+    exclude_bulk_package_returns = st.checkbox("Exclude likely packaging bulk returns", value=True)
 
 # --- Identify Workflow Events ---
 
@@ -153,6 +155,17 @@ def remove_controls(df):
         return df  # nothing to filter, return as-is
     return df[~df["med_id"].astype(str).str.strip().str.upper().isin(control_ids)]
 
+def remove_pat_refs(df):
+    if df.empty or "med_id" not in df.columns: return df
+    return df[~df["med_id"].astype(str).str.strip().str.match(r"^9000\d+", na=False)]
+
+def is_likely_bulk_package_return(df):
+    if df.empty or "qty" not in df.columns:
+        return pd.Series(False, index=df.index)
+    qty = pd.to_numeric(df["qty"], errors="coerce").fillna(0).abs()
+    # Packaged-med returns often arrive as clean bulk counts rather than Pyxis patient-return quantities.
+    return qty.isin([60, 90, 100, 500]) | ((qty >= 50) & (qty % 10 == 0))
+
 if exclude_dummy:
     pyxis_unload = remove_dummy(pyxis_unload)
     pharm_return = remove_dummy(pharm_return)
@@ -164,6 +177,22 @@ if exclude_controls:
     pharm_return = remove_controls(pharm_return)
     detail_pyxis_unload = remove_controls(detail_pyxis_unload)
     detail_pharm_return = remove_controls(detail_pharm_return)
+
+if exclude_pat_refs:
+    pyxis_unload = remove_pat_refs(pyxis_unload)
+    pharm_return = remove_pat_refs(pharm_return)
+    detail_pyxis_unload = remove_pat_refs(detail_pyxis_unload)
+    detail_pharm_return = remove_pat_refs(detail_pharm_return)
+    detail_inv_moves = remove_pat_refs(detail_inv_moves)
+    detail_restocks = remove_pat_refs(detail_restocks)
+
+bulk_package_returns = pd.DataFrame()
+if exclude_bulk_package_returns and not pharm_return.empty:
+    bulk_mask = is_likely_bulk_package_return(pharm_return)
+    bulk_package_returns = pharm_return[bulk_mask].copy()
+    pharm_return = pharm_return[~bulk_mask].copy()
+    if not detail_pharm_return.empty:
+        detail_pharm_return = detail_pharm_return[~is_likely_bulk_package_return(detail_pharm_return)].copy()
 
 # --- Normalize Date ---
 
@@ -216,8 +245,9 @@ unmatched = recon[recon["difference"] != 0]
 inv_move_qty  = inv_moves["qty"].sum() if not inv_moves.empty and "qty" in inv_moves.columns else 0
 restock_qty   = restocks["qty"].sum() if not restocks.empty and "qty" in restocks.columns else 0
 eject_qty     = unload_eject["qty"].sum() if not unload_eject.empty and "qty" in unload_eject.columns else 0
+bulk_package_qty = bulk_package_returns["qty"].sum() if not bulk_package_returns.empty and "qty" in bulk_package_returns.columns else 0
 
-m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
 m1.metric("Total Pyxis Removal Qty", int(total_unload))
 m2.metric("Total Carousel Return Qty", int(total_return))
 m3.metric("Reconciliation %", f"{recon_pct:.1f}%")
@@ -225,6 +255,7 @@ m4.metric("Unmatched Med-Days", len(unmatched))
 m5.metric("Inv Moves (excl.)", int(inv_move_qty))
 m6.metric("Restocks (excl.)", int(restock_qty))
 m7.metric("Eject Events (excl.)", int(eject_qty))
+m8.metric("Bulk Returns (excl.)", int(bulk_package_qty))
 
 st.divider()
 st.caption("Reconciliation totals use all qualifying Pyxis removals and carousel return transactions in the date range. The user filter narrows detail tables only.")
@@ -403,3 +434,11 @@ with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation (
     else:
         cols = [c for c in ["dt", "date", "user_name", "device", "med_desc", "qty", "event_type"] if c in unload_eject.columns]
         st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], width="stretch")
+
+with st.expander(f"Likely Packaging Bulk Returns — Excluded from Reconciliation ({int(bulk_package_qty)} units)", expanded=False):
+    st.caption("These are carousel return rows with clean bulk quantities such as 60, 90, 100, or 500. They often represent packaged meds returned through the return function instead of the receiving workflow.")
+    if bulk_package_returns.empty:
+        st.info("No likely packaging bulk returns were excluded for this date range.")
+    else:
+        cols = [c for c in ["dt", "date", "user_name", "med_id", "med_desc", "qty", "workflow_type", "priority"] if c in bulk_package_returns.columns]
+        st.dataframe(bulk_package_returns[cols].sort_values("dt") if "dt" in cols else bulk_package_returns[cols], width="stretch")

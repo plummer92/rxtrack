@@ -191,6 +191,19 @@ def remove_dummy_meds(df):
     return df[~df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)]
 
 
+def remove_pat_refs(df):
+    if df.empty or "med_id" not in df.columns:
+        return df
+    return df[~df["med_id"].astype(str).str.strip().str.match(r"^9000\d+", na=False)]
+
+
+def is_likely_bulk_package_return(df):
+    if df.empty or "qty" not in df.columns:
+        return pd.Series(False, index=df.index)
+    qty = pd.to_numeric(df["qty"], errors="coerce").fillna(0).abs()
+    return qty.isin([60, 90, 100, 500]) | ((qty >= 50) & (qty % 10 == 0))
+
+
 def impact_unit_divisor(row):
     med_desc = str(row.get("med_desc", "")).lower()
     if (
@@ -372,7 +385,14 @@ def build_unload_window_impact(
     }
 
 
-def build_return_reconciliation_trends(start_date, end_date, interval="W", exclude_dummy=True):
+def build_return_reconciliation_trends(
+    start_date,
+    end_date,
+    interval="W",
+    exclude_dummy=True,
+    exclude_pat_refs=True,
+    exclude_bulk_package_returns=True,
+):
     df_events, _, df_pharm, _, _ = load_data(start_date, end_date)
     for df in [df_events, df_pharm]:
         if not df.empty and "dt" in df.columns:
@@ -414,6 +434,19 @@ def build_return_reconciliation_trends(start_date, end_date, interval="W", exclu
         pyxis_unload = remove_dummy_meds(pyxis_unload)
         pharm_return = remove_dummy_meds(pharm_return)
         pharm_all = remove_dummy_meds(pharm_all)
+
+    if exclude_pat_refs:
+        pyxis_unload = remove_pat_refs(pyxis_unload)
+        pharm_return = remove_pat_refs(pharm_return)
+        pharm_all = remove_pat_refs(pharm_all)
+
+    bulk_package_returns = pd.DataFrame()
+    if exclude_bulk_package_returns and not pharm_return.empty:
+        bulk_mask = is_likely_bulk_package_return(pharm_return)
+        bulk_package_returns = pharm_return[bulk_mask].copy()
+        pharm_return = pharm_return[~bulk_mask].copy()
+        if not pharm_all.empty:
+            pharm_all = pharm_all[~is_likely_bulk_package_return(pharm_all)].copy()
 
     def safe_group(df, qty_name):
         if df.empty or not {"med_id", "med_desc", "date", "qty"}.issubset(df.columns):
@@ -471,6 +504,7 @@ def build_return_reconciliation_trends(start_date, end_date, interval="W", exclu
         "carousel_qty": float(trend["qty_pharm"].sum()) if not trend.empty else 0,
         "matched_qty": float(trend["matched_qty"].sum()) if not trend.empty else 0,
         "unmatched_med_days": int(trend["unmatched_med_days"].sum()) if not trend.empty else 0,
+        "bulk_package_qty": float(bulk_package_returns["qty"].sum()) if not bulk_package_returns.empty and "qty" in bulk_package_returns.columns else 0,
     }
     totals["match_rate"] = (totals["matched_qty"] / totals["pyxis_qty"] * 100) if totals["pyxis_qty"] > 0 else 100
     return trend, workflow_mix, totals
@@ -709,6 +743,8 @@ with st.expander("Return Reconciliation Improvement Trend", expanded=True):
     recon_end = r2.date_input("Trend end date", value=date.today(), key="return_recon_end")
     interval_label = r3.selectbox("Trend grouping", options=["Weekly", "Monthly"], index=0)
     recon_exclude_dummy = st.checkbox("Exclude dummy/cassette medications from return trend", value=True)
+    recon_exclude_pat_refs = st.checkbox("Exclude PAT/ref med IDs (9000...) from return trend", value=True)
+    recon_exclude_bulk = st.checkbox("Exclude likely packaging bulk returns from return trend", value=True)
     interval = "W" if interval_label == "Weekly" else "M"
 
     if recon_start > recon_end:
@@ -719,13 +755,16 @@ with st.expander("Return Reconciliation Improvement Trend", expanded=True):
             recon_end,
             interval=interval,
             exclude_dummy=recon_exclude_dummy,
+            exclude_pat_refs=recon_exclude_pat_refs,
+            exclude_bulk_package_returns=recon_exclude_bulk,
         )
 
-        s1, s2, s3, s4 = st.columns(4)
+        s1, s2, s3, s4, s5 = st.columns(5)
         s1.metric("Overall Match Rate", f"{totals['match_rate']:.1f}%")
         s2.metric("Pyxis Removal Qty", f"{totals['pyxis_qty']:,.0f}")
         s3.metric("Carousel Return Qty", f"{totals['carousel_qty']:,.0f}")
         s4.metric("Unmatched Med-Days", f"{totals['unmatched_med_days']:,}")
+        s5.metric("Bulk Returns Excluded", f"{totals['bulk_package_qty']:,.0f}")
 
         st.caption(
             "Safety interpretation: higher match rate means the Pyxis removal record and carousel return workflow are lining up. "
