@@ -160,13 +160,13 @@ def load_same_med_device_history(device, med_id, selected_dt):
     try:
         sql = text("""
             SELECT
-                pk, dt, user_name, device, med_id, med_desc, event_type, qty,
+                pk, dt::timestamp AS dt, user_name, device, med_id, med_desc, event_type, qty,
                 beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
             FROM events
             WHERE device = :device
               AND med_id = :med_id
-              AND dt <= :selected_dt
-            ORDER BY dt DESC
+              AND dt::timestamp <= CAST(:selected_dt AS timestamp)
+            ORDER BY dt::timestamp DESC
         """)
         with engine.connect() as conn:
             df = pd.read_sql(
