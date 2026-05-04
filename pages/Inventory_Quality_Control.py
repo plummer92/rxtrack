@@ -96,6 +96,35 @@ def load_receiving_history():
 
 
 @st.cache_data(ttl=60)
+def load_stock_add_history():
+    sql = text("""
+        SELECT
+            pk,
+            queue_id,
+            priority,
+            dt::timestamp AS stock_add_dt,
+            med_id,
+            med_desc,
+            destination,
+            user_name,
+            qty
+        FROM pharmacy_orders
+        WHERE med_id IS NOT NULL
+          AND dt IS NOT NULL
+          AND (
+                UPPER(TRIM(COALESCE(priority, ''))) = 'RECEIVING'
+             OR priority ILIKE '%return%'
+             OR priority ILIKE '%restock%'
+             OR priority ILIKE '%instant%'
+             OR priority ILIKE '%inventory%'
+          )
+        ORDER BY dt::timestamp DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
 def load_latest_isa_items():
     sql = text("""
         WITH latest AS (
@@ -219,6 +248,37 @@ def prep_receiving(df):
     out["user_name"] = out["user_name"].fillna("Unknown").astype(str).str.strip()
     out["qty"] = pd.to_numeric(out["qty"], errors="coerce").fillna(0)
     return out.dropna(subset=["received_dt"])
+
+
+def classify_stock_add_mode(priority):
+    text = str(priority or "").strip().lower()
+    if text == "receiving":
+        return "Receiving"
+    if "inventory" in text:
+        return "Inventory Move"
+    if "instant" in text and "return" in text:
+        return "Instant Return"
+    if "instant" in text and "restock" in text:
+        return "Instant Restock"
+    if "restock" in text:
+        return "Restock"
+    if "return" in text:
+        return "Return"
+    return "Other stock-add candidate"
+
+
+def prep_stock_add_history(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    out["stock_add_dt"] = pd.to_datetime(out["stock_add_dt"], errors="coerce")
+    out["med_id"] = out["med_id"].fillna("").astype(str).str.strip().str.upper()
+    out["med_desc"] = out["med_desc"].fillna("").astype(str).str.strip()
+    out["priority"] = out["priority"].fillna("").astype(str).str.strip()
+    out["user_name"] = out["user_name"].fillna("").astype(str).str.strip()
+    out["qty"] = pd.to_numeric(out["qty"], errors="coerce").fillna(0)
+    out["stock_add_mode"] = out["priority"].apply(classify_stock_add_mode)
+    return out.dropna(subset=["stock_add_dt"])
 
 
 def prep_isa_items(df):
@@ -368,11 +428,48 @@ def build_packaging_summary(packaging):
     return summary.merge(last_rows, on="med_id", how="left")
 
 
-def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary):
+def build_stock_add_summary(stock_add_history):
+    columns = [
+        "med_id", "first_stock_add", "last_stock_add", "stock_add_events",
+        "return_restock_events", "latest_stock_add_mode", "latest_stock_add_priority",
+        "latest_stock_add_by", "latest_stock_add_qty", "stock_add_trail_status",
+        "stock_add_followup",
+    ]
+    if stock_add_history.empty:
+        return pd.DataFrame(columns=columns)
+
+    sorted_stock = stock_add_history.sort_values("stock_add_dt")
+    summary = sorted_stock.groupby("med_id", dropna=False).agg(
+        first_stock_add=("stock_add_dt", "min"),
+        last_stock_add=("stock_add_dt", "max"),
+        stock_add_events=("pk", "count"),
+        return_restock_events=("stock_add_mode", lambda s: s.isin([
+            "Return", "Instant Return", "Instant Restock", "Restock", "Inventory Move",
+        ]).sum()),
+    ).reset_index()
+
+    last_rows = sorted_stock.groupby("med_id", dropna=False).tail(1)[[
+        "med_id", "stock_add_mode", "priority", "user_name", "qty",
+    ]].rename(columns={
+        "stock_add_mode": "latest_stock_add_mode",
+        "priority": "latest_stock_add_priority",
+        "user_name": "latest_stock_add_by",
+        "qty": "latest_stock_add_qty",
+    })
+    summary = summary.merge(last_rows, on="med_id", how="left")
+    summary["stock_add_trail_status"] = "Stock-add trail found"
+    summary.loc[summary["return_restock_events"].gt(0), "stock_add_trail_status"] = "Return/restock trail found"
+    summary["stock_add_followup"] = "Stock-add trail found - review latest event if expiration concern remains"
+    return summary[columns]
+
+
+def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary):
     if isa_items.empty:
         return pd.DataFrame()
 
     base = isa_items.merge(receiving_summary, on="med_id", how="left")
+    if not stock_add_summary.empty:
+        base = base.merge(stock_add_summary, on="med_id", how="left")
     if not packaging_summary.empty:
         base = base.merge(packaging_summary, on="med_id", how="left")
     if not inventory_counts.empty:
@@ -410,6 +507,27 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
     base["pocket_count"] = pd.to_numeric(base["pocket_count"], errors="coerce").fillna(0).astype(int)
     base["receiving_status"] = base["last_received"].apply(lambda value: "No Receiving Match" if pd.isna(value) else "Matched")
     base["packaging_status"] = base["last_packaged"].apply(lambda value: "Packaged" if pd.notna(value) else "Not Packaged")
+    for col in ["stock_add_events", "return_restock_events"]:
+        if col not in base.columns:
+            base[col] = 0
+        base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0).astype(int)
+    for col in [
+        "latest_stock_add_mode", "latest_stock_add_priority", "latest_stock_add_by",
+        "stock_add_trail_status", "stock_add_followup",
+    ]:
+        if col not in base.columns:
+            base[col] = ""
+        base[col] = base[col].fillna("").astype(str)
+    for col in ["first_stock_add", "last_stock_add"]:
+        if col not in base.columns:
+            base[col] = pd.NaT
+        base[col] = pd.to_datetime(base[col], errors="coerce")
+    if "latest_stock_add_qty" not in base.columns:
+        base["latest_stock_add_qty"] = 0
+    base["latest_stock_add_qty"] = pd.to_numeric(base["latest_stock_add_qty"], errors="coerce").fillna(0)
+    no_stock_add = base["stock_add_events"].eq(0)
+    base.loc[no_stock_add, "stock_add_trail_status"] = "Before data recording / no stock-add found"
+    base.loc[no_stock_add, "stock_add_followup"] = "Likely before data recording - review pocket for expired meds"
     base["receiving_age_bucket"] = pd.cut(
         base["days_since_last_received"],
         bins=[-1, 30, 60, 90, 180, 99999],
@@ -436,14 +554,16 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
 
 
 receiving = prep_receiving(load_receiving_history())
+stock_add_history = prep_stock_add_history(load_stock_add_history())
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
 pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
 packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
 receiving_summary = build_receiving_summary(receiving)
+stock_add_summary = build_stock_add_summary(stock_add_history)
 packaging_summary = build_packaging_summary(packaging)
-isa_lifecycle = build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary)
+isa_lifecycle = build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary)
 
 tab_lifecycle, tab_unload = st.tabs(["ISA Receiving Lifecycle", "Pyxis 28-Day Unload"])
 
@@ -577,6 +697,15 @@ with tab_lifecycle:
             "total_received_qty",
             "last_received_by",
             "receiving_status",
+            "stock_add_trail_status",
+            "stock_add_followup",
+            "last_stock_add",
+            "latest_stock_add_mode",
+            "latest_stock_add_priority",
+            "latest_stock_add_by",
+            "latest_stock_add_qty",
+            "stock_add_events",
+            "return_restock_events",
             "packaging_status",
             "last_packaged",
             "days_since_last_packaged",
@@ -595,12 +724,14 @@ with tab_lifecycle:
             column_config={
                 "last_received": st.column_config.DatetimeColumn("Last Received", format="MM/DD/YYYY HH:mm"),
                 "first_received": st.column_config.DatetimeColumn("First Received", format="MM/DD/YYYY HH:mm"),
+                "last_stock_add": st.column_config.DatetimeColumn("Last Stock Add", format="MM/DD/YYYY HH:mm"),
                 "last_packaged": st.column_config.DatetimeColumn("Last Packaged", format="MM/DD/YYYY HH:mm"),
                 "latest_packaged_expire_date": st.column_config.DatetimeColumn("Packaged Expire", format="MM/DD/YYYY"),
                 "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
                 "pocket_count": st.column_config.NumberColumn("Carousel Pockets", format="%d"),
                 "days_since_last_received": st.column_config.NumberColumn("Days Since Received", format="%.0f"),
                 "days_until_packaged_expire": st.column_config.NumberColumn("Days Until Packaged Expire", format="%.0f"),
+                "latest_stock_add_qty": st.column_config.NumberColumn("Latest Stock Add Qty", format="%.0f"),
             },
         )
 
@@ -668,6 +799,13 @@ with tab_lifecycle:
         with st.expander("Raw receiving rows"):
             raw_cols = ["received_dt", "queue_id", "med_id", "med_desc", "user_name", "qty"]
             st.dataframe(receiving[raw_cols], width="stretch", hide_index=True)
+
+        with st.expander("Raw stock-add rows"):
+            raw_stock_cols = [
+                "stock_add_dt", "stock_add_mode", "priority", "queue_id",
+                "med_id", "med_desc", "destination", "user_name", "qty",
+            ]
+            st.dataframe(stock_add_history[raw_stock_cols], width="stretch", hide_index=True)
 
         with st.expander("Raw packaging rows"):
             if packaging.empty:
