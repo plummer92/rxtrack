@@ -125,6 +125,34 @@ def load_stock_add_history():
 
 
 @st.cache_data(ttl=60)
+def load_deduction_history():
+    sql = text("""
+        SELECT
+            pk,
+            queue_id,
+            priority,
+            dt::timestamp AS deducted_dt,
+            med_id,
+            med_desc,
+            destination,
+            user_name,
+            qty
+        FROM pharmacy_orders
+        WHERE med_id IS NOT NULL
+          AND dt IS NOT NULL
+          AND (
+                priority ILIKE '%pyxis%pull%'
+             OR priority ILIKE '%pull%'
+             OR priority ILIKE '%dispense%'
+             OR priority ILIKE '%deduct%'
+          )
+        ORDER BY dt::timestamp DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
 def load_latest_isa_items():
     sql = text("""
         WITH latest AS (
@@ -279,6 +307,20 @@ def prep_stock_add_history(df):
     out["qty"] = pd.to_numeric(out["qty"], errors="coerce").fillna(0)
     out["stock_add_mode"] = out["priority"].apply(classify_stock_add_mode)
     return out.dropna(subset=["stock_add_dt"])
+
+
+def prep_deduction_history(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    out["deducted_dt"] = pd.to_datetime(out["deducted_dt"], errors="coerce")
+    out["med_id"] = out["med_id"].fillna("").astype(str).str.strip().str.upper()
+    out["med_desc"] = out["med_desc"].fillna("").astype(str).str.strip()
+    out["priority"] = out["priority"].fillna("").astype(str).str.strip()
+    out["destination"] = out["destination"].fillna("").astype(str).str.strip()
+    out["user_name"] = out["user_name"].fillna("").astype(str).str.strip()
+    out["qty"] = pd.to_numeric(out["qty"], errors="coerce").fillna(0)
+    return out.dropna(subset=["deducted_dt"])
 
 
 def prep_isa_items(df):
@@ -463,13 +505,41 @@ def build_stock_add_summary(stock_add_history):
     return summary[columns]
 
 
-def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary):
+def build_deduction_summary(deduction_history):
+    columns = [
+        "med_id", "last_deducted", "deduction_events", "total_deducted_qty",
+        "last_deducted_by", "last_deduction_destination", "last_deduction_priority",
+        "last_deduction_qty",
+    ]
+    if deduction_history.empty:
+        return pd.DataFrame(columns=columns)
+
+    sorted_deductions = deduction_history.sort_values("deducted_dt")
+    summary = sorted_deductions.groupby("med_id", dropna=False).agg(
+        last_deducted=("deducted_dt", "max"),
+        deduction_events=("pk", "count"),
+        total_deducted_qty=("qty", "sum"),
+    ).reset_index()
+    last_rows = sorted_deductions.groupby("med_id", dropna=False).tail(1)[[
+        "med_id", "user_name", "destination", "priority", "qty",
+    ]].rename(columns={
+        "user_name": "last_deducted_by",
+        "destination": "last_deduction_destination",
+        "priority": "last_deduction_priority",
+        "qty": "last_deduction_qty",
+    })
+    return summary.merge(last_rows, on="med_id", how="left")[columns]
+
+
+def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary, deduction_summary):
     if isa_items.empty:
         return pd.DataFrame()
 
     base = isa_items.merge(receiving_summary, on="med_id", how="left")
     if not stock_add_summary.empty:
         base = base.merge(stock_add_summary, on="med_id", how="left")
+    if not deduction_summary.empty:
+        base = base.merge(deduction_summary, on="med_id", how="left")
     if not packaging_summary.empty:
         base = base.merge(packaging_summary, on="med_id", how="left")
     if not inventory_counts.empty:
@@ -483,6 +553,21 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
     base["first_received"] = pd.to_datetime(base["first_received"], errors="coerce")
     base["days_since_last_received"] = (today - base["last_received"]).dt.days
     base["days_since_first_received"] = (today - base["first_received"]).dt.days
+    base["last_cycle_count"] = pd.to_datetime(base["last_cycle_count"], errors="coerce")
+    base["days_since_last_cycle_count"] = (today - base["last_cycle_count"]).dt.days
+    if "last_deducted" not in base.columns:
+        base["last_deducted"] = pd.NaT
+    base["last_deducted"] = pd.to_datetime(base["last_deducted"], errors="coerce")
+    base["days_since_last_deducted"] = (today - base["last_deducted"]).dt.days
+    for col in ["deduction_events", "total_deducted_qty", "last_deduction_qty"]:
+        if col not in base.columns:
+            base[col] = 0
+        base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0)
+    base["deduction_events"] = base["deduction_events"].astype(int)
+    for col in ["last_deducted_by", "last_deduction_destination", "last_deduction_priority"]:
+        if col not in base.columns:
+            base[col] = ""
+        base[col] = base[col].fillna("").astype(str)
     if "last_packaged" not in base.columns:
         base["last_packaged"] = pd.NaT
     if "latest_packaged_expire_date" not in base.columns:
@@ -555,6 +640,7 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
 
 receiving = prep_receiving(load_receiving_history())
 stock_add_history = prep_stock_add_history(load_stock_add_history())
+deduction_history = prep_deduction_history(load_deduction_history())
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
 pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
@@ -562,8 +648,16 @@ packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
 receiving_summary = build_receiving_summary(receiving)
 stock_add_summary = build_stock_add_summary(stock_add_history)
+deduction_summary = build_deduction_summary(deduction_history)
 packaging_summary = build_packaging_summary(packaging)
-isa_lifecycle = build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary)
+isa_lifecycle = build_isa_lifecycle(
+    isa_items,
+    receiving_summary,
+    inventory_counts,
+    packaging_summary,
+    stock_add_summary,
+    deduction_summary,
+)
 
 tab_lifecycle, tab_unload = st.tabs(["ISA Receiving Lifecycle", "Pyxis 28-Day Unload"])
 
@@ -687,6 +781,16 @@ with tab_lifecycle:
             "med_desc",
             "current_count",
             "pocket_count",
+            "last_cycle_count",
+            "days_since_last_cycle_count",
+            "last_deducted",
+            "days_since_last_deducted",
+            "last_deduction_qty",
+            "last_deduction_priority",
+            "last_deduction_destination",
+            "last_deducted_by",
+            "deduction_events",
+            "total_deducted_qty",
             "last_received",
             "days_since_last_received",
             "receiving_age_bucket",
@@ -724,11 +828,18 @@ with tab_lifecycle:
             column_config={
                 "last_received": st.column_config.DatetimeColumn("Last Received", format="MM/DD/YYYY HH:mm"),
                 "first_received": st.column_config.DatetimeColumn("First Received", format="MM/DD/YYYY HH:mm"),
+                "last_cycle_count": st.column_config.DatetimeColumn("Last Cycle Count", format="MM/DD/YYYY HH:mm"),
+                "last_deducted": st.column_config.DatetimeColumn("Last Deducted", format="MM/DD/YYYY HH:mm"),
                 "last_stock_add": st.column_config.DatetimeColumn("Last Stock Add", format="MM/DD/YYYY HH:mm"),
                 "last_packaged": st.column_config.DatetimeColumn("Last Packaged", format="MM/DD/YYYY HH:mm"),
                 "latest_packaged_expire_date": st.column_config.DatetimeColumn("Packaged Expire", format="MM/DD/YYYY"),
                 "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
                 "pocket_count": st.column_config.NumberColumn("Carousel Pockets", format="%d"),
+                "days_since_last_cycle_count": st.column_config.NumberColumn("Days Since Cycle Count", format="%.0f"),
+                "days_since_last_deducted": st.column_config.NumberColumn("Days Since Deducted", format="%.0f"),
+                "last_deduction_qty": st.column_config.NumberColumn("Last Deducted Qty", format="%.0f"),
+                "deduction_events": st.column_config.NumberColumn("Deduction Events", format="%d"),
+                "total_deducted_qty": st.column_config.NumberColumn("Total Deducted Qty", format="%.0f"),
                 "days_since_last_received": st.column_config.NumberColumn("Days Since Received", format="%.0f"),
                 "days_until_packaged_expire": st.column_config.NumberColumn("Days Until Packaged Expire", format="%.0f"),
                 "latest_stock_add_qty": st.column_config.NumberColumn("Latest Stock Add Qty", format="%.0f"),
@@ -806,6 +917,13 @@ with tab_lifecycle:
                 "med_id", "med_desc", "destination", "user_name", "qty",
             ]
             st.dataframe(stock_add_history[raw_stock_cols], width="stretch", hide_index=True)
+
+        with st.expander("Raw deduction rows"):
+            raw_deduction_cols = [
+                "deducted_dt", "priority", "queue_id", "med_id", "med_desc",
+                "destination", "user_name", "qty",
+            ]
+            st.dataframe(deduction_history[raw_deduction_cols], width="stretch", hide_index=True)
 
         with st.expander("Raw packaging rows"):
             if packaging.empty:
