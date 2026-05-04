@@ -153,6 +153,70 @@ def add_inventory_change_flags(df):
     )
     return work
 
+
+@st.cache_data(ttl=300)
+def load_same_med_device_history(device, med_id, selected_dt):
+    """Load all prior events for the same Pyxis device and med_id."""
+    try:
+        sql = text("""
+            SELECT
+                pk, dt, user_name, device, med_id, med_desc, event_type, qty,
+                beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
+            FROM events
+            WHERE device = :device
+              AND med_id = :med_id
+              AND dt <= :selected_dt
+            ORDER BY dt DESC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={
+                    "device": str(device),
+                    "med_id": str(med_id),
+                    "selected_dt": selected_dt,
+                },
+            )
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
+        df["med_desc"] = df["med_desc"].fillna("").astype(str).str.strip()
+        for col in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return add_inventory_change_flags(df.dropna(subset=["dt"]))
+    except Exception as e:
+        st.error(f"[load_same_med_device_history] {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_current_pocket_locations(device, med_id):
+    """Find the current pocket location for a device/med pair when inventory detail exists."""
+    try:
+        sql = text("""
+            SELECT 'Detailed inventory' AS source_name, station AS device, pocket_location, current_count
+            FROM inventory_detailed
+            WHERE station = :device AND med_id = :med_id
+            UNION ALL
+            SELECT 'Device inventory' AS source_name, device, pocket_location, current_quantity AS current_count
+            FROM device_inventory
+            WHERE device = :device AND med_id = :med_id
+            ORDER BY source_name, pocket_location
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"device": str(device), "med_id": str(med_id)})
+        if df.empty:
+            return df
+        df["pocket_location"] = df["pocket_location"].fillna("").astype(str).str.strip()
+        df["current_count"] = pd.to_numeric(df["current_count"], errors="coerce")
+        return df
+    except Exception as e:
+        st.error(f"[load_current_pocket_locations] {e}")
+        return pd.DataFrame()
+
 start_date, end_date = render_sidebar()
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
@@ -505,39 +569,157 @@ with tab4:
 
             detail_view = detail_view.sort_values(["user_name", "dt"]).copy()
             detail_view["Count Changed"] = detail_view["count_changed"].map({True: "Yes", False: "No"})
-            st.dataframe(
-                detail_view[
-                    [
-                        "dt",
-                        "user_name",
-                        "device",
-                        "event_type",
-                        "med_desc",
-                        "beginning_qty",
-                        "ending_qty",
-                        "discrepancy_qty",
-                        "change_amount",
-                        "Count Changed",
-                    ]
-                ].rename(
-                    columns={
-                        "dt": "Time",
-                        "user_name": "Technician",
-                        "device": "Device",
-                        "event_type": "Event Type",
-                        "med_desc": "Medication",
-                        "beginning_qty": "Beginning Qty",
-                        "ending_qty": "Ending Qty",
-                        "discrepancy_qty": "Discrepancy Qty",
-                        "change_amount": "Change Amount",
-                    }
-                ),
+            detail_display = detail_view[
+                [
+                    "dt",
+                    "user_name",
+                    "device",
+                    "event_type",
+                    "med_desc",
+                    "beginning_qty",
+                    "ending_qty",
+                    "discrepancy_qty",
+                    "change_amount",
+                    "Count Changed",
+                ]
+            ].rename(
+                columns={
+                    "dt": "Time",
+                    "user_name": "Technician",
+                    "device": "Device",
+                    "event_type": "Event Type",
+                    "med_desc": "Medication",
+                    "beginning_qty": "Beginning Qty",
+                    "ending_qty": "Ending Qty",
+                    "discrepancy_qty": "Discrepancy Qty",
+                    "change_amount": "Change Amount",
+                }
+            )
+            st.caption("Click an inventory check row to see the earlier users and transactions for that same device + medication.")
+            detail_event = st.dataframe(
+                detail_display,
                 use_container_width=True,
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
                 column_config={
                     "Time": st.column_config.DatetimeColumn("Time", format="MM/DD/YY HH:mm:ss"),
                 },
             )
+
+            if len(detail_event.selection.rows) > 0:
+                selected_detail = detail_view.iloc[detail_event.selection.rows[0]]
+                selected_device = selected_detail["device"]
+                selected_med_id = selected_detail["med_id"]
+                selected_dt = selected_detail["dt"]
+                selected_med = selected_detail["med_desc"]
+                selected_pk = selected_detail["pk"]
+
+                st.divider()
+                st.subheader("Same Pocket History")
+                st.caption(
+                    "Pyxis transaction imports do not include drawer/subdrawer/pocket history, so this trail uses the same "
+                    "device + medication and shows the current pocket location when inventory detail is available."
+                )
+
+                pocket_locations = load_current_pocket_locations(selected_device, selected_med_id)
+                h1, h2, h3 = st.columns(3)
+                h1.metric("Device", str(selected_device))
+                h2.metric("Med ID", str(selected_med_id))
+                h3.metric("Selected Time", pd.to_datetime(selected_dt).strftime("%m/%d/%y %H:%M"))
+                st.write(f"**Medication:** {selected_med}")
+
+                if not pocket_locations.empty:
+                    st.dataframe(
+                        pocket_locations.rename(
+                            columns={
+                                "source_name": "Source",
+                                "device": "Device",
+                                "pocket_location": "Current Pocket",
+                                "current_count": "Current Count",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("No current pocket location was found for this device + medication in the inventory detail tables.")
+
+                history = load_same_med_device_history(selected_device, selected_med_id, selected_dt)
+                if history.empty:
+                    st.info("No previous transactions were found for this same device + medication.")
+                else:
+                    prior_history = history[history["dt"].lt(selected_dt)].copy()
+                    user_summary = (
+                        prior_history.groupby("user_name")
+                        .agg(
+                            prior_events=("pk", "count"),
+                            changed_counts=("count_changed", "sum"),
+                            first_seen=("dt", "min"),
+                            last_seen=("dt", "max"),
+                        )
+                        .reset_index()
+                        if not prior_history.empty
+                        else pd.DataFrame(columns=["user_name", "prior_events", "changed_counts", "first_seen", "last_seen"])
+                    )
+                    if not user_summary.empty:
+                        user_summary["changed_counts"] = user_summary["changed_counts"].astype(int)
+                        user_summary = user_summary.sort_values("last_seen", ascending=False)
+                    st.dataframe(
+                        user_summary.rename(
+                            columns={
+                                "user_name": "Previous User",
+                                "prior_events": "Prior Events",
+                                "changed_counts": "Changed Counts",
+                                "first_seen": "First Seen",
+                                "last_seen": "Last Seen",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "First Seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
+                            "Last Seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
+                        },
+                    )
+
+                    history_display = history.copy()
+                    history_display["Count Changed"] = history_display["count_changed"].map({True: "Yes", False: "No"})
+                    history_display["Selected Row"] = history_display["pk"].eq(selected_pk).map({True: "Selected", False: ""})
+                    st.dataframe(
+                        history_display[
+                            [
+                                "Selected Row",
+                                "dt",
+                                "user_name",
+                                "event_type",
+                                "qty",
+                                "beginning_qty",
+                                "ending_qty",
+                                "discrepancy_qty",
+                                "change_amount",
+                                "Count Changed",
+                                "discrepancy_reason",
+                            ]
+                        ].rename(
+                            columns={
+                                "dt": "Time",
+                                "user_name": "User",
+                                "event_type": "Event Type",
+                                "qty": "Qty",
+                                "beginning_qty": "Beginning Qty",
+                                "ending_qty": "Ending Qty",
+                                "discrepancy_qty": "Discrepancy Qty",
+                                "change_amount": "Change Amount",
+                                "discrepancy_reason": "Reason",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Time": st.column_config.DatetimeColumn("Time", format="MM/DD/YY HH:mm:ss"),
+                        },
+                    )
 
 
 @st.cache_data(ttl=300)
