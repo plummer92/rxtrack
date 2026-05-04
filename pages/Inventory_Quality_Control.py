@@ -588,6 +588,31 @@ def build_deduction_summary(deduction_history):
     return summary.merge(last_rows, on="med_id", how="left")[columns]
 
 
+def build_pyxis_exposure_summary(pyxis_inventory):
+    columns = [
+        "med_id", "pyxis_machine_count", "pyxis_pocket_count",
+        "pyxis_total_count", "pyxis_machines_to_check",
+    ]
+    if pyxis_inventory.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = pyxis_inventory.copy()
+    work["med_id"] = work["med_id"].fillna("").astype(str).str.strip().str.upper()
+    work["station"] = work["station"].fillna("").astype(str).str.strip()
+    work["current_count"] = pd.to_numeric(work["current_count"], errors="coerce").fillna(0)
+    summary = (
+        work.groupby("med_id", dropna=False)
+        .agg(
+            pyxis_machine_count=("station", "nunique"),
+            pyxis_pocket_count=("station", "count"),
+            pyxis_total_count=("current_count", "sum"),
+            pyxis_machines_to_check=("station", lambda s: ", ".join(sorted(set(s.dropna().astype(str))))),
+        )
+        .reset_index()
+    )
+    return summary[columns]
+
+
 def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary, deduction_summary):
     if isa_items.empty:
         return pd.DataFrame()
@@ -707,6 +732,7 @@ device_inventory = prep_device_inventory(load_device_inventory())
 receiving_summary = build_receiving_summary(receiving)
 stock_add_summary = build_stock_add_summary(stock_add_history)
 deduction_summary = build_deduction_summary(deduction_history)
+pyxis_exposure_summary = build_pyxis_exposure_summary(pyxis_inventory)
 packaging_summary = build_packaging_summary(packaging)
 isa_lifecycle = build_isa_lifecycle(
     isa_items,
@@ -828,6 +854,18 @@ with tab_lifecycle:
                 ]["action_key"].dropna().astype(str)
             )
         if not packaged_review.empty:
+            if not pyxis_exposure_summary.empty:
+                packaged_review = packaged_review.merge(pyxis_exposure_summary, on="med_id", how="left")
+            for col in ["pyxis_machine_count", "pyxis_pocket_count", "pyxis_total_count"]:
+                if col not in packaged_review.columns:
+                    packaged_review[col] = 0
+                packaged_review[col] = pd.to_numeric(packaged_review[col], errors="coerce").fillna(0)
+            if "pyxis_machines_to_check" not in packaged_review.columns:
+                packaged_review["pyxis_machines_to_check"] = ""
+            packaged_review["pyxis_machines_to_check"] = packaged_review["pyxis_machines_to_check"].fillna("").astype(str)
+            packaged_review["pyxis_check_status"] = packaged_review["pyxis_machine_count"].apply(
+                lambda count: "Check Pyxis machines" if count > 0 else "No current Pyxis stock found"
+            )
             packaged_review["action_key"] = (
                 packaged_review["isa_name"].astype(str) + "|"
                 + packaged_review["location"].astype(str) + "|"
@@ -850,7 +888,8 @@ with tab_lifecycle:
                 exp_cols = [
                     "isa_name", "location", "med_id", "med_desc", "last_packaged",
                     "latest_packaged_expire_date", "days_until_packaged_expire", "last_packaged_by",
-                    "latest_hospital_lot_number", "qc_status",
+                    "latest_hospital_lot_number", "pyxis_check_status", "pyxis_machine_count",
+                    "pyxis_total_count", "pyxis_machines_to_check", "qc_status",
                 ]
                 packaged_event = st.dataframe(
                     review_display.sort_values("days_until_packaged_expire")[exp_cols],
@@ -858,11 +897,32 @@ with tab_lifecycle:
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="single-row",
+                    column_config={
+                        "pyxis_machine_count": st.column_config.NumberColumn("Pyxis Machines", format="%d"),
+                        "pyxis_total_count": st.column_config.NumberColumn("Pyxis Qty", format="%.0f"),
+                    },
                 )
                 if packaged_event.selection.rows:
                     selected_pkg = review_display.sort_values("days_until_packaged_expire").reset_index(drop=True).iloc[
                         packaged_event.selection.rows[0]
                     ]
+                    selected_pyxis = pyxis_inventory[pyxis_inventory["med_id"].eq(str(selected_pkg["med_id"]).strip().upper())].copy()
+                    if not selected_pyxis.empty:
+                        st.caption("Current Pyxis locations to check for this expiring packaged med.")
+                        st.dataframe(
+                            selected_pyxis[[
+                                "station", "pocket_location", "med_id", "med_desc", "current_count", "unit_cost", "inventory_value",
+                            ]],
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "station": "Pyxis Machine",
+                                "pocket_location": "Pocket",
+                                "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
+                                "unit_cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                                "inventory_value": st.column_config.NumberColumn("Value", format="$%.2f"),
+                            },
+                        )
                     with st.form("packaged_expiration_action_form"):
                         st.caption("Use this after you physically remove the expiring packaged item from the carousel.")
                         action_by = st.text_input("Removed by", value="")
