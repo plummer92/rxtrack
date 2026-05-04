@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import re
 import json
+from datetime import time
 from sqlalchemy import text
 import App
 
@@ -84,6 +85,73 @@ def summarize_shift_audit(active_sessions, active_work_keys, training_count):
         "long_gap_count": long_gap_count,
         "training_count": training_count,
     }
+
+
+@st.cache_data(ttl=300)
+def load_inventory_verification_events(start_date, end_date):
+    """Load Pyxis inventory verification rows with count-before/count-after fields."""
+    try:
+        sql = text("""
+            SELECT
+                pk, dt, user_name, device, med_id, med_desc, event_type, qty,
+                beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
+            FROM events
+            WHERE dt::date BETWEEN :start_date AND :end_date
+              AND (
+                    event_type ILIKE '%verify%'
+                 OR event_type ILIKE '%verified%'
+                 OR event_type ILIKE '%inventory%'
+                 OR event_type ILIKE '%count%'
+              )
+            ORDER BY dt
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={"start_date": str(start_date), "end_date": str(end_date)},
+            )
+        if df.empty:
+            return df
+
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["user_name"] = df["user_name"].fillna("Unknown").astype(str).str.strip()
+        df["device"] = df["device"].fillna("Unknown").astype(str).str.strip()
+        df["event_type"] = df["event_type"].fillna("").astype(str).str.strip()
+        df["med_desc"] = df["med_desc"].fillna("").astype(str).str.strip()
+        for col in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df.dropna(subset=["dt"])
+    except Exception as e:
+        st.error(f"[load_inventory_verification_events] {e}")
+        return pd.DataFrame()
+
+
+def filter_by_time_window(df, start_t, end_t):
+    if df.empty:
+        return df
+    start_minutes = start_t.hour * 60 + start_t.minute
+    end_minutes = end_t.hour * 60 + end_t.minute
+    event_minutes = df["dt"].dt.hour * 60 + df["dt"].dt.minute
+    if start_minutes <= end_minutes:
+        return df[(event_minutes >= start_minutes) & (event_minutes <= end_minutes)].copy()
+    return df[(event_minutes >= start_minutes) | (event_minutes <= end_minutes)].copy()
+
+
+def add_inventory_change_flags(df):
+    if df.empty:
+        return df
+    work = df.copy()
+    has_begin_end = work["beginning_qty"].notna() & work["ending_qty"].notna()
+    begin_end_changed = has_begin_end & work["beginning_qty"].ne(work["ending_qty"])
+    discrepancy_changed = work["discrepancy_qty"].fillna(0).ne(0)
+    work["count_changed"] = begin_end_changed | discrepancy_changed
+    work["change_amount"] = np.where(
+        has_begin_end,
+        work["ending_qty"].fillna(0) - work["beginning_qty"].fillna(0),
+        work["discrepancy_qty"].fillna(0),
+    )
+    return work
 
 start_date, end_date = render_sidebar()
 if hasattr(App, "render_page_intro"):
@@ -172,7 +240,7 @@ sessions['Walk Time'] = (sessions['Next Start'] - sessions['End']).dt.total_seco
 # TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3 = st.tabs(["🔍 Session View", "🕐 Shift Timeline", "🧭 Shift Work Map"])
+tab1, tab2, tab3, tab4 = st.tabs(["Session View", "Shift Timeline", "Shift Work Map", "Inventory Accuracy"])
 
 WORK_TYPE_ORDER = [
     "Carousel / 0400 Pull",
@@ -310,6 +378,153 @@ with tab1:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — SHIFT TIMELINE
 # ─────────────────────────────────────────────────────────────────────────────
+
+with tab4:
+    st.subheader("Inventory Accuracy by Delivery Run")
+    st.caption(
+        "Compare how many verified inventory checks each delivery tech completed and how often the count had to be changed."
+    )
+
+    f1, f2, f3 = st.columns([1, 1, 2])
+    run_start = f1.time_input("Run start", value=time(5, 0), key="inventory_run_start")
+    run_end = f2.time_input("Run end", value=time(8, 0), key="inventory_run_end")
+
+    inv_events = add_inventory_change_flags(load_inventory_verification_events(start_date, end_date))
+    inv_events = filter_by_time_window(inv_events, run_start, run_end)
+
+    if inv_events.empty:
+        st.info("No inventory verification events were found for the selected date range and run window.")
+    else:
+        all_inventory_users = sorted(inv_events["user_name"].dropna().unique().tolist())
+        selected_inventory_users = f3.multiselect(
+            "Technicians",
+            all_inventory_users,
+            default=all_inventory_users,
+            key="inventory_accuracy_users",
+        )
+
+        accuracy_view = inv_events.copy()
+        if selected_inventory_users:
+            accuracy_view = accuracy_view[accuracy_view["user_name"].isin(selected_inventory_users)]
+
+        if accuracy_view.empty:
+            st.info("No inventory checks match the selected technicians.")
+        else:
+            summary = (
+                accuracy_view.groupby("user_name")
+                .agg(
+                    verified_checks=("pk", "count"),
+                    changed_counts=("count_changed", "sum"),
+                    active_days=("dt", lambda s: s.dt.date.nunique()),
+                    first_check=("dt", "min"),
+                    last_check=("dt", "max"),
+                    devices=("device", lambda s: ", ".join(sorted(set(s.dropna().astype(str))))),
+                )
+                .reset_index()
+            )
+            summary["changed_counts"] = summary["changed_counts"].astype(int)
+            summary["changed_count_pct"] = np.where(
+                summary["verified_checks"].gt(0),
+                summary["changed_counts"] / summary["verified_checks"] * 100,
+                0,
+            )
+            summary = summary.sort_values(["changed_count_pct", "verified_checks"], ascending=[False, False])
+
+            total_checks = int(summary["verified_checks"].sum())
+            total_changed = int(summary["changed_counts"].sum())
+            overall_pct = (total_changed / total_checks * 100) if total_checks else 0
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Verified Checks", f"{total_checks:,}")
+            m2.metric("Counts Changed", f"{total_changed:,}")
+            m3.metric("Changed Count %", f"{overall_pct:.1f}%")
+            m4.metric("Technicians", f"{summary['user_name'].nunique():,}")
+
+            st.caption(
+                "Changed Count % = verified inventory checks where the beginning and ending count differed, "
+                "or the discrepancy quantity was non-zero."
+            )
+
+            chart_df = summary.rename(
+                columns={
+                    "user_name": "Technician",
+                    "verified_checks": "Verified Checks",
+                    "changed_counts": "Counts Changed",
+                    "changed_count_pct": "Changed Count %",
+                }
+            )
+            fig = px.bar(
+                chart_df,
+                x="Technician",
+                y="Changed Count %",
+                text=chart_df["Changed Count %"].map(lambda v: f"{v:.1f}%"),
+                hover_data=["Verified Checks", "Counts Changed", "active_days"],
+                title="Inventory Counts Changed During Delivery Run",
+            )
+            fig.update_traces(textposition="outside")
+            fig.update_layout(yaxis_ticksuffix="%", yaxis_title="Changed Count %", xaxis_title="")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.dataframe(
+                summary.rename(
+                    columns={
+                        "user_name": "Technician",
+                        "verified_checks": "Verified Checks",
+                        "changed_counts": "Counts Changed",
+                        "changed_count_pct": "Changed Count %",
+                        "active_days": "Active Days",
+                        "first_check": "First Check",
+                        "last_check": "Last Check",
+                        "devices": "Devices",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Changed Count %": st.column_config.NumberColumn("Changed Count %", format="%.1f%%"),
+                    "First Check": st.column_config.DatetimeColumn("First Check", format="MM/DD/YY HH:mm"),
+                    "Last Check": st.column_config.DatetimeColumn("Last Check", format="MM/DD/YY HH:mm"),
+                },
+            )
+
+            st.divider()
+            st.subheader("Inventory Check Details")
+            detail_view = accuracy_view.sort_values(["user_name", "dt"]).copy()
+            detail_view["Count Changed"] = detail_view["count_changed"].map({True: "Yes", False: "No"})
+            st.dataframe(
+                detail_view[
+                    [
+                        "dt",
+                        "user_name",
+                        "device",
+                        "event_type",
+                        "med_desc",
+                        "beginning_qty",
+                        "ending_qty",
+                        "discrepancy_qty",
+                        "change_amount",
+                        "Count Changed",
+                    ]
+                ].rename(
+                    columns={
+                        "dt": "Time",
+                        "user_name": "Technician",
+                        "device": "Device",
+                        "event_type": "Event Type",
+                        "med_desc": "Medication",
+                        "beginning_qty": "Beginning Qty",
+                        "ending_qty": "Ending Qty",
+                        "discrepancy_qty": "Discrepancy Qty",
+                        "change_amount": "Change Amount",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Time": st.column_config.DatetimeColumn("Time", format="MM/DD/YY HH:mm:ss"),
+                },
+            )
+
 
 @st.cache_data(ttl=300)
 def load_shift_schedule(sel_date):
