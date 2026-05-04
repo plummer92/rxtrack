@@ -156,7 +156,7 @@ def add_inventory_change_flags(df):
 
 @st.cache_data(ttl=300)
 def load_same_med_device_history(device, med_id, selected_dt):
-    """Load all prior events for the same Pyxis device and med_id."""
+    """Load prior inventory verification events for the same Pyxis device and med_id."""
     try:
         sql = text("""
             SELECT
@@ -166,6 +166,15 @@ def load_same_med_device_history(device, med_id, selected_dt):
             WHERE device = :device
               AND med_id = :med_id
               AND dt::timestamp <= CAST(:selected_dt AS timestamp)
+              AND (
+                    event_type ILIKE '%verify%'
+                 OR event_type ILIKE '%verified%'
+                 OR event_type ILIKE '%inventory%'
+                 OR event_type ILIKE '%count%'
+              )
+              AND event_type NOT ILIKE '%empty%'
+              AND event_type NOT ILIKE '%return bin%'
+              AND event_type NOT ILIKE '%refill%'
             ORDER BY dt::timestamp DESC
         """)
         with engine.connect() as conn:
@@ -595,7 +604,7 @@ with tab4:
                     "change_amount": "Change Amount",
                 }
             )
-            st.caption("Click an inventory check row to see the earlier users and transactions for that same device + medication.")
+            st.caption("Click an inventory check row to see earlier verify-inventory checks for that same device + medication.")
             detail_event = st.dataframe(
                 detail_display,
                 use_container_width=True,
@@ -616,10 +625,10 @@ with tab4:
                 selected_pk = selected_detail["pk"]
 
                 st.divider()
-                st.subheader("Same Pocket History")
+                st.subheader("Verify Inventory Paper Trail")
                 st.caption(
-                    "Pyxis transaction imports do not include drawer/subdrawer/pocket history, so this trail uses the same "
-                    "device + medication and shows the current pocket location when inventory detail is available."
+                    "This focuses on prior verify-inventory/count checks for the same device + medication. Routine refills, "
+                    "empty return bin events, and other non-count transactions are excluded."
                 )
 
                 pocket_locations = load_current_pocket_locations(selected_device, selected_med_id)
@@ -647,20 +656,20 @@ with tab4:
 
                 history = load_same_med_device_history(selected_device, selected_med_id, selected_dt)
                 if history.empty:
-                    st.info("No previous transactions were found for this same device + medication.")
+                    st.info("No previous verify-inventory checks were found for this same device + medication.")
                 else:
                     prior_history = history[history["dt"].lt(selected_dt)].copy()
                     user_summary = (
                         prior_history.groupby("user_name")
                         .agg(
-                            prior_events=("pk", "count"),
+                            prior_checks=("pk", "count"),
                             changed_counts=("count_changed", "sum"),
                             first_seen=("dt", "min"),
                             last_seen=("dt", "max"),
                         )
                         .reset_index()
                         if not prior_history.empty
-                        else pd.DataFrame(columns=["user_name", "prior_events", "changed_counts", "first_seen", "last_seen"])
+                        else pd.DataFrame(columns=["user_name", "prior_checks", "changed_counts", "first_seen", "last_seen"])
                     )
                     if not user_summary.empty:
                         user_summary["changed_counts"] = user_summary["changed_counts"].astype(int)
@@ -669,7 +678,7 @@ with tab4:
                         user_summary.rename(
                             columns={
                                 "user_name": "Previous User",
-                                "prior_events": "Prior Events",
+                                "prior_checks": "Prior Checks",
                                 "changed_counts": "Changed Counts",
                                 "first_seen": "First Seen",
                                 "last_seen": "Last Seen",
@@ -693,7 +702,6 @@ with tab4:
                                 "dt",
                                 "user_name",
                                 "event_type",
-                                "qty",
                                 "beginning_qty",
                                 "ending_qty",
                                 "discrepancy_qty",
@@ -706,7 +714,6 @@ with tab4:
                                 "dt": "Time",
                                 "user_name": "User",
                                 "event_type": "Event Type",
-                                "qty": "Qty",
                                 "beginning_qty": "Beginning Qty",
                                 "ending_qty": "Ending Qty",
                                 "discrepancy_qty": "Discrepancy Qty",
