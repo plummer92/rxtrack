@@ -70,6 +70,21 @@ def ensure_packaging_table():
                 snapshot_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS inventory_qc_actions (
+                id SERIAL PRIMARY KEY,
+                action_key TEXT UNIQUE,
+                action_type TEXT,
+                med_id TEXT,
+                med_desc TEXT,
+                isa_name TEXT,
+                location TEXT,
+                action_status TEXT,
+                action_dt TIMESTAMP DEFAULT NOW(),
+                action_by TEXT,
+                note TEXT
+            )
+        """))
 
 
 ensure_packaging_table()
@@ -150,6 +165,48 @@ def load_deduction_history():
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
+def load_inventory_qc_actions():
+    sql = text("""
+        SELECT
+            action_key,
+            action_type,
+            med_id,
+            med_desc,
+            isa_name,
+            location,
+            action_status,
+            action_dt,
+            action_by,
+            note
+        FROM inventory_qc_actions
+        ORDER BY action_dt DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+def save_inventory_qc_action(action):
+    sql = text("""
+        INSERT INTO inventory_qc_actions (
+            action_key, action_type, med_id, med_desc, isa_name, location,
+            action_status, action_by, note
+        )
+        VALUES (
+            :action_key, :action_type, :med_id, :med_desc, :isa_name, :location,
+            :action_status, :action_by, :note
+        )
+        ON CONFLICT (action_key) DO UPDATE SET
+            action_status = EXCLUDED.action_status,
+            action_dt = NOW(),
+            action_by = EXCLUDED.action_by,
+            note = EXCLUDED.note
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql, action)
+    load_inventory_qc_actions.clear()
 
 
 @st.cache_data(ttl=60)
@@ -641,6 +698,7 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
 receiving = prep_receiving(load_receiving_history())
 stock_add_history = prep_stock_add_history(load_stock_add_history())
 deduction_history = prep_deduction_history(load_deduction_history())
+qc_actions = load_inventory_qc_actions()
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
 pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
@@ -761,17 +819,69 @@ with tab_lifecycle:
             & view["days_until_packaged_expire"].notna()
             & (view["days_until_packaged_expire"] <= 90)
         ].copy()
+        resolved_package_keys = set()
+        if not qc_actions.empty:
+            resolved_package_keys = set(
+                qc_actions[
+                    qc_actions["action_type"].eq("packaged_expiration")
+                    & qc_actions["action_status"].eq("Removed from carousel")
+                ]["action_key"].dropna().astype(str)
+            )
+        if not packaged_review.empty:
+            packaged_review["action_key"] = (
+                packaged_review["isa_name"].astype(str) + "|"
+                + packaged_review["location"].astype(str) + "|"
+                + packaged_review["med_id"].astype(str) + "|"
+                + packaged_review["latest_hospital_lot_number"].fillna("").astype(str) + "|"
+                + packaged_review["latest_packaged_expire_date"].astype(str)
+            )
+            packaged_review["qc_status"] = packaged_review["action_key"].apply(
+                lambda value: "Removed from carousel" if value in resolved_package_keys else "Needs review"
+            )
         if not packaged_review.empty:
             st.markdown("##### Packaged Items Expiring Within 90 Days")
-            exp_cols = [
-                "isa_name", "location", "med_id", "med_desc", "last_packaged",
-                "latest_packaged_expire_date", "days_until_packaged_expire", "last_packaged_by",
-            ]
-            st.dataframe(
-                packaged_review.sort_values("days_until_packaged_expire")[exp_cols],
-                width="stretch",
-                hide_index=True,
-            )
+            hide_removed = st.toggle("Hide packaged items marked removed", value=True)
+            review_display = packaged_review.copy()
+            if hide_removed:
+                review_display = review_display[~review_display["qc_status"].eq("Removed from carousel")]
+            if review_display.empty:
+                st.success("All packaged items in this filter have been marked removed from carousel.")
+            else:
+                exp_cols = [
+                    "isa_name", "location", "med_id", "med_desc", "last_packaged",
+                    "latest_packaged_expire_date", "days_until_packaged_expire", "last_packaged_by",
+                    "latest_hospital_lot_number", "qc_status",
+                ]
+                packaged_event = st.dataframe(
+                    review_display.sort_values("days_until_packaged_expire")[exp_cols],
+                    width="stretch",
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                )
+                if packaged_event.selection.rows:
+                    selected_pkg = review_display.sort_values("days_until_packaged_expire").reset_index(drop=True).iloc[
+                        packaged_event.selection.rows[0]
+                    ]
+                    with st.form("packaged_expiration_action_form"):
+                        st.caption("Use this after you physically remove the expiring packaged item from the carousel.")
+                        action_by = st.text_input("Removed by", value="")
+                        note = st.text_area("Note", value="Removed from carousel due to packaged expiration review.")
+                        submitted = st.form_submit_button("Mark selected item removed from carousel")
+                        if submitted:
+                            save_inventory_qc_action({
+                                "action_key": selected_pkg["action_key"],
+                                "action_type": "packaged_expiration",
+                                "med_id": selected_pkg["med_id"],
+                                "med_desc": selected_pkg["med_desc"],
+                                "isa_name": selected_pkg["isa_name"],
+                                "location": selected_pkg["location"],
+                                "action_status": "Removed from carousel",
+                                "action_by": action_by,
+                                "note": note,
+                            })
+                            st.success("Marked this packaged item as removed from carousel.")
+                            st.rerun()
 
         st.markdown("##### ISA Item Lifecycle Table")
         display_cols = [
