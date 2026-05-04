@@ -465,21 +465,25 @@ with tab4:
             fig.update_layout(yaxis_ticksuffix="%", yaxis_title="Changed Count %", xaxis_title="")
             st.plotly_chart(fig, use_container_width=True)
 
-            st.dataframe(
-                summary.rename(
-                    columns={
-                        "user_name": "Technician",
-                        "verified_checks": "Verified Checks",
-                        "changed_counts": "Counts Changed",
-                        "changed_count_pct": "Changed Count %",
-                        "active_days": "Active Days",
-                        "first_check": "First Check",
-                        "last_check": "Last Check",
-                        "devices": "Devices",
-                    }
-                ),
+            summary_display = summary.rename(
+                columns={
+                    "user_name": "Technician",
+                    "verified_checks": "Verified Checks",
+                    "changed_counts": "Counts Changed",
+                    "changed_count_pct": "Changed Count %",
+                    "active_days": "Active Days",
+                    "first_check": "First Check",
+                    "last_check": "Last Check",
+                    "devices": "Devices",
+                }
+            )
+            st.caption("Click a technician row to inspect the exact inventory checks behind their percentage.")
+            summary_event = st.dataframe(
+                summary_display,
                 use_container_width=True,
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
                 column_config={
                     "Changed Count %": st.column_config.NumberColumn("Changed Count %", format="%.1f%%"),
                     "First Check": st.column_config.DatetimeColumn("First Check", format="MM/DD/YY HH:mm"),
@@ -488,8 +492,18 @@ with tab4:
             )
 
             st.divider()
-            st.subheader("Inventory Check Details")
-            detail_view = accuracy_view.sort_values(["user_name", "dt"]).copy()
+            selected_tech = None
+            if len(summary_event.selection.rows) > 0:
+                selected_tech = summary_display.iloc[summary_event.selection.rows[0]]["Technician"]
+
+            if selected_tech:
+                st.subheader(f"Inventory Check Details: {selected_tech}")
+                detail_view = accuracy_view[accuracy_view["user_name"].eq(selected_tech)].copy()
+            else:
+                st.subheader("Inventory Check Details")
+                detail_view = accuracy_view.copy()
+
+            detail_view = detail_view.sort_values(["user_name", "dt"]).copy()
             detail_view["Count Changed"] = detail_view["count_changed"].map({True: "Yes", False: "No"})
             st.dataframe(
                 detail_view[
