@@ -1,5 +1,6 @@
 import pandas as pd
 import plotly.express as px
+import re
 import streamlit as st
 from sqlalchemy import text
 
@@ -293,6 +294,32 @@ def prep_device_inventory(df):
         out["exemption_reason"] + "; ",
     ) + "Active order"
     return out
+
+
+PROCEDURAL_DEVICE_TERMS = [
+    "ANES",
+    "ANESTH",
+    "CATH",
+    "ENDO",
+    "GI",
+    "IR",
+    "OB",
+    "OR",
+    "PACU",
+    "PREOP",
+    "PROC",
+    "PROCED",
+    "SURG",
+]
+
+
+def suggest_procedural_devices(device_options):
+    suggested = []
+    for device in device_options:
+        normalized = re.sub(r"[^A-Z0-9]", "", str(device).upper())
+        if any(term in normalized for term in PROCEDURAL_DEVICE_TERMS):
+            suggested.append(device)
+    return suggested
 
 
 def build_receiving_summary(receiving):
@@ -688,8 +715,24 @@ with tab_unload:
         days_floor = f3.number_input("Minimum days unused", min_value=0, max_value=max(min_days, 29), value=29, step=1)
         device_med_search = f4.text_input("Device med search")
 
+        suggested_procedural = suggest_procedural_devices(device_options)
+        exclude_procedural = st.toggle(
+            "Exclude procedural/anesthesia machines from this review",
+            value=True,
+            help="Use this to hide OR, PACU, endoscopy, cath lab, IR, anesthesia, and other fixed procedural machines that are not part of the routine unload workflow.",
+        )
+        excluded_devices = st.multiselect(
+            "Procedural/anesthesia devices to exclude",
+            device_options,
+            default=suggested_procedural,
+            disabled=not exclude_procedural,
+            help="Edit this list if a device is incorrectly included or excluded.",
+        )
+
         if selected_devices:
             device_view = device_view[device_view["device"].isin(selected_devices)]
+        if exclude_procedural and excluded_devices:
+            device_view = device_view[~device_view["device"].isin(excluded_devices)]
         if selected_unload_statuses:
             device_view = device_view[device_view["unload_status"].isin(selected_unload_statuses)]
         device_view = device_view[device_view["days_unused"] >= days_floor]
