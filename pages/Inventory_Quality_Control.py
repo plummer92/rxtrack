@@ -82,9 +82,11 @@ def ensure_packaging_table():
                 action_status TEXT,
                 action_dt TIMESTAMP DEFAULT NOW(),
                 action_by TEXT,
-                note TEXT
+                note TEXT,
+                replacement_expire_date DATE
             )
         """))
+        conn.execute(text("ALTER TABLE inventory_qc_actions ADD COLUMN IF NOT EXISTS replacement_expire_date DATE"))
 
 
 ensure_packaging_table()
@@ -180,7 +182,8 @@ def load_inventory_qc_actions():
             action_status,
             action_dt,
             action_by,
-            note
+            note,
+            replacement_expire_date
         FROM inventory_qc_actions
         ORDER BY action_dt DESC
     """)
@@ -192,17 +195,18 @@ def save_inventory_qc_action(action):
     sql = text("""
         INSERT INTO inventory_qc_actions (
             action_key, action_type, med_id, med_desc, isa_name, location,
-            action_status, action_by, note
+            action_status, action_by, note, replacement_expire_date
         )
         VALUES (
             :action_key, :action_type, :med_id, :med_desc, :isa_name, :location,
-            :action_status, :action_by, :note
+            :action_status, :action_by, :note, :replacement_expire_date
         )
         ON CONFLICT (action_key) DO UPDATE SET
             action_status = EXCLUDED.action_status,
             action_dt = NOW(),
             action_by = EXCLUDED.action_by,
-            note = EXCLUDED.note
+            note = EXCLUDED.note,
+            replacement_expire_date = EXCLUDED.replacement_expire_date
     """)
     with engine.begin() as conn:
         conn.execute(sql, action)
@@ -845,13 +849,11 @@ with tab_lifecycle:
             & view["days_until_packaged_expire"].notna()
             & (view["days_until_packaged_expire"] <= 90)
         ].copy()
-        resolved_package_keys = set()
+        package_actions = pd.DataFrame()
         if not qc_actions.empty:
-            resolved_package_keys = set(
-                qc_actions[
-                    qc_actions["action_type"].eq("packaged_expiration")
-                    & qc_actions["action_status"].eq("Removed from carousel")
-                ]["action_key"].dropna().astype(str)
+            package_actions = qc_actions[qc_actions["action_type"].eq("packaged_expiration")].copy()
+            package_actions["replacement_expire_date"] = pd.to_datetime(
+                package_actions["replacement_expire_date"], errors="coerce"
             )
         if not packaged_review.empty:
             if not pyxis_exposure_summary.empty:
@@ -873,37 +875,66 @@ with tab_lifecycle:
                 + packaged_review["latest_hospital_lot_number"].fillna("").astype(str) + "|"
                 + packaged_review["latest_packaged_expire_date"].astype(str)
             )
-            packaged_review["qc_status"] = packaged_review["action_key"].apply(
-                lambda value: "Removed from carousel" if value in resolved_package_keys else "Needs review"
+            if not package_actions.empty:
+                packaged_review = packaged_review.merge(
+                    package_actions[[
+                        "action_key", "action_status", "replacement_expire_date", "action_by", "action_dt", "note"
+                    ]].drop_duplicates("action_key", keep="first"),
+                    on="action_key",
+                    how="left",
+                )
+            else:
+                packaged_review["action_status"] = ""
+                packaged_review["replacement_expire_date"] = pd.NaT
+                packaged_review["action_by"] = ""
+                packaged_review["action_dt"] = pd.NaT
+                packaged_review["note"] = ""
+            packaged_review["replacement_expire_date"] = pd.to_datetime(
+                packaged_review["replacement_expire_date"], errors="coerce"
             )
+            packaged_review["effective_packaged_expire_date"] = packaged_review["replacement_expire_date"].fillna(
+                packaged_review["latest_packaged_expire_date"]
+            )
+            packaged_review["effective_days_until_expire"] = (
+                packaged_review["effective_packaged_expire_date"] - pd.Timestamp.today().normalize()
+            ).dt.days
+            packaged_review["qc_status"] = packaged_review["action_status"].fillna("").replace("", "Needs review")
         if not packaged_review.empty:
             st.markdown("##### Packaged Items Expiring Within 90 Days")
             hide_removed = st.toggle("Hide packaged items marked removed", value=True)
             review_display = packaged_review.copy()
             if hide_removed:
                 review_display = review_display[~review_display["qc_status"].eq("Removed from carousel")]
+            review_display = review_display[
+                review_display["effective_days_until_expire"].notna()
+                & review_display["effective_days_until_expire"].le(90)
+            ]
             if review_display.empty:
-                st.success("All packaged items in this filter have been marked removed from carousel.")
+                st.success("All packaged items in this filter have been removed or updated beyond the 90-day window.")
             else:
                 exp_cols = [
                     "isa_name", "location", "med_id", "med_desc", "last_packaged",
-                    "latest_packaged_expire_date", "days_until_packaged_expire", "last_packaged_by",
+                    "latest_packaged_expire_date", "effective_packaged_expire_date",
+                    "effective_days_until_expire", "last_packaged_by",
                     "latest_hospital_lot_number", "pyxis_check_status", "pyxis_machine_count",
                     "pyxis_total_count", "pyxis_machines_to_check", "qc_status",
                 ]
                 packaged_event = st.dataframe(
-                    review_display.sort_values("days_until_packaged_expire")[exp_cols],
+                    review_display.sort_values("effective_days_until_expire")[exp_cols],
                     width="stretch",
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="single-row",
                     column_config={
+                        "latest_packaged_expire_date": st.column_config.DatetimeColumn("Original Packaged Expire", format="MM/DD/YYYY"),
+                        "effective_packaged_expire_date": st.column_config.DatetimeColumn("Current Closest Expire", format="MM/DD/YYYY"),
+                        "effective_days_until_expire": st.column_config.NumberColumn("Days Until Closest Expire", format="%.0f"),
                         "pyxis_machine_count": st.column_config.NumberColumn("Pyxis Machines", format="%d"),
                         "pyxis_total_count": st.column_config.NumberColumn("Pyxis Qty", format="%.0f"),
                     },
                 )
                 if packaged_event.selection.rows:
-                    selected_pkg = review_display.sort_values("days_until_packaged_expire").reset_index(drop=True).iloc[
+                    selected_pkg = review_display.sort_values("effective_days_until_expire").reset_index(drop=True).iloc[
                         packaged_event.selection.rows[0]
                     ]
                     selected_pyxis = pyxis_inventory[pyxis_inventory["med_id"].eq(str(selected_pkg["med_id"]).strip().upper())].copy()
@@ -924,10 +955,20 @@ with tab_lifecycle:
                             },
                         )
                     with st.form("packaged_expiration_action_form"):
-                        st.caption("Use this after you physically remove the expiring packaged item from the carousel.")
-                        action_by = st.text_input("Removed by", value="")
-                        note = st.text_area("Note", value="Removed from carousel due to packaged expiration review.")
-                        submitted = st.form_submit_button("Mark selected item removed from carousel")
+                        st.caption("Use this after you check the carousel/Pyxis locations for the expiring packaged item.")
+                        action_status = st.radio(
+                            "Action taken",
+                            ["Removed from carousel", "Old lot used - expiration updated"],
+                            horizontal=True,
+                        )
+                        replacement_expire_date = st.date_input(
+                            "Closest remaining expiration",
+                            value=None,
+                            help="Use this when the expiring lot has already been used and a later-dated package is now the closest expiration.",
+                        )
+                        action_by = st.text_input("Reviewed by", value="")
+                        note = st.text_area("Note", value="Reviewed packaged expiration in carousel/Pyxis locations.")
+                        submitted = st.form_submit_button("Save packaged expiration review")
                         if submitted:
                             save_inventory_qc_action({
                                 "action_key": selected_pkg["action_key"],
@@ -936,11 +977,12 @@ with tab_lifecycle:
                                 "med_desc": selected_pkg["med_desc"],
                                 "isa_name": selected_pkg["isa_name"],
                                 "location": selected_pkg["location"],
-                                "action_status": "Removed from carousel",
+                                "action_status": action_status,
                                 "action_by": action_by,
                                 "note": note,
+                                "replacement_expire_date": replacement_expire_date if action_status == "Old lot used - expiration updated" else None,
                             })
-                            st.success("Marked this packaged item as removed from carousel.")
+                            st.success("Saved packaged expiration review.")
                             st.rerun()
 
         st.markdown("##### ISA Item Lifecycle Table")
