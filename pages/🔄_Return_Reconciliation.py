@@ -12,6 +12,32 @@ load_data = App.load_data
 render_sidebar = App.render_sidebar
 engine = App.engine
 
+INHALER_PUFF_CONVERSIONS = [
+    {
+        "label": "Flovent HFA",
+        "patterns": ["fluticasone propionate", "flovent hfa", "puff"],
+        "med_id_patterns": [],
+        "puffs_per_each": 124,
+    },
+    {
+        "label": "Albuterol HFA 6.7 g",
+        "patterns": ["albuterol sulfate hfa", "proventil hfa", "puff"],
+        "med_id_patterns": ["ALBUT108INH6Z7G"],
+        "puffs_per_each": 160,
+    },
+]
+
+
+def return_unit_conversion(row):
+    med_desc = str(row.get("med_desc", "")).lower()
+    med_id = str(row.get("med_id", "")).strip().upper()
+    for conversion in INHALER_PUFF_CONVERSIONS:
+        desc_match = all(pattern in med_desc for pattern in conversion["patterns"])
+        id_match = med_id in conversion["med_id_patterns"]
+        if desc_match or id_match:
+            return conversion["puffs_per_each"], f"{conversion['label']}: {conversion['puffs_per_each']} puffs = 1 each"
+    return 1, "Each"
+
 start_date, end_date = render_sidebar()
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
@@ -242,10 +268,38 @@ detail_pyxis_reference_removals = ensure_date_column(detail_pyxis_reference_remo
 def safe_group(df, qty_name):
     if df.empty or not {"med_id", "med_desc", "date", "qty"}.issubset(df.columns):
         return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
-    return df.groupby(["med_id", "med_desc", "date"])["qty"].sum().reset_index().rename(columns={"qty": qty_name})
+    work = df.copy()
+    work["med_id"] = work["med_id"].astype(str).str.strip().str.upper()
+    work["qty"] = pd.to_numeric(work["qty"], errors="coerce").fillna(0)
+    if qty_name == "qty_pyxis":
+        conversions = work.apply(return_unit_conversion, axis=1, result_type="expand")
+        work["return_unit_divisor"] = pd.to_numeric(conversions[0], errors="coerce").fillna(1)
+        work["return_unit_note"] = conversions[1]
+        work["compare_qty"] = work["qty"] / work["return_unit_divisor"]
+    else:
+        work["compare_qty"] = work["qty"]
+    return work.groupby(["med_id", "med_desc", "date"])["compare_qty"].sum().reset_index().rename(columns={"compare_qty": qty_name})
+
+
+def conversion_note_group(df):
+    if df.empty or not {"med_id", "date", "qty", "med_desc"}.issubset(df.columns):
+        return pd.DataFrame(columns=["med_id", "date", "unit_note"])
+    work = df.copy()
+    work["med_id"] = work["med_id"].astype(str).str.strip().str.upper()
+    conversions = work.apply(return_unit_conversion, axis=1, result_type="expand")
+    work["unit_note"] = conversions[1]
+    work = work[work["unit_note"].ne("Each")]
+    if work.empty:
+        return pd.DataFrame(columns=["med_id", "date", "unit_note"])
+    return (
+        work.groupby(["med_id", "date"])["unit_note"]
+        .apply(lambda values: "; ".join(sorted(set(values.dropna().astype(str)))))
+        .reset_index()
+    )
 
 pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
 pharm_sum = safe_group(pharm_return, "qty_pharm")
+unit_notes = conversion_note_group(pyxis_unload)
 
 # --- Merge & Reconcile ---
 
@@ -260,6 +314,11 @@ med_lookup = pd.concat([
     pharm_sum[["med_id", "med_desc"]]
 ]).drop_duplicates("med_id")
 recon = recon.merge(med_lookup, on="med_id", how="left")
+if not unit_notes.empty:
+    recon = recon.merge(unit_notes, on=["med_id", "date"], how="left")
+else:
+    recon["unit_note"] = ""
+recon["unit_note"] = recon["unit_note"].fillna("")
 recon["difference"] = recon["qty_pyxis"] - recon["qty_pharm"]
 
 # --- Executive Metrics ---
@@ -365,6 +424,10 @@ if user_unloads.empty:
     st.info("No Pyxis unload rows found for this selection.")
 else:
     user_unloads = user_unloads.sort_values("dt", ascending=False)
+    unload_conversions = user_unloads.apply(return_unit_conversion, axis=1, result_type="expand")
+    user_unloads["return_unit_divisor"] = pd.to_numeric(unload_conversions[0], errors="coerce").fillna(1)
+    user_unloads["return_unit_note"] = unload_conversions[1]
+    user_unloads["compare_qty"] = pd.to_numeric(user_unloads["qty"], errors="coerce").fillna(0) / user_unloads["return_unit_divisor"]
     total_user_unload_qty = user_unloads["qty"].sum() if "qty" in user_unloads.columns else 0
     unique_unload_meds = user_unloads["med_id"].nunique() if "med_id" in user_unloads.columns else 0
     active_unload_days = user_unloads["date"].nunique() if "date" in user_unloads.columns else 0
@@ -378,7 +441,7 @@ else:
     unload_display_cols = [
         c for c in [
             "dt", "date", "user_name", "device", "event_type", "med_id",
-            "med_desc", "qty", "beginning_qty", "ending_qty"
+            "med_desc", "qty", "return_unit_note", "compare_qty", "beginning_qty", "ending_qty"
         ]
         if c in user_unloads.columns
     ]
@@ -395,6 +458,8 @@ else:
             "med_id": "Med ID",
             "med_desc": "Medication",
             "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+            "return_unit_note": "Compare Unit",
+            "compare_qty": st.column_config.NumberColumn("Compare Qty", format="%.2f"),
             "beginning_qty": st.column_config.NumberColumn("Beginning Qty", format="%.0f"),
             "ending_qty": st.column_config.NumberColumn("Ending Qty", format="%.0f"),
         },
@@ -430,7 +495,14 @@ else:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("### Pyxis Removal Events")
-            st.dataframe(unload_detail[["dt", "user_name", "device", "qty"]], width="stretch")
+            if not unload_detail.empty:
+                unload_detail["med_id"] = unload_detail["med_id"].astype(str).str.strip().str.upper()
+                drill_conversions = unload_detail.apply(return_unit_conversion, axis=1, result_type="expand")
+                unload_detail["return_unit_divisor"] = pd.to_numeric(drill_conversions[0], errors="coerce").fillna(1)
+                unload_detail["return_unit_note"] = drill_conversions[1]
+                unload_detail["compare_qty"] = pd.to_numeric(unload_detail["qty"], errors="coerce").fillna(0) / unload_detail["return_unit_divisor"]
+            drill_cols = [c for c in ["dt", "user_name", "device", "qty", "return_unit_note", "compare_qty"] if c in unload_detail.columns]
+            st.dataframe(unload_detail[drill_cols], width="stretch")
         with c2:
             st.markdown("### Carousel Return Events")
             st.dataframe(return_detail[["dt", "user_name", "workflow_type", "qty"]], width="stretch")
