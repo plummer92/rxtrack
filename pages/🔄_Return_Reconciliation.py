@@ -58,8 +58,13 @@ pyxis_unload = pd.DataFrame()
 pharm_all = pd.DataFrame()
 
 if not df_events.empty and "event_type" in df_events.columns:
+    event_text = df_events["event_type"].fillna("").astype(str)
     pyxis_all_raw = df_events[
-        df_events["event_type"].astype(str).str.contains("empty|unload|return bin|destock", case=False, na=False) &
+        event_text.str.contains("empty|unload|return bin|destock", case=False, na=False) &
+        ~event_text.str.contains("cancel", case=False, na=False)
+    ].copy()
+    pyxis_unload_raw = df_events[
+        event_text.str.contains(r"\bunload\b", case=False, regex=True, na=False) &
         ~df_events["event_type"].astype(str).str.contains("cancel", case=False, na=False)
     ].copy()
 
@@ -67,15 +72,23 @@ if not df_events.empty and "event_type" in df_events.columns:
     unload_eject = pyxis_all_raw[
         pyxis_all_raw["event_type"].astype(str).str.contains("eject", case=False, na=False)
     ].copy()
-    pyxis_unload = pyxis_all_raw[
-        ~pyxis_all_raw["event_type"].astype(str).str.contains("eject", case=False, na=False)
+    pyxis_reference_removals = pyxis_all_raw[
+        ~pyxis_all_raw["event_type"].astype(str).str.contains(r"\bunload\b|eject", case=False, regex=True, na=False)
+    ].copy()
+    pyxis_unload = pyxis_unload_raw[
+        ~pyxis_unload_raw["event_type"].astype(str).str.contains("eject", case=False, na=False)
     ].copy()
     if "device" in pyxis_unload.columns:
         pyxis_unload = pyxis_unload[
             ~pyxis_unload["device"].astype(str).str.contains("cass|patient", case=False, na=False)
         ]
+    if "device" in pyxis_reference_removals.columns:
+        pyxis_reference_removals = pyxis_reference_removals[
+            ~pyxis_reference_removals["device"].astype(str).str.contains("cass|patient", case=False, na=False)
+        ]
 else:
     unload_eject = pd.DataFrame()
+    pyxis_reference_removals = pd.DataFrame()
 
 if not df_pharm.empty:
     pharm_df = df_pharm.copy()
@@ -118,12 +131,17 @@ detail_pyxis_unload = pyxis_unload.copy()
 detail_pharm_return = pharm_return.copy()
 detail_inv_moves = inv_moves.copy()
 detail_restocks = restocks.copy()
+detail_pyxis_reference_removals = pyxis_reference_removals.copy()
 
 if selected_users:
     if not detail_pyxis_unload.empty: detail_pyxis_unload = detail_pyxis_unload[detail_pyxis_unload["user_name"].isin(selected_users)]
     if not detail_pharm_return.empty: detail_pharm_return = detail_pharm_return[detail_pharm_return["user_name"].isin(selected_users)]
     if not detail_inv_moves.empty: detail_inv_moves = detail_inv_moves[detail_inv_moves["user_name"].isin(selected_users)]
     if not detail_restocks.empty: detail_restocks = detail_restocks[detail_restocks["user_name"].isin(selected_users)]
+    if not detail_pyxis_reference_removals.empty:
+        detail_pyxis_reference_removals = detail_pyxis_reference_removals[
+            detail_pyxis_reference_removals["user_name"].isin(selected_users)
+        ]
 
 # --- Apply Med Filters ---
 
@@ -171,12 +189,16 @@ if exclude_dummy:
     pharm_return = remove_dummy(pharm_return)
     detail_pyxis_unload = remove_dummy(detail_pyxis_unload)
     detail_pharm_return = remove_dummy(detail_pharm_return)
+    pyxis_reference_removals = remove_dummy(pyxis_reference_removals)
+    detail_pyxis_reference_removals = remove_dummy(detail_pyxis_reference_removals)
 
 if exclude_controls:
     pyxis_unload = remove_controls(pyxis_unload)
     pharm_return = remove_controls(pharm_return)
     detail_pyxis_unload = remove_controls(detail_pyxis_unload)
     detail_pharm_return = remove_controls(detail_pharm_return)
+    pyxis_reference_removals = remove_controls(pyxis_reference_removals)
+    detail_pyxis_reference_removals = remove_controls(detail_pyxis_reference_removals)
 
 if exclude_pat_refs:
     pyxis_unload = remove_pat_refs(pyxis_unload)
@@ -185,6 +207,8 @@ if exclude_pat_refs:
     detail_pharm_return = remove_pat_refs(detail_pharm_return)
     detail_inv_moves = remove_pat_refs(detail_inv_moves)
     detail_restocks = remove_pat_refs(detail_restocks)
+    pyxis_reference_removals = remove_pat_refs(pyxis_reference_removals)
+    detail_pyxis_reference_removals = remove_pat_refs(detail_pyxis_reference_removals)
 
 bulk_package_returns = pd.DataFrame()
 if exclude_bulk_package_returns and not pharm_return.empty:
@@ -206,10 +230,12 @@ pharm_return = ensure_date_column(pharm_return)
 inv_moves    = ensure_date_column(inv_moves)
 restocks     = ensure_date_column(restocks)
 unload_eject = ensure_date_column(unload_eject)
+pyxis_reference_removals = ensure_date_column(pyxis_reference_removals)
 detail_pyxis_unload = ensure_date_column(detail_pyxis_unload)
 detail_pharm_return = ensure_date_column(detail_pharm_return)
 detail_inv_moves    = ensure_date_column(detail_inv_moves)
 detail_restocks     = ensure_date_column(detail_restocks)
+detail_pyxis_reference_removals = ensure_date_column(detail_pyxis_reference_removals)
 
 # --- Aggregate ---
 
@@ -245,6 +271,7 @@ unmatched = recon[recon["difference"] != 0]
 inv_move_qty  = inv_moves["qty"].sum() if not inv_moves.empty and "qty" in inv_moves.columns else 0
 restock_qty   = restocks["qty"].sum() if not restocks.empty and "qty" in restocks.columns else 0
 eject_qty     = unload_eject["qty"].sum() if not unload_eject.empty and "qty" in unload_eject.columns else 0
+reference_removal_qty = pyxis_reference_removals["qty"].sum() if not pyxis_reference_removals.empty and "qty" in pyxis_reference_removals.columns else 0
 bulk_package_qty = bulk_package_returns["qty"].sum() if not bulk_package_returns.empty and "qty" in bulk_package_returns.columns else 0
 
 m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
@@ -258,7 +285,7 @@ m7.metric("Eject Events (excl.)", int(eject_qty))
 m8.metric("Bulk Returns (excl.)", int(bulk_package_qty))
 
 st.divider()
-st.caption("Reconciliation totals use all qualifying Pyxis removals and carousel return transactions in the date range. The user filter narrows detail tables only.")
+st.caption("Core reconciliation now starts with Pyxis `Unload` transactions only. Empty return bin, return-bin, and destock rows are shown as reference until the workflow rules are clearer.")
 
 # --- User Return Lookup ---
 
@@ -434,6 +461,21 @@ with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation (
     else:
         cols = [c for c in ["dt", "date", "user_name", "device", "med_desc", "qty", "event_type"] if c in unload_eject.columns]
         st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], width="stretch")
+
+with st.expander(f"Pyxis Non-Unload Removal Events - Reference Only ({int(reference_removal_qty)} units)", expanded=False):
+    st.caption("These are empty return bin, return-bin, or destock rows. They are visible for context but excluded from the simplified unload-only reconciliation.")
+    if detail_pyxis_reference_removals.empty:
+        st.info("No non-unload Pyxis removal rows found for this date range.")
+    else:
+        cols = [
+            c for c in ["dt", "date", "user_name", "device", "event_type", "med_id", "med_desc", "qty"]
+            if c in detail_pyxis_reference_removals.columns
+        ]
+        st.dataframe(
+            detail_pyxis_reference_removals[cols].sort_values("dt") if "dt" in cols else detail_pyxis_reference_removals[cols],
+            width="stretch",
+            hide_index=True,
+        )
 
 with st.expander(f"Likely Packaging Bulk Returns — Excluded from Reconciliation ({int(bulk_package_qty)} units)", expanded=False):
     st.caption("These are carousel return rows with clean bulk quantities such as 60, 90, 100, or 500. They often represent packaged meds returned through the return function instead of the receiving workflow.")
