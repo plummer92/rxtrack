@@ -739,6 +739,9 @@ ensure_qc_actions_table()
 if st.session_state.pop("mobile_bud_reset", False):
     st.session_state["mobile_barcode_input"] = ""
     st.session_state["barcode_med_search"] = ""
+    st.session_state["barcode_verified_by"] = ""
+    st.session_state["barcode_verification_note"] = "Confirmed barcode-to-med match."
+    st.success("Saved. Ready for next scan.")
 
 catalog = load_scan_catalog()
 barcode_crosswalk = load_barcode_crosswalk()
@@ -808,7 +811,10 @@ elif camera_photo is not None and not decoded_values:
     st.warning("No barcode was decoded from that photo. Try a closer, flatter picture with the barcode filling most of the frame.")
 elif decoded_values:
     decoded_value = decoded_values[0]
-    if decoded_value != st.session_state.get("mobile_barcode_input"):
+    if (
+        decoded_value != st.session_state.get("mobile_barcode_input")
+        and decoded_value != st.session_state.get("mobile_last_saved_barcode")
+    ):
         st.session_state["mobile_barcode_input"] = decoded_value
     if len(decoded_values) > 1:
         st.caption(f"Decoded {len(decoded_values)} barcodes; using the first one.")
@@ -932,6 +938,7 @@ else:
                 )
             else:
                 save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
+            st.session_state["mobile_last_saved_barcode"] = scan_value
             load_scan_catalog.clear()
             load_mobile_scan_queue.clear()
             st.session_state["mobile_bud_reset"] = True
