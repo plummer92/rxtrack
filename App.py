@@ -242,7 +242,19 @@ def init_db():
         );""",
         """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;""",
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS schedule_status TEXT;""",
-        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;"""
+        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;""",
+        """CREATE INDEX IF NOT EXISTS idx_events_dt ON events (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_events_med_desc_dt ON events (med_desc, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_events_med_device_dt ON events (med_id, device, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_events_event_type_dt ON events (event_type, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_dt ON pharmacy_orders (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_med_desc_dt ON pharmacy_orders (med_desc, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_priority_dt ON pharmacy_orders (priority, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_config_events_dt ON config_events (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_inventory_detailed_med_station ON inventory_detailed (med_id, station);""",
+        """CREATE INDEX IF NOT EXISTS idx_cycle_count_status_snapshot ON cycle_count_status (snapshot_date);""",
+        """CREATE INDEX IF NOT EXISTS idx_packaged_meds_med_dispense ON packaged_meds (med_id, dispense_dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_device_inventory_days_device ON device_inventory (days_unused, device);"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
