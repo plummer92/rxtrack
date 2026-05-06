@@ -1,11 +1,9 @@
 import hashlib
 import re
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from sqlalchemy import text
 
 import App
@@ -23,7 +21,7 @@ else:
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Mobile BUD Scanner",
-        "Scan a product barcode, match it to an RxTrack med, and save the active BUD review.",
+        "Enter or scan a product barcode, match it to an RxTrack med, and save the active BUD review.",
         kicker="Inventory QC",
     )
 else:
@@ -45,13 +43,6 @@ st.markdown("""
     }
     </style>
 """, unsafe_allow_html=True)
-
-
-scanner_component = components.declare_component(
-    "rxtrack_barcode_scanner",
-    path=str(Path(__file__).resolve().parents[1] / "components" / "barcode_scanner"),
-)
-
 
 def ensure_qc_actions_table():
     with engine.begin() as conn:
@@ -231,11 +222,11 @@ def find_matches(catalog, raw_value):
 ensure_qc_actions_table()
 
 catalog = load_scan_catalog()
-scanned_value = scanner_component(key="mobile_bud_scanner", default="", height=430)
-if scanned_value and scanned_value != st.session_state.get("mobile_barcode_input"):
-    st.session_state["mobile_barcode_input"] = scanned_value
-manual_value = st.text_input("Barcode or Med ID", key="mobile_barcode_input")
-scan_value = manual_value or scanned_value or ""
+st.info(
+    "Use a Bluetooth/USB barcode scanner or type the barcode/Med ID below. "
+    "The embedded phone-camera scanner was disabled because Streamlit Cloud rejected the custom component loader."
+)
+scan_value = st.text_input("Barcode or Med ID", key="mobile_barcode_input")
 
 parsed_expiration = parse_gs1_expiration(scan_value)
 matches = find_matches(catalog, scan_value)
