@@ -257,6 +257,17 @@ def save_inventory_qc_action(action):
     load_inventory_qc_actions.clear()
 
 
+def delete_inventory_qc_action(action_key):
+    sql = text("""
+        DELETE FROM inventory_qc_actions
+        WHERE action_key = :action_key
+    """)
+    with engine.begin() as conn:
+        result = conn.execute(sql, {"action_key": action_key})
+    load_inventory_qc_actions.clear()
+    return result.rowcount or 0
+
+
 def update_packaged_bud_after_removal(med_id, current_expire_date, new_bud_date):
     sql = text("""
         UPDATE packaged_meds
@@ -710,6 +721,7 @@ def build_manual_bud_summary(qc_actions):
 
 def build_active_bud_review_summary(qc_actions):
     columns = [
+        "action_key",
         "isa_name",
         "location",
         "med_id",
@@ -1177,6 +1189,33 @@ with tab_lifecycle:
                     "active_bud_review_note": "Note",
                 },
             )
+            revert_options = reviewed_active_bud.sort_values("active_bud_review_dt", ascending=False).copy()
+            revert_options["review_label"] = revert_options.apply(
+                lambda row: (
+                    f"{row.get('med_id', '')} | {row.get('med_desc', '')} | "
+                    f"{row.get('isa_name', '')} {row.get('location', '')} | "
+                    f"{pd.to_datetime(row.get('active_bud_review_dt'), errors='coerce').strftime('%m/%d/%Y %H:%M') if pd.notna(row.get('active_bud_review_dt')) else 'No review date'}"
+                ),
+                axis=1,
+            )
+            selected_revert_label = st.selectbox(
+                "Review to revert",
+                revert_options["review_label"].tolist(),
+                key="active_bud_review_revert_choice",
+            )
+            selected_revert = revert_options[revert_options["review_label"].eq(selected_revert_label)].iloc[0]
+            confirm_revert = st.checkbox(
+                "I understand this will remove this Active BUD review and put the med back into the work queue.",
+                key="active_bud_review_revert_confirm",
+            )
+            if st.button("Delete selected review", disabled=not confirm_revert, width="stretch"):
+                deleted_rows = delete_inventory_qc_action(selected_revert["action_key"])
+                if deleted_rows:
+                    st.success("Deleted the selected Active BUD review. The med can now be reviewed again.")
+                    st.rerun()
+                else:
+                    st.warning("That review was already gone. Refreshing the table.")
+                    st.rerun()
 
         st.markdown("##### ISA Item Lifecycle Table")
         display_cols = [
