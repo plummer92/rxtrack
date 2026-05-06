@@ -59,20 +59,35 @@ def db_cursor():
             conn.close()
 
 
-def execute_statement(sql, params, batch=False, table_name="Data"):
-    """Executes INSERT/UPDATE statements."""
-    try:
-        def _sql_safe(value):
+def normalize_sql_records(records):
+    def _clean(value):
+        try:
             if pd.isna(value):
                 return None
+        except (TypeError, ValueError):
+            pass
+        return value
+
+    return [
+        {k: _clean(v) for k, v in row.items()}
+        for row in records
+    ]
+
+
+def execute_statement(sql, params, batch=False, table_name="Data"):
+    """Executes INSERT/UPDATE statements and raises if the write does not commit."""
+    try:
+        def _sql_safe(value):
+            try:
+                if pd.isna(value):
+                    return None
+            except (TypeError, ValueError):
+                pass
             return value
 
         def _normalize_params(payload):
             if batch:
-                return [
-                    {k: _sql_safe(v) for k, v in row.items()}
-                    for row in payload
-                ]
+                return normalize_sql_records(payload)
             if isinstance(payload, dict):
                 return {k: _sql_safe(v) for k, v in payload.items()}
             return payload
@@ -85,8 +100,10 @@ def execute_statement(sql, params, batch=False, table_name="Data"):
                 cur.execute(sql, params)
             conn.commit()
             st.toast(f"Successfully processed {len(params)} records for {table_name}!")
+            return len(params) if batch else 1
     except Exception as e:
         st.error(f"Error executing {table_name}: {e}")
+        raise
 
 
 def seconds_to_mmss(seconds):

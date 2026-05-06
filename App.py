@@ -20,6 +20,7 @@ import warnings
 import json
 from openpyxl import load_workbook
 
+from psycopg2.extras import execute_batch
 from sqlalchemy import text
 import os
 
@@ -32,10 +33,10 @@ from rxtrack_shared import (
     load_admin_users,
     normalize_identifier_text,
     normalize_name,
+    normalize_sql_records,
     parse_shift_start,
     seconds_to_mmss,
 )
-
 
 def init_db():
     """Initializes tables if they do not exist."""
@@ -241,7 +242,22 @@ def init_db():
         );""",
         """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;""",
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS schedule_status TEXT;""",
-        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;"""
+        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;""",
+        """CREATE INDEX IF NOT EXISTS idx_events_dt ON events (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_events_dt_date ON events ((dt::date));""",
+        """CREATE INDEX IF NOT EXISTS idx_events_med_desc_dt ON events (med_desc, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_events_med_device_dt ON events (med_id, device, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_events_event_type_dt ON events (event_type, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_dt ON pharmacy_orders (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_dt_date ON pharmacy_orders ((dt::date));""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_med_desc_dt ON pharmacy_orders (med_desc, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_priority_dt ON pharmacy_orders (priority, dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_config_events_dt ON config_events (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_config_events_dt_date ON config_events ((dt::date));""",
+        """CREATE INDEX IF NOT EXISTS idx_inventory_detailed_med_station ON inventory_detailed (med_id, station);""",
+        """CREATE INDEX IF NOT EXISTS idx_cycle_count_status_snapshot ON cycle_count_status (snapshot_date);""",
+        """CREATE INDEX IF NOT EXISTS idx_packaged_meds_med_dispense ON packaged_meds (med_id, dispense_dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_device_inventory_days_device ON device_inventory (days_unused, device);"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
@@ -1343,21 +1359,22 @@ def clean_overnight_cartfill_workbook(uploaded):
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
+    end_exclusive = end_date + timedelta(days=1)
     queries = {
         "events": """
             SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, 
                    e.discrepancy_qty, e.discrepancy_reason, c.cost_per_unit, e.pk 
             FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
-            WHERE e.dt::date BETWEEN %s AND %s
+            WHERE e.dt >= %s AND e.dt < %s
         """,
         "config": """
             SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, 
                    min_qty, max_qty, is_standard 
-            FROM config_events WHERE dt::date BETWEEN %s AND %s
+            FROM config_events WHERE dt >= %s AND dt < %s
         """,
         "pharm": """
             SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
-            FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s
+            FROM pharmacy_orders WHERE dt >= %s AND dt < %s
         """,
         "schedule": """
             SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note,
@@ -1372,10 +1389,12 @@ def load_data(start_date, end_date):
     }
     
     results = {}
-    params = (start_date, end_date)
+    timestamp_params = (start_date, end_exclusive)
+    date_params = (start_date, end_date)
     with db_cursor() as (conn, cur):
         for key, sql in queries.items():
             try:
+                params = date_params if key in {"schedule", "attendance"} else timestamp_params
                 results[key] = pd.read_sql(sql, conn, params=params)
                 if not results[key].empty and 'dt' in results[key].columns:
                     results[key]["dt"] = pd.to_datetime(results[key]["dt"])
@@ -2312,10 +2331,16 @@ if _is_main:
                                  active_orders = EXCLUDED.active_orders,
                                  days_unused = EXCLUDED.days_unused,
                                  snapshot_dt = NOW();"""
-                    with db_cursor() as (conn, cur):
-                        cur.execute("DELETE FROM device_inventory;")
-                        conn.commit()
-                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Device Inventory")
+                    records = normalize_sql_records(clean.to_dict("records"))
+                    try:
+                        with db_cursor() as (conn, cur):
+                            cur.execute("DELETE FROM device_inventory;")
+                            execute_batch(cur, sql, records, page_size=2000)
+                            conn.commit()
+                            st.toast(f"Successfully processed {len(records)} records for Device Inventory!")
+                    except Exception as e:
+                        st.error(f"Error executing Device Inventory: {e}")
+                        raise
 
                 elif u_type == "Days Since Last Cycle Count Report":
                     clean = clean_cycle_count_status_report(uploaded)
