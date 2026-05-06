@@ -206,7 +206,13 @@ def parse_gs1_expiration(raw_value):
 
 
 def parse_user_date(value):
-    parsed = pd.to_datetime(str(value or "").strip(), errors="coerce")
+    raw_value = str(value or "").strip()
+    digits = normalize_digits(raw_value)
+    if re.fullmatch(r"\d{6}", digits):
+        raw_value = f"{digits[:2]}/{digits[2:4]}/20{digits[4:]}"
+    elif re.fullmatch(r"\d{8}", digits):
+        raw_value = f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
+    parsed = pd.to_datetime(raw_value, errors="coerce")
     if pd.isna(parsed):
         return None
     return parsed.date()
@@ -618,6 +624,7 @@ def load_mobile_scan_queue():
     queue["pyxis_qty"] = pd.to_numeric(queue["pyxis_qty"], errors="coerce").fillna(0)
     queue["pyxis_pockets"] = pd.to_numeric(queue["pyxis_pockets"], errors="coerce").fillna(0)
     queue["location_level"] = queue["location"].apply(location_level)
+    queue["touch_events"] = queue["receiving_events"] + queue["return_restock_events"] + queue["deduction_events"]
     queue["receiving_status"] = "Matched"
     queue.loc[queue["last_received"].isna(), "receiving_status"] = "No Receiving Match"
     queue["no_recent_movement"] = (
@@ -668,8 +675,8 @@ def load_mobile_scan_queue():
     queue["queue_reason"] = reasons
     queue = queue[queue["priority_score"].gt(0)].copy()
     return queue.sort_values(
-        ["priority_score", "receiving_status", "days_since_last_received", "days_since_last_cycle_count", "pyxis_qty", "location_level", "location", "med_desc"],
-        ascending=[False, False, False, False, False, True, True, True],
+        ["priority_score", "receiving_status", "days_since_last_received", "days_since_last_cycle_count", "touch_events", "pyxis_qty", "location_level", "location", "med_desc"],
+        ascending=[False, False, False, False, False, False, True, True, True],
     )
 
 
@@ -750,6 +757,7 @@ if st.session_state.pop("mobile_bud_reset", False):
     st.session_state["barcode_med_search"] = ""
     st.session_state["barcode_verified_by"] = ""
     st.session_state["barcode_verification_note"] = "Confirmed barcode-to-med match."
+    st.session_state["mobile_camera_reset_count"] = st.session_state.get("mobile_camera_reset_count", 0) + 1
     st.success("Saved. Ready for next scan.")
 
 catalog = load_scan_catalog()
@@ -771,15 +779,15 @@ else:
     visible_queue = scan_queue.copy()
     if selected_isa != "All ISAs":
         visible_queue = visible_queue[visible_queue["isa_name"].astype(str).eq(selected_isa)].sort_values(
-            ["location_level", "location", "priority_score", "days_since_last_received", "days_since_last_cycle_count", "med_desc"],
-            ascending=[True, True, False, False, False, True],
+            ["location_level", "priority_score", "touch_events", "days_since_last_received", "days_since_last_cycle_count", "location", "med_desc"],
+            ascending=[True, False, False, False, False, True, True],
         )
 
     if visible_queue.empty:
         st.info("No current queue items for this ISA.")
     else:
         st.caption(
-            "Selected ISA queues start at the lowest location level, then keep higher-priority meds first within that level."
+            "Selected ISA queues start at the lowest location level, then put the highest-risk and most-touched meds first within that level."
             if selected_isa != "All ISAs"
             else "All ISAs are shown in global priority order."
         )
@@ -816,6 +824,7 @@ else:
         with st.expander("More queue context"):
             st.caption(f"Receiving: {selected_queue['receiving_status']}")
             st.caption(f"Pyxis: {selected_queue['pyxis_stations'] or 'N/A'}")
+            st.caption(f"Touch events: {int(selected_queue['touch_events'])}")
             st.caption(f"Priority score: {selected_queue['priority_score']:.0f}")
 
         nav_prev, nav_next = st.columns(2)
@@ -830,7 +839,10 @@ st.caption(
     "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
 )
 st.caption(PHOTO_RETENTION_NOTE)
-camera_photo = st.camera_input("iPhone camera barcode photo")
+camera_photo = st.camera_input(
+    "iPhone camera barcode photo",
+    key=f"mobile_camera_photo_{st.session_state.get('mobile_camera_reset_count', 0)}",
+)
 decoded_values = decode_barcode_photo(camera_photo)
 if zxingcpp is None:
     st.warning("Camera barcode decoding is not installed yet. You can still type the barcode or Med ID.")
@@ -943,7 +955,7 @@ else:
             "Active BUD",
             value=default_bud.strftime("%m/%d/%Y"),
             disabled=review_outcome == "Expired product removed - none remaining",
-            help="Type the date as MM/DD/YYYY.",
+            help="Type MMDDYY, MMDDYYYY, or MM/DD/YYYY.",
         )
         bud_date = parse_user_date(bud_text)
         reviewed_by = st.text_input("Reviewed by", value="")
@@ -956,7 +968,7 @@ else:
         submitted = st.form_submit_button("Save Active BUD Review")
         if submitted:
             if review_outcome == "Remaining product has active BUD" and bud_date is None:
-                st.error("Enter the Active BUD as MM/DD/YYYY before saving.")
+                st.error("Enter the Active BUD as MMDDYY, MMDDYYYY, or MM/DD/YYYY before saving.")
                 st.stop()
             save_barcode_mapping(selected, scan_value, openfda_matches=openfda_matches)
             if review_outcome == "Expired product removed - none remaining":
