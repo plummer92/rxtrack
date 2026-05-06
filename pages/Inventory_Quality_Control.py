@@ -703,6 +703,43 @@ def build_manual_bud_summary(qc_actions):
     return latest[columns]
 
 
+def build_active_bud_review_summary(qc_actions):
+    columns = [
+        "isa_name",
+        "location",
+        "med_id",
+        "active_bud_review_status",
+        "active_bud_review_dt",
+        "active_bud_review_by",
+        "active_bud_review_note",
+        "reviewed_active_bud_date",
+    ]
+    if qc_actions.empty:
+        return pd.DataFrame(columns=columns)
+
+    actions = qc_actions[
+        qc_actions["action_type"].eq("active_bud")
+        | qc_actions["action_status"].isin(["Manual BUD record created", "Old product removed - BUD updated"])
+    ].copy()
+    if actions.empty:
+        return pd.DataFrame(columns=columns)
+
+    for col in ["isa_name", "location", "med_id"]:
+        actions[col] = actions[col].fillna("").astype(str).str.strip()
+    actions["med_id"] = actions["med_id"].str.upper()
+    actions["action_dt"] = pd.to_datetime(actions["action_dt"], errors="coerce")
+    actions["replacement_expire_date"] = pd.to_datetime(actions["replacement_expire_date"], errors="coerce")
+    actions = actions.sort_values("action_dt")
+    latest = actions.groupby(["isa_name", "location", "med_id"], dropna=False).tail(1).rename(columns={
+        "action_status": "active_bud_review_status",
+        "action_dt": "active_bud_review_dt",
+        "action_by": "active_bud_review_by",
+        "note": "active_bud_review_note",
+        "replacement_expire_date": "reviewed_active_bud_date",
+    })
+    return latest[columns]
+
+
 def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary, deduction_summary, manual_bud_summary):
     if isa_items.empty:
         return pd.DataFrame()
@@ -838,6 +875,7 @@ deduction_summary = build_deduction_summary(deduction_history)
 pyxis_exposure_summary = build_pyxis_exposure_summary(pyxis_inventory)
 packaging_summary = build_packaging_summary(packaging)
 manual_bud_summary = build_manual_bud_summary(qc_actions)
+active_bud_review_summary = build_active_bud_review_summary(qc_actions)
 isa_lifecycle = build_isa_lifecycle(
     isa_items,
     receiving_summary,
@@ -847,6 +885,21 @@ isa_lifecycle = build_isa_lifecycle(
     deduction_summary,
     manual_bud_summary,
 )
+if not active_bud_review_summary.empty:
+    isa_lifecycle = isa_lifecycle.merge(
+        active_bud_review_summary,
+        on=["isa_name", "location", "med_id"],
+        how="left",
+    )
+for col in ["active_bud_review_status", "active_bud_review_by", "active_bud_review_note"]:
+    if col not in isa_lifecycle.columns:
+        isa_lifecycle[col] = ""
+    isa_lifecycle[col] = isa_lifecycle[col].fillna("").astype(str)
+for col in ["active_bud_review_dt", "reviewed_active_bud_date"]:
+    if col not in isa_lifecycle.columns:
+        isa_lifecycle[col] = pd.NaT
+    isa_lifecycle[col] = pd.to_datetime(isa_lifecycle[col], errors="coerce")
+isa_lifecycle["active_bud_reviewed"] = isa_lifecycle["active_bud_review_dt"].notna()
 
 tab_lifecycle, tab_unload = st.tabs(["ISA Receiving Lifecycle", "Pyxis 28-Day Unload"])
 
@@ -906,6 +959,8 @@ with tab_lifecycle:
                 | view["med_desc"].str.contains(med_search, case=False, na=False)
             )
             view = view[med_mask]
+        reviewed_active_bud = view[view["active_bud_reviewed"]].copy()
+        view = view[~view["active_bud_reviewed"]].copy()
 
         v1, v2, v3, v4 = st.columns(4)
         v1.metric("Filtered ISA Items", f"{len(view):,}")
@@ -1085,6 +1140,34 @@ with tab_lifecycle:
                             })
                             st.success("Saved packaged expiration review.")
                             st.rerun()
+
+        st.markdown("##### Reviewed Active BUD Meds")
+        if reviewed_active_bud.empty:
+            st.info("No active BUD updates have been reviewed in the current filters.")
+        else:
+            reviewed_cols = [
+                "isa_name",
+                "location",
+                "med_id",
+                "med_desc",
+                "active_bud_review_status",
+                "reviewed_active_bud_date",
+                "active_bud_review_dt",
+                "active_bud_review_by",
+                "active_bud_review_note",
+            ]
+            st.dataframe(
+                reviewed_active_bud.sort_values("active_bud_review_dt", ascending=False)[reviewed_cols],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "active_bud_review_status": "Review Status",
+                    "reviewed_active_bud_date": st.column_config.DatetimeColumn("Active BUD", format="MM/DD/YYYY"),
+                    "active_bud_review_dt": st.column_config.DatetimeColumn("Reviewed", format="MM/DD/YYYY HH:mm"),
+                    "active_bud_review_by": "Reviewed By",
+                    "active_bud_review_note": "Note",
+                },
+            )
 
         st.markdown("##### ISA Item Lifecycle Table")
         display_cols = [
