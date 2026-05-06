@@ -553,9 +553,9 @@ def load_mobile_scan_queue():
             r.first_received,
             r.last_received,
             COALESCE(r.receiving_events, 0) AS receiving_events,
-            s.last_stock_add,
-            COALESCE(s.stock_add_events, 0) AS stock_add_events,
-            COALESCE(s.return_restock_events, 0) AS return_restock_events,
+            sa.last_stock_add,
+            COALESCE(sa.stock_add_events, 0) AS stock_add_events,
+            COALESCE(sa.return_restock_events, 0) AS return_restock_events,
             d.last_deducted,
             COALESCE(d.deduction_events, 0) AS deduction_events,
             COALESCE(d.total_deducted_qty, 0) AS total_deducted_qty,
@@ -573,7 +573,7 @@ def load_mobile_scan_queue():
          AND COALESCE(c.isa_name, '') = a.isa_name
          AND COALESCE(c.location, '') = a.location
         LEFT JOIN receiving r ON UPPER(TRIM(c.med_id)) = r.med_id
-        LEFT JOIN stock_add s ON UPPER(TRIM(c.med_id)) = s.med_id
+        LEFT JOIN stock_add sa ON UPPER(TRIM(c.med_id)) = sa.med_id
         LEFT JOIN deduction d ON UPPER(TRIM(c.med_id)) = d.med_id
         LEFT JOIN packaged p ON UPPER(TRIM(c.med_id)) = p.med_id
         LEFT JOIN pyxis y ON UPPER(TRIM(c.med_id)) = y.med_id
