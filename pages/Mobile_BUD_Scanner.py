@@ -86,9 +86,18 @@ def ensure_qc_actions_table():
                 isa_name TEXT,
                 location TEXT,
                 source TEXT,
+                verification_status TEXT DEFAULT 'Pending pharmacist check',
+                verified_by TEXT,
+                verified_dt TIMESTAMP,
+                verification_note TEXT,
                 last_seen_dt TIMESTAMP DEFAULT NOW()
             )
         """))
+        conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verification_status TEXT DEFAULT 'Pending pharmacist check'"))
+        conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verified_by TEXT"))
+        conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verified_dt TIMESTAMP"))
+        conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verification_note TEXT"))
+        conn.execute(text("UPDATE barcode_med_map SET verification_status = 'Pending pharmacist check' WHERE verification_status IS NULL OR TRIM(verification_status) = ''"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_barcode_med_map_digits ON barcode_med_map (barcode_digits)"))
 
 
@@ -230,10 +239,12 @@ def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
 
     sql = text("""
         INSERT INTO barcode_med_map (
-            barcode_text, barcode_digits, med_id, med_desc, isa_name, location, source, last_seen_dt
+            barcode_text, barcode_digits, med_id, med_desc, isa_name, location,
+            source, verification_status, last_seen_dt
         )
         VALUES (
-            :barcode_text, :barcode_digits, :med_id, :med_desc, :isa_name, :location, :source, NOW()
+            :barcode_text, :barcode_digits, :med_id, :med_desc, :isa_name, :location,
+            :source, 'Pending pharmacist check', NOW()
         )
         ON CONFLICT (barcode_text) DO UPDATE SET
             barcode_digits = EXCLUDED.barcode_digits,
@@ -242,6 +253,38 @@ def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
             isa_name = EXCLUDED.isa_name,
             location = EXCLUDED.location,
             source = EXCLUDED.source,
+            verification_status = CASE
+                WHEN barcode_med_map.med_id = EXCLUDED.med_id
+                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
+                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
+                 AND barcode_med_map.verification_status = 'Verified'
+                THEN barcode_med_map.verification_status
+                ELSE 'Pending pharmacist check'
+            END,
+            verified_by = CASE
+                WHEN barcode_med_map.med_id = EXCLUDED.med_id
+                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
+                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
+                 AND barcode_med_map.verification_status = 'Verified'
+                THEN barcode_med_map.verified_by
+                ELSE NULL
+            END,
+            verified_dt = CASE
+                WHEN barcode_med_map.med_id = EXCLUDED.med_id
+                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
+                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
+                 AND barcode_med_map.verification_status = 'Verified'
+                THEN barcode_med_map.verified_dt
+                ELSE NULL
+            END,
+            verification_note = CASE
+                WHEN barcode_med_map.med_id = EXCLUDED.med_id
+                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
+                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
+                 AND barcode_med_map.verification_status = 'Verified'
+                THEN barcode_med_map.verification_note
+                ELSE NULL
+            END,
             last_seen_dt = NOW()
     """)
     with engine.begin() as conn:
@@ -253,6 +296,28 @@ def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
             "isa_name": str(row.get("isa_name") or ""),
             "location": str(row.get("location") or ""),
             "source": source,
+        })
+    load_barcode_crosswalk.clear()
+
+
+def verify_barcode_mapping(barcode_value, verified_by, note):
+    barcode_text, _ = barcode_key(barcode_value)
+    if not barcode_text:
+        return
+
+    sql = text("""
+        UPDATE barcode_med_map
+        SET verification_status = 'Verified',
+            verified_by = :verified_by,
+            verified_dt = NOW(),
+            verification_note = :verification_note
+        WHERE barcode_text = :barcode_text
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql, {
+            "barcode_text": barcode_text,
+            "verified_by": verified_by or "",
+            "verification_note": note or "",
         })
     load_barcode_crosswalk.clear()
 
@@ -363,6 +428,10 @@ def load_barcode_crosswalk():
             isa_name,
             location,
             source,
+            verification_status,
+            verified_by,
+            verified_dt,
+            verification_note,
             last_seen_dt
         FROM barcode_med_map
     """)
@@ -372,6 +441,9 @@ def load_barcode_crosswalk():
         return df
     for col in ["barcode_text", "barcode_digits", "med_id"]:
         df[col] = df[col].fillna("").astype(str).str.strip().str.upper()
+    for col in ["source", "verification_status", "verified_by", "verification_note"]:
+        df[col] = df[col].fillna("").astype(str)
+    df["verified_dt"] = pd.to_datetime(df["verified_dt"], errors="coerce")
     return df
 
 
@@ -416,6 +488,10 @@ def find_matches(catalog, barcode_crosswalk, raw_value):
 
 
 ensure_qc_actions_table()
+
+if st.session_state.pop("mobile_bud_reset", False):
+    st.session_state["mobile_barcode_input"] = ""
+    st.session_state["barcode_med_search"] = ""
 
 catalog = load_scan_catalog()
 barcode_crosswalk = load_barcode_crosswalk()
@@ -490,21 +566,42 @@ else:
     c1.metric("Med ID", selected["med_id"])
     c2.metric("ISA", selected["isa_name"])
     c3.metric("Location", selected["location"])
+    verification_status = str(selected.get("verification_status", "") or "").strip()
+    if selected.get("match_type") == "Saved barcode map":
+        if verification_status == "Verified":
+            st.success(
+                f"Barcode link verified by {selected.get('verified_by', '') or 'pharmacist'}."
+            )
+        else:
+            st.warning("Barcode link is pending pharmacist verification.")
 
     detail_cols = [
         "med_id", "med_desc", "isa_name", "location", "latest_packaged_bud",
+        "match_type", "verification_status", "verified_by", "verified_dt",
         "ndc_values", "pyxis_pockets", "pyxis_qty", "pyxis_stations",
     ]
+    visible_detail_cols = [col for col in detail_cols if col in matches.columns]
     st.dataframe(
-        matches[detail_cols],
+        matches[visible_detail_cols],
         width="stretch",
         hide_index=True,
         column_config={
             "latest_packaged_bud": st.column_config.DatetimeColumn("Latest Packaged BUD", format="MM/DD/YYYY"),
+            "verified_dt": st.column_config.DatetimeColumn("Verified", format="MM/DD/YYYY HH:mm"),
             "pyxis_pockets": st.column_config.NumberColumn("Pyxis Pockets", format="%d"),
             "pyxis_qty": st.column_config.NumberColumn("Pyxis Qty", format="%.0f"),
         },
     )
+
+    with st.expander("Pharmacist barcode-link verification"):
+        st.caption("Use this after a pharmacist confirms this barcode is linked to the correct RxTrack med/location.")
+        verify_by = st.text_input("Verified by", key="barcode_verified_by")
+        verify_note = st.text_area("Verification note", value="Confirmed barcode-to-med match.", key="barcode_verification_note")
+        if st.button("Verify Barcode Link"):
+            save_barcode_mapping(selected, scan_value)
+            verify_barcode_mapping(scan_value, verify_by, verify_note)
+            st.success("Barcode link verified.")
+            st.rerun()
 
     with st.form("mobile_bud_review_form"):
         default_bud = parsed_expiration or pd.Timestamp.today().date()
@@ -516,7 +613,6 @@ else:
             save_barcode_mapping(selected, scan_value)
             save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
             load_scan_catalog.clear()
-            st.session_state["mobile_barcode_input"] = ""
-            st.session_state["barcode_med_search"] = ""
+            st.session_state["mobile_bud_reset"] = True
             st.success("Saved Active BUD review.")
             st.rerun()
