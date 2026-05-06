@@ -1,10 +1,18 @@
 import hashlib
 import re
 from datetime import date
+from io import BytesIO
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
+from PIL import Image
+
+try:
+    import zxingcpp
+except ImportError:
+    zxingcpp = None
 
 import App
 
@@ -21,7 +29,7 @@ else:
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Mobile BUD Scanner",
-        "Enter or scan a product barcode, match it to an RxTrack med, and save the active BUD review.",
+        "Use the iPhone camera or enter a barcode, match it to an RxTrack med, and save the active BUD review.",
         kicker="Inventory QC",
     )
 else:
@@ -103,6 +111,21 @@ def parse_gs1_expiration(raw_value):
         return date(year, int(mm), int(dd))
     except ValueError:
         return None
+
+
+def decode_barcode_photo(uploaded_image):
+    if uploaded_image is None or zxingcpp is None:
+        return []
+
+    image = Image.open(BytesIO(uploaded_image.getvalue())).convert("RGB")
+    image_array = np.array(image)
+    results = zxingcpp.read_barcodes(image_array)
+    decoded = []
+    for result in results:
+        text_value = str(getattr(result, "text", "") or "").strip()
+        if text_value:
+            decoded.append(text_value)
+    return decoded
 
 
 def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value):
@@ -222,10 +245,23 @@ def find_matches(catalog, raw_value):
 ensure_qc_actions_table()
 
 catalog = load_scan_catalog()
-st.info(
-    "Use a Bluetooth/USB barcode scanner or type the barcode/Med ID below. "
-    "The embedded phone-camera scanner was disabled because Streamlit Cloud rejected the custom component loader."
+st.caption(
+    "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
 )
+camera_photo = st.camera_input("iPhone camera barcode photo")
+decoded_values = decode_barcode_photo(camera_photo)
+if zxingcpp is None:
+    st.warning("Camera barcode decoding is not installed yet. You can still type the barcode or Med ID.")
+elif camera_photo is not None and not decoded_values:
+    st.warning("No barcode was decoded from that photo. Try a closer, flatter picture with the barcode filling most of the frame.")
+elif decoded_values:
+    decoded_value = decoded_values[0]
+    if decoded_value != st.session_state.get("mobile_barcode_input"):
+        st.session_state["mobile_barcode_input"] = decoded_value
+    if len(decoded_values) > 1:
+        st.caption(f"Decoded {len(decoded_values)} barcodes; using the first one.")
+    st.success(f"Decoded barcode: {decoded_value}")
+
 scan_value = st.text_input("Barcode or Med ID", key="mobile_barcode_input")
 
 parsed_expiration = parse_gs1_expiration(scan_value)

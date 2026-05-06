@@ -7,3 +7,4 @@ xlsxwriter
 psycopg2-binary
 pyarrow
 sqlalchemy
+zxing-cpp
