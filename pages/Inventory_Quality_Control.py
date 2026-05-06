@@ -22,6 +22,31 @@ else:
     st.header("Inventory Quality Control")
     st.caption("Days since last received by ISA item.")
 
+st.markdown("""
+    <style>
+    div[data-testid="stButton"] button,
+    div[data-testid="stFormSubmitButton"] button,
+    div[data-testid="stDownloadButton"] button {
+        background: #0f766e !important;
+        color: #ffffff !important;
+        border: 1px solid #0f766e !important;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stButton"] button:hover,
+    div[data-testid="stFormSubmitButton"] button:hover,
+    div[data-testid="stDownloadButton"] button:hover {
+        background: #115e59 !important;
+        color: #ffffff !important;
+        border-color: #115e59 !important;
+    }
+    div[data-testid="stButton"] button p,
+    div[data-testid="stFormSubmitButton"] button p,
+    div[data-testid="stDownloadButton"] button p {
+        color: #ffffff !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 
 def ensure_packaging_table():
     with engine.begin() as conn:
@@ -228,6 +253,35 @@ def update_packaged_bud_after_removal(med_id, current_expire_date, new_bud_date)
         })
     load_packaging_history.clear()
     return result.rowcount or 0
+
+
+def create_manual_packaged_bud(med_id, med_desc, new_bud_date, reviewed_by):
+    sql = text("""
+        INSERT INTO packaged_meds (
+            pk, dispense_dt, med_id, med_desc, dose_form, qty_per_pack, qoh,
+            hospital_lot_number, bud, packaged_by, confirmer
+        )
+        VALUES (
+            md5(:pk_source), NOW(), :med_id, :med_desc, 'Manual BUD', 0, 0,
+            'MANUAL-BUD', :new_bud_date, :reviewed_by, 'RxTrack'
+        )
+        ON CONFLICT (pk) DO UPDATE SET
+            med_desc = EXCLUDED.med_desc,
+            bud = EXCLUDED.bud,
+            packaged_by = EXCLUDED.packaged_by,
+            confirmer = EXCLUDED.confirmer
+    """)
+    pk_source = f"manual-bud|{med_id}|{new_bud_date}"
+    with engine.begin() as conn:
+        conn.execute(sql, {
+            "pk_source": pk_source,
+            "med_id": med_id,
+            "med_desc": med_desc,
+            "new_bud_date": new_bud_date,
+            "reviewed_by": reviewed_by or "Manual review",
+        })
+    load_packaging_history.clear()
+    return 1
 
 
 @st.cache_data(ttl=60)
@@ -1105,7 +1159,44 @@ with tab_lifecycle:
             )
             st.markdown("##### Update Packaged BUD After Removal")
             if pd.isna(current_packaged_expire):
-                st.info("This selected row does not have a packaged BUD/expiration from the packaging report, so there is no packaged BUD record to update.")
+                st.info("This selected row does not have a packaged BUD/expiration from the packaging report. Create one here after you confirm the active product date.")
+                with st.form(f"selected_med_bud_create_{selected_med_id}"):
+                    created_bud_date = st.date_input(
+                        "Active BUD",
+                        value=pd.Timestamp.today().date(),
+                        min_value=pd.Timestamp.today().date(),
+                    )
+                    created_by = st.text_input("Reviewed by", value="")
+                    created_note = st.text_area(
+                        "Note",
+                        value="Created active BUD record after checking current Pyxis/carousel product.",
+                    )
+                    create_bud = st.form_submit_button("Create active BUD record")
+                    if create_bud:
+                        create_manual_packaged_bud(
+                            selected_med_id,
+                            selected_med_desc,
+                            created_bud_date,
+                            created_by,
+                        )
+                        action_key = (
+                            f"selected-row-bud-create|{selected_row.get('isa_name', '')}|"
+                            f"{selected_row.get('location', '')}|{selected_med_id}|{created_bud_date}"
+                        )
+                        save_inventory_qc_action({
+                            "action_key": action_key,
+                            "action_type": "packaged_expiration",
+                            "med_id": selected_med_id,
+                            "med_desc": selected_med_desc,
+                            "isa_name": selected_row.get("isa_name", ""),
+                            "location": selected_row.get("location", ""),
+                            "action_status": "Manual BUD record created",
+                            "action_by": created_by,
+                            "note": created_note,
+                            "replacement_expire_date": created_bud_date,
+                        })
+                        st.success("Created active BUD record.")
+                        st.rerun()
             else:
                 st.caption("Use this after the old product has been removed and the next remaining package date should become the active BUD.")
                 with st.form(f"selected_med_bud_update_{selected_med_id}"):
