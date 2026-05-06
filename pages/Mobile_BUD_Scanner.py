@@ -516,5 +516,7 @@ else:
             save_barcode_mapping(selected, scan_value)
             save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
             load_scan_catalog.clear()
+            st.session_state["mobile_barcode_input"] = ""
+            st.session_state["barcode_med_search"] = ""
             st.success("Saved Active BUD review.")
             st.rerun()
