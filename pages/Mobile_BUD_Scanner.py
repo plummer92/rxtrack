@@ -446,6 +446,110 @@ def load_scan_catalog():
 
 
 @st.cache_data(ttl=60)
+def load_mobile_scan_queue():
+    sql = text("""
+        WITH latest_snapshot AS (
+            SELECT MAX(snapshot_date) AS snapshot_date
+            FROM cycle_count_status
+        ),
+        latest_action AS (
+            SELECT DISTINCT ON (UPPER(TRIM(med_id)), COALESCE(isa_name, ''), COALESCE(location, ''))
+                UPPER(TRIM(med_id)) AS med_id,
+                COALESCE(isa_name, '') AS isa_name,
+                COALESCE(location, '') AS location,
+                action_status,
+                action_dt,
+                action_by,
+                replacement_expire_date
+            FROM inventory_qc_actions
+            WHERE action_type = 'active_bud'
+              AND replacement_expire_date IS NOT NULL
+            ORDER BY UPPER(TRIM(med_id)), COALESCE(isa_name, ''), COALESCE(location, ''), action_dt DESC
+        ),
+        packaged AS (
+            SELECT
+                UPPER(TRIM(med_id)) AS med_id,
+                MAX(COALESCE(bud, hospital_expire_date)) AS packaged_bud
+            FROM packaged_meds
+            WHERE dispense_dt IS NOT NULL
+              AND COALESCE(hospital_lot_number, '') <> 'MANUAL-BUD'
+              AND COALESCE(dose_form, '') <> 'Manual BUD'
+            GROUP BY UPPER(TRIM(med_id))
+        ),
+        pyxis AS (
+            SELECT
+                UPPER(TRIM(med_id)) AS med_id,
+                COUNT(*) AS pyxis_pockets,
+                SUM(current_count) AS pyxis_qty,
+                STRING_AGG(DISTINCT station, ', ') AS pyxis_stations
+            FROM inventory_detailed
+            WHERE COALESCE(current_count, 0) > 0
+              AND COALESCE(station, '') NOT ILIKE 'CAR%%'
+            GROUP BY UPPER(TRIM(med_id))
+        )
+        SELECT
+            c.isa_name,
+            c.location,
+            UPPER(TRIM(c.med_id)) AS med_id,
+            c.med_desc,
+            c.snapshot_date,
+            c.last_cycle_count,
+            c.days_since_last_count,
+            p.packaged_bud,
+            a.replacement_expire_date AS active_bud_date,
+            a.action_dt AS reviewed_dt,
+            a.action_by AS reviewed_by,
+            COALESCE(y.pyxis_pockets, 0) AS pyxis_pockets,
+            COALESCE(y.pyxis_qty, 0) AS pyxis_qty,
+            COALESCE(y.pyxis_stations, '') AS pyxis_stations
+        FROM cycle_count_status c
+        JOIN latest_snapshot s ON c.snapshot_date = s.snapshot_date
+        LEFT JOIN latest_action a
+          ON UPPER(TRIM(c.med_id)) = a.med_id
+         AND COALESCE(c.isa_name, '') = a.isa_name
+         AND COALESCE(c.location, '') = a.location
+        LEFT JOIN packaged p ON UPPER(TRIM(c.med_id)) = p.med_id
+        LEFT JOIN pyxis y ON UPPER(TRIM(c.med_id)) = y.med_id
+        WHERE COALESCE(TRIM(c.med_id), '') <> ''
+    """)
+    with engine.connect() as conn:
+        queue = pd.read_sql(sql, conn)
+    if queue.empty:
+        return queue
+
+    today = pd.Timestamp.today().normalize()
+    queue["packaged_bud"] = pd.to_datetime(queue["packaged_bud"], errors="coerce")
+    queue["active_bud_date"] = pd.to_datetime(queue["active_bud_date"], errors="coerce")
+    queue["reviewed_dt"] = pd.to_datetime(queue["reviewed_dt"], errors="coerce")
+    queue["days_until_active_bud"] = (queue["active_bud_date"] - today).dt.days
+    queue["days_until_packaged_bud"] = (queue["packaged_bud"] - today).dt.days
+    queue["pyxis_qty"] = pd.to_numeric(queue["pyxis_qty"], errors="coerce").fillna(0)
+    queue["pyxis_pockets"] = pd.to_numeric(queue["pyxis_pockets"], errors="coerce").fillna(0)
+    queue["queue_reason"] = "Review active BUD"
+    queue.loc[queue["active_bud_date"].isna(), "queue_reason"] = "No active BUD review saved"
+    queue.loc[
+        queue["active_bud_date"].notna() & queue["days_until_active_bud"].le(30),
+        "queue_reason"
+    ] = "Active BUD due within 30 days"
+    queue.loc[
+        queue["active_bud_date"].notna() & queue["days_until_active_bud"].between(31, 90, inclusive="both"),
+        "queue_reason"
+    ] = "Active BUD due within 90 days"
+    queue["priority_rank"] = 3
+    queue.loc[queue["active_bud_date"].isna(), "priority_rank"] = 0
+    queue.loc[queue["days_until_active_bud"].le(30), "priority_rank"] = 1
+    queue.loc[queue["days_until_active_bud"].between(31, 90, inclusive="both"), "priority_rank"] = 2
+    queue = queue[
+        queue["active_bud_date"].isna()
+        | queue["days_until_active_bud"].le(90)
+    ].copy()
+    return queue.sort_values(
+        ["priority_rank", "days_until_active_bud", "pyxis_qty", "med_desc"],
+        ascending=[True, True, False, True],
+    )
+
+
+@st.cache_data(ttl=60)
 def load_barcode_crosswalk():
     sql = text("""
         SELECT
@@ -523,6 +627,50 @@ if st.session_state.pop("mobile_bud_reset", False):
 
 catalog = load_scan_catalog()
 barcode_crosswalk = load_barcode_crosswalk()
+scan_queue = load_mobile_scan_queue()
+
+st.markdown("##### Priority Scan Queue")
+if scan_queue.empty:
+    st.success("No priority Active BUD scans are currently due.")
+else:
+    q1, q2, q3 = st.columns(3)
+    q1.metric("Items To Scan", f"{len(scan_queue):,}")
+    q2.metric("Missing Active BUD", f"{int(scan_queue['active_bud_date'].isna().sum()):,}")
+    q3.metric("Due Within 30 Days", f"{int(scan_queue['days_until_active_bud'].le(30).sum()):,}")
+    queue_cols = [
+        "queue_reason",
+        "med_id",
+        "med_desc",
+        "isa_name",
+        "location",
+        "active_bud_date",
+        "days_until_active_bud",
+        "packaged_bud",
+        "pyxis_qty",
+        "pyxis_pockets",
+        "pyxis_stations",
+    ]
+    queue_event = st.dataframe(
+        scan_queue[queue_cols].head(50),
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "active_bud_date": st.column_config.DatetimeColumn("Active BUD", format="MM/DD/YYYY"),
+            "packaged_bud": st.column_config.DatetimeColumn("Packaged BUD", format="MM/DD/YYYY"),
+            "days_until_active_bud": st.column_config.NumberColumn("Days Until Active BUD", format="%.0f"),
+            "pyxis_qty": st.column_config.NumberColumn("Pyxis Qty", format="%.0f"),
+            "pyxis_pockets": st.column_config.NumberColumn("Pyxis Pockets", format="%d"),
+        },
+    )
+    if queue_event.selection.rows:
+        selected_queue = scan_queue.head(50).reset_index(drop=True).iloc[queue_event.selection.rows[0]]
+        st.caption(
+            f"Selected queue item: {selected_queue['med_id']} | {selected_queue['med_desc']} | "
+            f"{selected_queue['isa_name']} {selected_queue['location']}"
+        )
+
 st.caption(
     "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
 )
@@ -637,6 +785,7 @@ else:
             save_barcode_mapping(selected, scan_value, openfda_matches=openfda_matches)
             save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
             load_scan_catalog.clear()
+            load_mobile_scan_queue.clear()
             st.session_state["mobile_bud_reset"] = True
             st.success("Saved Active BUD review.")
             st.rerun()
