@@ -466,6 +466,61 @@ def load_mobile_scan_queue():
               AND replacement_expire_date IS NOT NULL
             ORDER BY UPPER(TRIM(med_id)), COALESCE(isa_name, ''), COALESCE(location, ''), action_dt DESC
         ),
+        receiving AS (
+            SELECT
+                UPPER(TRIM(med_id)) AS med_id,
+                MIN(dt::timestamp) AS first_received,
+                MAX(dt::timestamp) AS last_received,
+                COUNT(*) AS receiving_events
+            FROM pharmacy_orders
+            WHERE med_id IS NOT NULL
+              AND dt IS NOT NULL
+              AND UPPER(TRIM(COALESCE(priority, ''))) = 'RECEIVING'
+            GROUP BY UPPER(TRIM(med_id))
+        ),
+        stock_add AS (
+            SELECT
+                UPPER(TRIM(med_id)) AS med_id,
+                MAX(dt::timestamp) AS last_stock_add,
+                COUNT(*) AS stock_add_events,
+                SUM(
+                    CASE
+                        WHEN priority ILIKE '%%return%%'
+                          OR priority ILIKE '%%restock%%'
+                          OR priority ILIKE '%%instant%%'
+                          OR priority ILIKE '%%inventory%%'
+                        THEN 1 ELSE 0
+                    END
+                ) AS return_restock_events
+            FROM pharmacy_orders
+            WHERE med_id IS NOT NULL
+              AND dt IS NOT NULL
+              AND (
+                    UPPER(TRIM(COALESCE(priority, ''))) = 'RECEIVING'
+                 OR priority ILIKE '%%return%%'
+                 OR priority ILIKE '%%restock%%'
+                 OR priority ILIKE '%%instant%%'
+                 OR priority ILIKE '%%inventory%%'
+              )
+            GROUP BY UPPER(TRIM(med_id))
+        ),
+        deduction AS (
+            SELECT
+                UPPER(TRIM(med_id)) AS med_id,
+                MAX(dt::timestamp) AS last_deducted,
+                COUNT(*) AS deduction_events,
+                SUM(COALESCE(qty, 0)) AS total_deducted_qty
+            FROM pharmacy_orders
+            WHERE med_id IS NOT NULL
+              AND dt IS NOT NULL
+              AND (
+                    priority ILIKE '%%pyxis%%pull%%'
+                 OR priority ILIKE '%%pull%%'
+                 OR priority ILIKE '%%dispense%%'
+                 OR priority ILIKE '%%deduct%%'
+              )
+            GROUP BY UPPER(TRIM(med_id))
+        ),
         packaged AS (
             SELECT
                 UPPER(TRIM(med_id)) AS med_id,
@@ -495,6 +550,15 @@ def load_mobile_scan_queue():
             c.snapshot_date,
             c.last_cycle_count,
             c.days_since_last_count,
+            r.first_received,
+            r.last_received,
+            COALESCE(r.receiving_events, 0) AS receiving_events,
+            s.last_stock_add,
+            COALESCE(s.stock_add_events, 0) AS stock_add_events,
+            COALESCE(s.return_restock_events, 0) AS return_restock_events,
+            d.last_deducted,
+            COALESCE(d.deduction_events, 0) AS deduction_events,
+            COALESCE(d.total_deducted_qty, 0) AS total_deducted_qty,
             p.packaged_bud,
             a.replacement_expire_date AS active_bud_date,
             a.action_dt AS reviewed_dt,
@@ -508,6 +572,9 @@ def load_mobile_scan_queue():
           ON UPPER(TRIM(c.med_id)) = a.med_id
          AND COALESCE(c.isa_name, '') = a.isa_name
          AND COALESCE(c.location, '') = a.location
+        LEFT JOIN receiving r ON UPPER(TRIM(c.med_id)) = r.med_id
+        LEFT JOIN stock_add s ON UPPER(TRIM(c.med_id)) = s.med_id
+        LEFT JOIN deduction d ON UPPER(TRIM(c.med_id)) = d.med_id
         LEFT JOIN packaged p ON UPPER(TRIM(c.med_id)) = p.med_id
         LEFT JOIN pyxis y ON UPPER(TRIM(c.med_id)) = y.med_id
         WHERE COALESCE(TRIM(c.med_id), '') <> ''
@@ -521,31 +588,67 @@ def load_mobile_scan_queue():
     queue["packaged_bud"] = pd.to_datetime(queue["packaged_bud"], errors="coerce")
     queue["active_bud_date"] = pd.to_datetime(queue["active_bud_date"], errors="coerce")
     queue["reviewed_dt"] = pd.to_datetime(queue["reviewed_dt"], errors="coerce")
+    for col in ["first_received", "last_received", "last_stock_add", "last_deducted", "last_cycle_count"]:
+        queue[col] = pd.to_datetime(queue[col], errors="coerce")
     queue["days_until_active_bud"] = (queue["active_bud_date"] - today).dt.days
     queue["days_until_packaged_bud"] = (queue["packaged_bud"] - today).dt.days
+    queue["days_since_last_received"] = (today - queue["last_received"]).dt.days
+    queue["days_since_first_received"] = (today - queue["first_received"]).dt.days
+    queue["days_since_last_stock_add"] = (today - queue["last_stock_add"]).dt.days
+    queue["days_since_last_deducted"] = (today - queue["last_deducted"]).dt.days
+    queue["days_since_last_cycle_count"] = (today - queue["last_cycle_count"]).dt.days
+    for col in [
+        "receiving_events", "stock_add_events", "return_restock_events",
+        "deduction_events", "total_deducted_qty", "days_since_last_count",
+    ]:
+        queue[col] = pd.to_numeric(queue[col], errors="coerce").fillna(0)
     queue["pyxis_qty"] = pd.to_numeric(queue["pyxis_qty"], errors="coerce").fillna(0)
     queue["pyxis_pockets"] = pd.to_numeric(queue["pyxis_pockets"], errors="coerce").fillna(0)
-    queue["queue_reason"] = "Review active BUD"
-    queue.loc[queue["active_bud_date"].isna(), "queue_reason"] = "No active BUD review saved"
-    queue.loc[
-        queue["active_bud_date"].notna() & queue["days_until_active_bud"].le(30),
-        "queue_reason"
-    ] = "Active BUD due within 30 days"
-    queue.loc[
-        queue["active_bud_date"].notna() & queue["days_until_active_bud"].between(31, 90, inclusive="both"),
-        "queue_reason"
-    ] = "Active BUD due within 90 days"
-    queue["priority_rank"] = 3
-    queue.loc[queue["active_bud_date"].isna(), "priority_rank"] = 0
-    queue.loc[queue["days_until_active_bud"].le(30), "priority_rank"] = 1
-    queue.loc[queue["days_until_active_bud"].between(31, 90, inclusive="both"), "priority_rank"] = 2
-    queue = queue[
-        queue["active_bud_date"].isna()
-        | queue["days_until_active_bud"].le(90)
-    ].copy()
+    queue["receiving_status"] = "Matched"
+    queue.loc[queue["last_received"].isna(), "receiving_status"] = "No Receiving Match"
+    queue["no_recent_movement"] = (
+        queue["last_stock_add"].isna()
+        & queue["last_deducted"].isna()
+        & queue["return_restock_events"].eq(0)
+        & queue["deduction_events"].eq(0)
+    )
+
+    queue["priority_score"] = 0
+    queue.loc[queue["receiving_status"].eq("No Receiving Match"), "priority_score"] += 100
+    queue.loc[queue["days_since_last_received"].ge(180), "priority_score"] += 80
+    queue.loc[queue["days_since_last_received"].between(91, 179, inclusive="both"), "priority_score"] += 55
+    queue.loc[queue["days_since_last_cycle_count"].ge(180), "priority_score"] += 45
+    queue.loc[queue["days_since_last_cycle_count"].between(91, 179, inclusive="both"), "priority_score"] += 25
+    queue.loc[queue["no_recent_movement"], "priority_score"] += 45
+    queue.loc[queue["last_deducted"].notna() & queue["days_since_last_deducted"].ge(180), "priority_score"] += 20
+    queue.loc[queue["last_stock_add"].notna() & queue["days_since_last_stock_add"].ge(180), "priority_score"] += 20
+    queue.loc[queue["active_bud_date"].isna(), "priority_score"] += 15
+
+    reasons = []
+    for row in queue.itertuples(index=False):
+        row_reasons = []
+        if row.receiving_status == "No Receiving Match":
+            row_reasons.append("No receiving match")
+        elif pd.notna(row.days_since_last_received) and row.days_since_last_received >= 180:
+            row_reasons.append("180+ days since received")
+        elif pd.notna(row.days_since_last_received) and row.days_since_last_received >= 91:
+            row_reasons.append("91+ days since received")
+        if pd.notna(row.days_since_last_cycle_count) and row.days_since_last_cycle_count >= 180:
+            row_reasons.append("180+ days since cycle count")
+        elif pd.notna(row.days_since_last_cycle_count) and row.days_since_last_cycle_count >= 91:
+            row_reasons.append("91+ days since cycle count")
+        if row.no_recent_movement:
+            row_reasons.append("No return/dispense trail")
+        elif pd.notna(row.days_since_last_deducted) and row.days_since_last_deducted >= 180:
+            row_reasons.append("No recent dispense")
+        if pd.isna(row.active_bud_date):
+            row_reasons.append("No active BUD review")
+        reasons.append("; ".join(row_reasons) if row_reasons else "Lower priority")
+    queue["queue_reason"] = reasons
+    queue = queue[queue["priority_score"].gt(0)].copy()
     return queue.sort_values(
-        ["priority_rank", "days_until_active_bud", "pyxis_qty", "med_desc"],
-        ascending=[True, True, False, True],
+        ["priority_score", "receiving_status", "days_since_last_received", "days_since_last_cycle_count", "pyxis_qty", "med_desc"],
+        ascending=[False, False, False, False, False, True],
     )
 
 
@@ -631,24 +734,29 @@ scan_queue = load_mobile_scan_queue()
 
 st.markdown("##### Priority Scan Queue")
 if scan_queue.empty:
-    st.success("No priority Active BUD scans are currently due.")
+    st.success("No stale ISA scan priorities are currently due.")
 else:
     q1, q2, q3 = st.columns(3)
     q1.metric("Items To Scan", f"{len(scan_queue):,}")
-    q2.metric("Missing Active BUD", f"{int(scan_queue['active_bud_date'].isna().sum()):,}")
-    q3.metric("Due Within 30 Days", f"{int(scan_queue['days_until_active_bud'].le(30).sum()):,}")
+    q2.metric("No Receiving Match", f"{int(scan_queue['receiving_status'].eq('No Receiving Match').sum()):,}")
+    q3.metric("No Movement Trail", f"{int(scan_queue['no_recent_movement'].sum()):,}")
     queue_cols = [
+        "priority_score",
         "queue_reason",
         "med_id",
         "med_desc",
         "isa_name",
         "location",
-        "active_bud_date",
-        "days_until_active_bud",
-        "packaged_bud",
+        "receiving_status",
+        "days_since_last_received",
+        "days_since_last_cycle_count",
+        "days_since_last_deducted",
+        "return_restock_events",
+        "deduction_events",
         "pyxis_qty",
         "pyxis_pockets",
         "pyxis_stations",
+        "active_bud_date",
     ]
     queue_event = st.dataframe(
         scan_queue[queue_cols].head(50),
@@ -657,9 +765,13 @@ else:
         on_select="rerun",
         selection_mode="single-row",
         column_config={
+            "priority_score": st.column_config.NumberColumn("Priority", format="%.0f"),
             "active_bud_date": st.column_config.DatetimeColumn("Active BUD", format="MM/DD/YYYY"),
-            "packaged_bud": st.column_config.DatetimeColumn("Packaged BUD", format="MM/DD/YYYY"),
-            "days_until_active_bud": st.column_config.NumberColumn("Days Until Active BUD", format="%.0f"),
+            "days_since_last_received": st.column_config.NumberColumn("Days Since Received", format="%.0f"),
+            "days_since_last_cycle_count": st.column_config.NumberColumn("Days Since Cycle Count", format="%.0f"),
+            "days_since_last_deducted": st.column_config.NumberColumn("Days Since Dispense", format="%.0f"),
+            "return_restock_events": st.column_config.NumberColumn("Return/Restock Events", format="%d"),
+            "deduction_events": st.column_config.NumberColumn("Dispense Events", format="%d"),
             "pyxis_qty": st.column_config.NumberColumn("Pyxis Qty", format="%.0f"),
             "pyxis_pockets": st.column_config.NumberColumn("Pyxis Pockets", format="%d"),
         },
