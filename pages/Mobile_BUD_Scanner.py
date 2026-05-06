@@ -71,6 +71,19 @@ def ensure_qc_actions_table():
             )
         """))
         conn.execute(text("ALTER TABLE inventory_qc_actions ADD COLUMN IF NOT EXISTS replacement_expire_date DATE"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS barcode_med_map (
+                barcode_text TEXT PRIMARY KEY,
+                barcode_digits TEXT,
+                med_id TEXT,
+                med_desc TEXT,
+                isa_name TEXT,
+                location TEXT,
+                source TEXT,
+                last_seen_dt TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_barcode_med_map_digits ON barcode_med_map (barcode_digits)"))
 
 
 def normalize_digits(value):
@@ -79,6 +92,12 @@ def normalize_digits(value):
 
 def normalize_text(value):
     return str(value or "").strip().upper()
+
+
+def barcode_key(value):
+    text_value = normalize_text(value)
+    digit_value = normalize_digits(value)
+    return text_value, digit_value.lstrip("0") or digit_value
 
 
 def barcode_candidates(raw_value):
@@ -166,6 +185,40 @@ def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value):
         })
 
 
+def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
+    barcode_text, barcode_digits = barcode_key(barcode_value)
+    if not barcode_text:
+        return
+
+    sql = text("""
+        INSERT INTO barcode_med_map (
+            barcode_text, barcode_digits, med_id, med_desc, isa_name, location, source, last_seen_dt
+        )
+        VALUES (
+            :barcode_text, :barcode_digits, :med_id, :med_desc, :isa_name, :location, :source, NOW()
+        )
+        ON CONFLICT (barcode_text) DO UPDATE SET
+            barcode_digits = EXCLUDED.barcode_digits,
+            med_id = EXCLUDED.med_id,
+            med_desc = EXCLUDED.med_desc,
+            isa_name = EXCLUDED.isa_name,
+            location = EXCLUDED.location,
+            source = EXCLUDED.source,
+            last_seen_dt = NOW()
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql, {
+            "barcode_text": barcode_text,
+            "barcode_digits": barcode_digits,
+            "med_id": normalize_text(row.get("med_id")),
+            "med_desc": str(row.get("med_desc") or ""),
+            "isa_name": str(row.get("isa_name") or ""),
+            "location": str(row.get("location") or ""),
+            "source": source,
+        })
+    load_barcode_crosswalk.clear()
+
+
 @st.cache_data(ttl=60)
 def load_scan_catalog():
     cycle_sql = text("""
@@ -222,29 +275,73 @@ def load_scan_catalog():
     return catalog
 
 
-def find_matches(catalog, raw_value):
+@st.cache_data(ttl=60)
+def load_barcode_crosswalk():
+    sql = text("""
+        SELECT
+            barcode_text,
+            barcode_digits,
+            UPPER(TRIM(med_id)) AS med_id,
+            med_desc,
+            isa_name,
+            location,
+            source,
+            last_seen_dt
+        FROM barcode_med_map
+    """)
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn)
+    if df.empty:
+        return df
+    for col in ["barcode_text", "barcode_digits", "med_id"]:
+        df[col] = df[col].fillna("").astype(str).str.strip().str.upper()
+    return df
+
+
+def find_matches(catalog, barcode_crosswalk, raw_value):
     text_candidates, digit_candidates = barcode_candidates(raw_value)
     if catalog.empty or (not text_candidates and not digit_candidates):
         return pd.DataFrame()
 
-    matches = catalog.copy()
-    med_match = matches["med_id"].isin(text_candidates)
-    ndc_match = matches["ndc_values"].apply(
+    work = catalog.copy()
+    med_match = work["med_id"].isin(text_candidates)
+    ndc_match = work["ndc_values"].apply(
         lambda value: any((normalize_digits(ndc) in digit_candidates) or ((normalize_digits(ndc).lstrip("0") or "0") in digit_candidates)
                           for ndc in str(value).split(",") if normalize_digits(ndc))
     )
-    matches = matches[med_match | ndc_match].copy()
+    direct_matches = work[med_match | ndc_match].copy()
+    if not direct_matches.empty:
+        direct_matches["match_type"] = "NDC"
+        direct_matches.loc[med_match.loc[direct_matches.index], "match_type"] = "Med ID"
+
+    learned_matches = pd.DataFrame()
+    if not barcode_crosswalk.empty:
+        barcode_hits = barcode_crosswalk[
+            barcode_crosswalk["barcode_text"].isin(text_candidates)
+            | barcode_crosswalk["barcode_digits"].isin(digit_candidates)
+        ].copy()
+        if not barcode_hits.empty:
+            learned_matches = barcode_hits.merge(
+                work,
+                on=["med_id", "isa_name", "location"],
+                how="inner",
+                suffixes=("_map", ""),
+            )
+            if not learned_matches.empty:
+                learned_matches["match_type"] = "Saved barcode map"
+
+    matches = pd.concat([learned_matches, direct_matches], ignore_index=True, sort=False)
     if matches.empty:
         return matches
 
-    matches["match_type"] = "NDC"
-    matches.loc[med_match.loc[matches.index], "match_type"] = "Med ID"
+    matches = matches.drop_duplicates(["isa_name", "location", "med_id"], keep="first")
     return matches.sort_values(["match_type", "isa_name", "location", "med_id"])
 
 
 ensure_qc_actions_table()
 
 catalog = load_scan_catalog()
+barcode_crosswalk = load_barcode_crosswalk()
 st.caption(
     "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
 )
@@ -265,7 +362,7 @@ elif decoded_values:
 scan_value = st.text_input("Barcode or Med ID", key="mobile_barcode_input")
 
 parsed_expiration = parse_gs1_expiration(scan_value)
-matches = find_matches(catalog, scan_value)
+matches = find_matches(catalog, barcode_crosswalk, scan_value)
 
 if scan_value:
     st.caption(f"Scanned value: `{scan_value}`")
@@ -276,6 +373,26 @@ elif not scan_value:
     st.info("Scan a barcode or enter a Med ID.")
 elif matches.empty:
     st.warning("No matching RxTrack med found.")
+    search_value = st.text_input("Search RxTrack med to link this barcode", key="barcode_med_search")
+    if search_value:
+        search_mask = (
+            catalog["med_id"].str.contains(search_value, case=False, na=False)
+            | catalog["med_desc"].str.contains(search_value, case=False, na=False)
+        )
+        search_results = catalog[search_mask].copy().head(50)
+        if search_results.empty:
+            st.info("No meds matched that search.")
+        else:
+            map_labels = [
+                f"{row.med_id} | {row.med_desc} | {row.isa_name} {row.location}"
+                for row in search_results.itertuples(index=False)
+            ]
+            selected_map_label = st.selectbox("Link barcode to", map_labels)
+            selected_map = search_results.iloc[map_labels.index(selected_map_label)]
+            if st.button("Save Barcode Match"):
+                save_barcode_mapping(selected_map, scan_value, source="Manual barcode link")
+                st.success("Saved barcode match. Future scans of this barcode will match automatically.")
+                st.rerun()
 else:
     st.subheader("Matched Med")
     labels = [
@@ -313,6 +430,7 @@ else:
         note = st.text_area("Note", value="Mobile barcode BUD review.")
         submitted = st.form_submit_button("Save Active BUD Review")
         if submitted:
+            save_barcode_mapping(selected, scan_value)
             save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
             load_scan_catalog.clear()
             st.success("Saved Active BUD review.")
