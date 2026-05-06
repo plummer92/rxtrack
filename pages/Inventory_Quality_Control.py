@@ -254,14 +254,7 @@ def load_inventory_counts():
 
 
 @st.cache_data(ttl=60)
-def load_current_pyxis_inventory(med_id):
-    med_id = str(med_id or "").strip().upper()
-    if not med_id:
-        return pd.DataFrame(columns=[
-            "station", "med_id", "med_desc", "current_count",
-            "pocket_location", "unit_cost", "inventory_value",
-        ])
-
+def load_current_pyxis_inventory():
     sql = text("""
         SELECT
             station,
@@ -274,11 +267,10 @@ def load_current_pyxis_inventory(med_id):
         FROM inventory_detailed
         WHERE COALESCE(current_count, 0) > 0
           AND COALESCE(station, '') NOT ILIKE 'CAR%%'
-          AND med_id = :med_id
         ORDER BY station, pocket_location
     """)
     with engine.connect() as conn:
-        return pd.read_sql(sql, conn, params={"med_id": med_id})
+        return pd.read_sql(sql, conn)
 
 
 @st.cache_data(ttl=60)
@@ -738,6 +730,7 @@ deduction_history = prep_deduction_history(load_deduction_history())
 qc_actions = load_inventory_qc_actions()
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
+pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
 packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
 receiving_summary = build_receiving_summary(receiving)
@@ -1069,7 +1062,7 @@ with tab_lifecycle:
             selected_row = view[display_cols].reset_index(drop=True).iloc[selected_table.selection.rows[0]]
             selected_med_id = str(selected_row["med_id"]).strip().upper()
             selected_med_desc = selected_row["med_desc"]
-            pyxis_matches = prep_pyxis_inventory(load_current_pyxis_inventory(selected_med_id))
+            pyxis_matches = pyxis_inventory[pyxis_inventory["med_id"].eq(selected_med_id)].copy()
 
             st.divider()
             st.subheader("Selected Med Current Pyxis Stocking")

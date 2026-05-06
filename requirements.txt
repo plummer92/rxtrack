@@ -1,7 +1,6 @@
-streamlit>=1.49
+streamlit
 pandas
 plotly
-orjson
 numpy
 openpyxl
 xlsxwriter
