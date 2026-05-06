@@ -565,6 +565,7 @@ def load_mobile_scan_queue():
             COALESCE(d.total_deducted_qty, 0) AS total_deducted_qty,
             p.packaged_bud,
             a.replacement_expire_date AS active_bud_date,
+            a.action_status,
             a.action_dt AS reviewed_dt,
             a.action_by AS reviewed_by,
             COALESCE(y.pyxis_pockets, 0) AS pyxis_pockets,
