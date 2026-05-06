@@ -1807,6 +1807,7 @@ def render_page_links():
     safe_page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
     safe_page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin & Cassettes", icon="🗑️")
     safe_page_link("pages/Inventory_Quality_Control.py", label="Inventory Quality Control", icon="📦")
+    safe_page_link("pages/Mobile_BUD_Scanner.py", label="Mobile BUD Scanner", icon="📱")
     safe_page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
 
     st.markdown('<div class="rx-nav-label">Performance</div>', unsafe_allow_html=True)
