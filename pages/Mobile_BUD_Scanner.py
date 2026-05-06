@@ -2,9 +2,11 @@ import hashlib
 import re
 from datetime import date
 from io import BytesIO
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from sqlalchemy import text
 from PIL import Image
@@ -52,6 +54,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+PHOTO_RETENTION_NOTE = (
+    "Barcode photos are decoded in memory only. RxTrack stores the decoded barcode text and med mapping, not the image."
+)
+
 def ensure_qc_actions_table():
     with engine.begin() as conn:
         conn.execute(text("""
@@ -98,6 +104,38 @@ def barcode_key(value):
     text_value = normalize_text(value)
     digit_value = normalize_digits(value)
     return text_value, digit_value.lstrip("0") or digit_value
+
+
+def ndc_variants_from_digits(digits):
+    clean = normalize_digits(digits)
+    variants = set()
+    if not clean:
+        return variants
+
+    candidates = {clean, clean.lstrip("0") or "0"}
+    if len(clean) >= 14:
+        candidates.add(clean[-14:])
+        candidates.add(clean[-14:].lstrip("0") or "0")
+    if len(clean) >= 12:
+        candidates.add(clean[-12:])
+        candidates.add(clean[-12:].lstrip("0") or "0")
+    if len(clean) >= 11:
+        candidates.add(clean[-11:])
+        candidates.add(clean[-11:].lstrip("0") or "0")
+    for candidate in candidates:
+        if len(candidate) == 11:
+            variants.add(f"{candidate[:5]}-{candidate[5:9]}-{candidate[9:]}")
+            variants.add(f"{candidate[:5]}-{candidate[5:8]}-{candidate[8:]}")
+            variants.add(f"{candidate[:4]}-{candidate[4:8]}-{candidate[8:]}")
+        elif len(candidate) == 10:
+            variants.add(f"{candidate[:5]}-{candidate[5:9]}-{candidate[9:]}")
+            variants.add(f"{candidate[:5]}-{candidate[5:8]}-{candidate[8:]}")
+            variants.add(f"{candidate[:4]}-{candidate[4:8]}-{candidate[8:]}")
+        elif len(candidate) == 12 and candidate.startswith("3"):
+            variants.update(ndc_variants_from_digits(candidate[1:]))
+        elif len(candidate) == 14:
+            variants.update(ndc_variants_from_digits(candidate[3:]))
+    return {variant for variant in variants if variant.strip("-")}
 
 
 def barcode_candidates(raw_value):
@@ -217,6 +255,45 @@ def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
             "source": source,
         })
     load_barcode_crosswalk.clear()
+
+
+@st.cache_data(ttl=86400)
+def lookup_openfda_ndc(raw_value):
+    digits = normalize_digits(raw_value)
+    variants = ndc_variants_from_digits(digits)
+    if not variants:
+        return pd.DataFrame()
+
+    rows = []
+    for ndc in sorted(variants):
+        url = f"https://api.fda.gov/drug/ndc.json?search=packaging.package_ndc:%22{quote(ndc)}%22&limit=5"
+        try:
+            response = requests.get(url, timeout=8)
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            continue
+
+        for result in payload.get("results", []):
+            packages = result.get("packaging") or []
+            package_codes = [
+                package.get("package_ndc", "")
+                for package in packages
+                if package.get("package_ndc")
+            ]
+            rows.append({
+                "query_ndc": ndc,
+                "package_ndc": ", ".join(package_codes),
+                "product_ndc": result.get("product_ndc", ""),
+                "brand_name": result.get("brand_name", ""),
+                "generic_name": result.get("generic_name", ""),
+                "dosage_form": result.get("dosage_form", ""),
+                "route": ", ".join(result.get("route") or []),
+                "labeler_name": result.get("labeler_name", ""),
+            })
+    return pd.DataFrame(rows).drop_duplicates() if rows else pd.DataFrame()
 
 
 @st.cache_data(ttl=60)
@@ -345,6 +422,7 @@ barcode_crosswalk = load_barcode_crosswalk()
 st.caption(
     "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
 )
+st.caption(PHOTO_RETENTION_NOTE)
 camera_photo = st.camera_input("iPhone camera barcode photo")
 decoded_values = decode_barcode_photo(camera_photo)
 if zxingcpp is None:
@@ -363,6 +441,7 @@ scan_value = st.text_input("Barcode or Med ID", key="mobile_barcode_input")
 
 parsed_expiration = parse_gs1_expiration(scan_value)
 matches = find_matches(catalog, barcode_crosswalk, scan_value)
+openfda_matches = lookup_openfda_ndc(scan_value) if scan_value else pd.DataFrame()
 
 if scan_value:
     st.caption(f"Scanned value: `{scan_value}`")
@@ -373,6 +452,10 @@ elif not scan_value:
     st.info("Scan a barcode or enter a Med ID.")
 elif matches.empty:
     st.warning("No matching RxTrack med found.")
+    if not openfda_matches.empty:
+        st.markdown("##### National NDC Lookup")
+        st.dataframe(openfda_matches, width="stretch", hide_index=True)
+        st.caption("Use this as a hint, then link the barcode to the matching RxTrack med below.")
     search_value = st.text_input("Search RxTrack med to link this barcode", key="barcode_med_search")
     if search_value:
         search_mask = (
