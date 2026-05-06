@@ -44,6 +44,25 @@ st.markdown("""
     div[data-testid="stDownloadButton"] button p {
         color: #ffffff !important;
     }
+    div[data-testid="stSegmentedControl"] button {
+        background: #ffffff !important;
+        color: #111827 !important;
+        border-color: #9ca3af !important;
+        font-weight: 700 !important;
+    }
+    div[data-testid="stSegmentedControl"] button p,
+    div[data-testid="stSegmentedControl"] button span {
+        color: #111827 !important;
+    }
+    div[data-testid="stSegmentedControl"] button[aria-pressed="true"] {
+        background: #0f766e !important;
+        color: #ffffff !important;
+        border-color: #0f766e !important;
+    }
+    div[data-testid="stSegmentedControl"] button[aria-pressed="true"] p,
+    div[data-testid="stSegmentedControl"] button[aria-pressed="true"] span {
+        color: #ffffff !important;
+    }
     </style>
 """, unsafe_allow_html=True)
 
