@@ -1,0 +1,171 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <script src="https://unpkg.com/@zxing/browser@0.1.5"></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f8fafc;
+      color: #111827;
+    }
+    .scanner {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+    }
+    video {
+      width: 100%;
+      min-height: 280px;
+      max-height: 52vh;
+      object-fit: cover;
+      background: #111827;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    button {
+      min-height: 48px;
+      border-radius: 8px;
+      border: 1px solid #0f766e;
+      background: #0f766e;
+      color: #ffffff;
+      font-weight: 800;
+      font-size: 16px;
+    }
+    button.secondary {
+      background: #ffffff;
+      color: #111827;
+      border-color: #9ca3af;
+    }
+    .status {
+      min-height: 22px;
+      font-size: 14px;
+      color: #374151;
+    }
+    .code {
+      overflow-wrap: anywhere;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      color: #0f766e;
+      background: #ecfdf5;
+      border: 1px solid #99f6e4;
+      border-radius: 6px;
+      padding: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="scanner">
+    <video id="preview" muted playsinline></video>
+    <div class="actions">
+      <button id="start">Start scan</button>
+      <button id="stop" class="secondary">Stop</button>
+    </div>
+    <div id="status" class="status">Ready</div>
+    <div id="code" class="code"></div>
+  </div>
+  <script>
+    const Streamlit = {
+      setComponentReady() {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: "streamlit:componentReady",
+          apiVersion: 1,
+        }, "*");
+      },
+      setFrameHeight(height) {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: "streamlit:setFrameHeight",
+          height: height || document.body.scrollHeight,
+        }, "*");
+      },
+      setComponentValue(value) {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: "streamlit:setComponentValue",
+          value,
+          dataType: "json",
+        }, "*");
+      },
+    };
+    const video = document.getElementById("preview");
+    const startButton = document.getElementById("start");
+    const stopButton = document.getElementById("stop");
+    const statusEl = document.getElementById("status");
+    const codeEl = document.getElementById("code");
+    let controls = null;
+    let reader = null;
+    let lastValue = "";
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+      if (Streamlit) {
+        Streamlit.setFrameHeight(document.body.scrollHeight);
+      }
+    }
+
+    function submitCode(value, format) {
+      if (!value || value === lastValue) return;
+      lastValue = value;
+      codeEl.textContent = value;
+      setStatus(`Scanned ${format || "barcode"}`);
+      if (Streamlit) {
+        Streamlit.setComponentValue(value);
+      }
+    }
+
+    async function startScan() {
+      try {
+        if (!window.ZXingBrowser) {
+          setStatus("Scanner library did not load. Use manual entry below.");
+          return;
+        }
+        if (!reader) {
+          reader = new ZXingBrowser.BrowserMultiFormatReader();
+        }
+        if (controls) {
+          controls.stop();
+          controls = null;
+        }
+        setStatus("Starting camera...");
+        controls = await reader.decodeFromVideoDevice(undefined, video, (result, error) => {
+          if (result) {
+            submitCode(result.getText(), result.getBarcodeFormat?.());
+          }
+        });
+        setStatus("Scanning");
+      } catch (err) {
+        setStatus(`Camera unavailable: ${err?.message || err}`);
+      }
+    }
+
+    function stopScan() {
+      if (controls) {
+        controls.stop();
+        controls = null;
+      }
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach((track) => track.stop());
+        video.srcObject = null;
+      }
+      setStatus("Stopped");
+    }
+
+    startButton.addEventListener("click", startScan);
+    stopButton.addEventListener("click", stopScan);
+
+    if (Streamlit) {
+      Streamlit.setComponentReady();
+      Streamlit.setFrameHeight(document.body.scrollHeight);
+    }
+  </script>
+</body>
+</html>

@@ -686,7 +686,8 @@ def build_manual_bud_summary(qc_actions):
         return pd.DataFrame(columns=columns)
 
     actions = qc_actions[
-        qc_actions["action_status"].isin(["Manual BUD record created", "Old product removed - BUD updated"])
+        qc_actions["action_type"].eq("active_bud")
+        | qc_actions["action_status"].isin(["Manual BUD record created", "Old product removed - BUD updated"])
     ].copy()
     if actions.empty:
         return pd.DataFrame(columns=columns)
