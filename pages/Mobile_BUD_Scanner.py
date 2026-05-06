@@ -86,18 +86,24 @@ def ensure_qc_actions_table():
                 isa_name TEXT,
                 location TEXT,
                 source TEXT,
-                verification_status TEXT DEFAULT 'Pending pharmacist check',
+                verification_status TEXT DEFAULT 'Needs automated verification',
                 verified_by TEXT,
                 verified_dt TIMESTAMP,
                 verification_note TEXT,
                 last_seen_dt TIMESTAMP DEFAULT NOW()
             )
         """))
-        conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verification_status TEXT DEFAULT 'Pending pharmacist check'"))
+        conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verification_status TEXT DEFAULT 'Needs automated verification'"))
         conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verified_by TEXT"))
         conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verified_dt TIMESTAMP"))
         conn.execute(text("ALTER TABLE barcode_med_map ADD COLUMN IF NOT EXISTS verification_note TEXT"))
-        conn.execute(text("UPDATE barcode_med_map SET verification_status = 'Pending pharmacist check' WHERE verification_status IS NULL OR TRIM(verification_status) = ''"))
+        conn.execute(text("""
+            UPDATE barcode_med_map
+            SET verification_status = 'Needs automated verification'
+            WHERE verification_status IS NULL
+               OR TRIM(verification_status) = ''
+               OR verification_status = 'Pending pharmacist check'
+        """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_barcode_med_map_digits ON barcode_med_map (barcode_digits)"))
 
 
@@ -145,6 +151,21 @@ def ndc_variants_from_digits(digits):
         elif len(candidate) == 14:
             variants.update(ndc_variants_from_digits(candidate[3:]))
     return {variant for variant in variants if variant.strip("-")}
+
+
+def compact_ndc_set(value):
+    ndcs = set()
+    raw_values = re.split(r"[,;\s]+", str(value or ""))
+    for raw in raw_values:
+        digits = normalize_digits(raw)
+        if digits:
+            ndcs.add(digits)
+            ndcs.add(digits.lstrip("0") or "0")
+            for variant in ndc_variants_from_digits(digits):
+                variant_digits = normalize_digits(variant)
+                ndcs.add(variant_digits)
+                ndcs.add(variant_digits.lstrip("0") or "0")
+    return {item for item in ndcs if item}
 
 
 def barcode_candidates(raw_value):
@@ -232,19 +253,73 @@ def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value):
         })
 
 
-def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
+def automated_verification(row, barcode_value, openfda_matches):
+    barcode_ndcs = set()
+    _, digit_value = barcode_key(barcode_value)
+    if digit_value:
+        barcode_ndcs.add(digit_value)
+        barcode_ndcs.update(compact_ndc_set(digit_value))
+
+    row_ndcs = compact_ndc_set(row.get("ndc_values", ""))
+    if row_ndcs and barcode_ndcs.intersection(row_ndcs):
+        return (
+            "Auto verified",
+            "RxTrack NDC cross-check",
+            "Scanned barcode NDC matches an NDC already loaded for this RxTrack med.",
+        )
+
+    if str(row.get("match_type", "")) == "NDC":
+        return (
+            "Auto verified",
+            "RxTrack NDC match",
+            "RxTrack matched this barcode from the packaging-report NDC for the selected med.",
+        )
+
+    if not openfda_matches.empty and row_ndcs:
+        fda_ndcs = set()
+        for col in ["query_ndc", "package_ndc", "product_ndc"]:
+            if col in openfda_matches.columns:
+                for value in openfda_matches[col].dropna():
+                    fda_ndcs.update(compact_ndc_set(value))
+        if fda_ndcs.intersection(row_ndcs):
+            return (
+                "Auto verified",
+                "FDA NDC cross-check",
+                "FDA/openFDA package NDC agrees with an NDC already loaded for this RxTrack med.",
+            )
+
+    if not openfda_matches.empty:
+        return (
+            "Needs review",
+            "FDA NDC lookup available",
+            "FDA identified the package, but RxTrack does not have a matching local NDC for this med yet.",
+        )
+
+    return (
+        "Needs review",
+        "No external NDC confirmation",
+        "No FDA/openFDA or RxTrack NDC cross-check confirmed this barcode-to-med link.",
+    )
+
+
+def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan", openfda_matches=None):
     barcode_text, barcode_digits = barcode_key(barcode_value)
     if not barcode_text:
         return
+    if openfda_matches is None:
+        openfda_matches = pd.DataFrame()
+    verification_status, verified_by, verification_note = automated_verification(row, barcode_value, openfda_matches)
 
     sql = text("""
         INSERT INTO barcode_med_map (
             barcode_text, barcode_digits, med_id, med_desc, isa_name, location,
-            source, verification_status, last_seen_dt
+            source, verification_status, verified_by, verified_dt, verification_note, last_seen_dt
         )
         VALUES (
             :barcode_text, :barcode_digits, :med_id, :med_desc, :isa_name, :location,
-            :source, 'Pending pharmacist check', NOW()
+            :source, :verification_status, :verified_by,
+            CASE WHEN :verification_status = 'Auto verified' THEN NOW() ELSE NULL END,
+            :verification_note, NOW()
         )
         ON CONFLICT (barcode_text) DO UPDATE SET
             barcode_digits = EXCLUDED.barcode_digits,
@@ -253,38 +328,10 @@ def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
             isa_name = EXCLUDED.isa_name,
             location = EXCLUDED.location,
             source = EXCLUDED.source,
-            verification_status = CASE
-                WHEN barcode_med_map.med_id = EXCLUDED.med_id
-                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
-                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
-                 AND barcode_med_map.verification_status = 'Verified'
-                THEN barcode_med_map.verification_status
-                ELSE 'Pending pharmacist check'
-            END,
-            verified_by = CASE
-                WHEN barcode_med_map.med_id = EXCLUDED.med_id
-                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
-                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
-                 AND barcode_med_map.verification_status = 'Verified'
-                THEN barcode_med_map.verified_by
-                ELSE NULL
-            END,
-            verified_dt = CASE
-                WHEN barcode_med_map.med_id = EXCLUDED.med_id
-                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
-                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
-                 AND barcode_med_map.verification_status = 'Verified'
-                THEN barcode_med_map.verified_dt
-                ELSE NULL
-            END,
-            verification_note = CASE
-                WHEN barcode_med_map.med_id = EXCLUDED.med_id
-                 AND COALESCE(barcode_med_map.isa_name, '') = COALESCE(EXCLUDED.isa_name, '')
-                 AND COALESCE(barcode_med_map.location, '') = COALESCE(EXCLUDED.location, '')
-                 AND barcode_med_map.verification_status = 'Verified'
-                THEN barcode_med_map.verification_note
-                ELSE NULL
-            END,
+            verification_status = EXCLUDED.verification_status,
+            verified_by = EXCLUDED.verified_by,
+            verified_dt = EXCLUDED.verified_dt,
+            verification_note = EXCLUDED.verification_note,
             last_seen_dt = NOW()
     """)
     with engine.begin() as conn:
@@ -296,28 +343,9 @@ def save_barcode_mapping(row, barcode_value, source="Confirmed mobile scan"):
             "isa_name": str(row.get("isa_name") or ""),
             "location": str(row.get("location") or ""),
             "source": source,
-        })
-    load_barcode_crosswalk.clear()
-
-
-def verify_barcode_mapping(barcode_value, verified_by, note):
-    barcode_text, _ = barcode_key(barcode_value)
-    if not barcode_text:
-        return
-
-    sql = text("""
-        UPDATE barcode_med_map
-        SET verification_status = 'Verified',
-            verified_by = :verified_by,
-            verified_dt = NOW(),
-            verification_note = :verification_note
-        WHERE barcode_text = :barcode_text
-    """)
-    with engine.begin() as conn:
-        conn.execute(sql, {
-            "barcode_text": barcode_text,
-            "verified_by": verified_by or "",
-            "verification_note": note or "",
+            "verification_status": verification_status,
+            "verified_by": verified_by,
+            "verification_note": verification_note,
         })
     load_barcode_crosswalk.clear()
 
@@ -549,8 +577,8 @@ elif matches.empty:
             selected_map_label = st.selectbox("Link barcode to", map_labels)
             selected_map = search_results.iloc[map_labels.index(selected_map_label)]
             if st.button("Save Barcode Match"):
-                save_barcode_mapping(selected_map, scan_value, source="Manual barcode link")
-                st.success("Saved barcode match. Future scans of this barcode will match automatically.")
+                save_barcode_mapping(selected_map, scan_value, source="Manual barcode link", openfda_matches=openfda_matches)
+                st.success("Saved barcode match. RxTrack applied automated NDC verification when possible.")
                 st.rerun()
 else:
     st.subheader("Matched Med")
@@ -568,12 +596,10 @@ else:
     c3.metric("Location", selected["location"])
     verification_status = str(selected.get("verification_status", "") or "").strip()
     if selected.get("match_type") == "Saved barcode map":
-        if verification_status == "Verified":
-            st.success(
-                f"Barcode link verified by {selected.get('verified_by', '') or 'pharmacist'}."
-            )
+        if verification_status == "Auto verified":
+            st.success(f"Barcode link auto-verified by {selected.get('verified_by', '') or 'RxTrack'}.")
         else:
-            st.warning("Barcode link is pending pharmacist verification.")
+            st.warning("Barcode link needs review because RxTrack could not confirm it by NDC.")
 
     detail_cols = [
         "med_id", "med_desc", "isa_name", "location", "latest_packaged_bud",
@@ -593,15 +619,13 @@ else:
         },
     )
 
-    with st.expander("Pharmacist barcode-link verification"):
-        st.caption("Use this after a pharmacist confirms this barcode is linked to the correct RxTrack med/location.")
-        verify_by = st.text_input("Verified by", key="barcode_verified_by")
-        verify_note = st.text_area("Verification note", value="Confirmed barcode-to-med match.", key="barcode_verification_note")
-        if st.button("Verify Barcode Link"):
-            save_barcode_mapping(selected, scan_value)
-            verify_barcode_mapping(scan_value, verify_by, verify_note)
-            st.success("Barcode link verified.")
-            st.rerun()
+    with st.expander("Automated barcode verification"):
+        auto_status, auto_by, auto_note = automated_verification(selected, scan_value, openfda_matches)
+        if auto_status == "Auto verified":
+            st.success(auto_note)
+        else:
+            st.warning(auto_note)
+        st.caption(f"Verification source: {auto_by}")
 
     with st.form("mobile_bud_review_form"):
         default_bud = parsed_expiration or pd.Timestamp.today().date()
@@ -610,7 +634,7 @@ else:
         note = st.text_area("Note", value="Mobile barcode BUD review.")
         submitted = st.form_submit_button("Save Active BUD Review")
         if submitted:
-            save_barcode_mapping(selected, scan_value)
+            save_barcode_mapping(selected, scan_value, openfda_matches=openfda_matches)
             save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
             load_scan_catalog.clear()
             st.session_state["mobile_bud_reset"] = True
