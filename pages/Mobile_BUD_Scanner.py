@@ -754,53 +754,44 @@ st.markdown("##### Priority Scan Queue")
 if scan_queue.empty:
     st.success("No stale ISA scan priorities are currently due.")
 else:
+    if "mobile_queue_index" not in st.session_state:
+        st.session_state["mobile_queue_index"] = 0
+    st.session_state["mobile_queue_index"] = min(
+        st.session_state["mobile_queue_index"],
+        max(len(scan_queue) - 1, 0),
+    )
     q1, q2, q3 = st.columns(3)
     q1.metric("Items To Scan", f"{len(scan_queue):,}")
     q2.metric("No Receiving Match", f"{int(scan_queue['receiving_status'].eq('No Receiving Match').sum()):,}")
     q3.metric("No Movement Trail", f"{int(scan_queue['no_recent_movement'].sum()):,}")
-    queue_cols = [
-        "priority_score",
-        "queue_reason",
-        "med_id",
-        "med_desc",
-        "location",
-        "days_since_last_received",
-        "days_since_last_cycle_count",
-        "pyxis_qty",
-    ]
-    queue_event = st.dataframe(
-        scan_queue[queue_cols].head(50),
-        width="stretch",
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config={
-            "priority_score": st.column_config.NumberColumn("Pri", format="%.0f", width="small"),
-            "queue_reason": st.column_config.TextColumn("Why", width="medium"),
-            "med_id": st.column_config.TextColumn("Med ID", width="small"),
-            "med_desc": st.column_config.TextColumn("Med", width="medium"),
-            "location": st.column_config.TextColumn("Loc", width="small"),
-            "days_since_last_received": st.column_config.NumberColumn("Recv", format="%.0f", width="small"),
-            "days_since_last_cycle_count": st.column_config.NumberColumn("Cycle", format="%.0f", width="small"),
-            "pyxis_qty": st.column_config.NumberColumn("Qty", format="%.0f", width="small"),
-        },
-    )
-    if queue_event.selection.rows:
-        selected_queue = scan_queue.head(50).reset_index(drop=True).iloc[queue_event.selection.rows[0]]
-        st.markdown("###### Selected Queue Item")
-        sq1, sq2, sq3 = st.columns(3)
-        sq1.metric("Med ID", selected_queue["med_id"])
-        sq2.metric("ISA", selected_queue["isa_name"])
-        sq3.metric("Location", selected_queue["location"])
-        st.caption(str(selected_queue["med_desc"]))
-        st.caption(
-            f"Reason: {selected_queue['queue_reason']} | "
-            f"Receiving: {selected_queue['receiving_status']} | "
-            f"Days since dispense: {'N/A' if pd.isna(selected_queue['days_since_last_deducted']) else int(selected_queue['days_since_last_deducted'])} | "
-            f"Return/restock events: {int(selected_queue['return_restock_events'])} | "
-            f"Dispense events: {int(selected_queue['deduction_events'])} | "
-            f"Pyxis: {selected_queue['pyxis_stations'] or 'N/A'}"
-        )
+    queue_rows = scan_queue.reset_index(drop=True)
+    selected_queue = queue_rows.iloc[st.session_state["mobile_queue_index"]]
+    st.caption(f"Queue item {st.session_state['mobile_queue_index'] + 1} of {len(queue_rows)}")
+    st.markdown(f"### {selected_queue['med_id']}")
+    st.markdown(f"**{selected_queue['med_desc']}**")
+    st.caption(f"{selected_queue['isa_name']} | {selected_queue['location']}")
+    st.warning(str(selected_queue["queue_reason"]))
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Recv", "N/A" if pd.isna(selected_queue["days_since_last_received"]) else f"{selected_queue['days_since_last_received']:.0f}d")
+    k2.metric("Cycle", "N/A" if pd.isna(selected_queue["days_since_last_cycle_count"]) else f"{selected_queue['days_since_last_cycle_count']:.0f}d")
+    k3.metric("Pyxis Qty", f"{selected_queue['pyxis_qty']:.0f}")
+    k4, k5, k6 = st.columns(3)
+    k4.metric("Disp", "N/A" if pd.isna(selected_queue["days_since_last_deducted"]) else f"{selected_queue['days_since_last_deducted']:.0f}d")
+    k5.metric("Returns", f"{int(selected_queue['return_restock_events'])}")
+    k6.metric("Pulls", f"{int(selected_queue['deduction_events'])}")
+    with st.expander("More queue context"):
+        st.caption(f"Receiving: {selected_queue['receiving_status']}")
+        st.caption(f"Pyxis: {selected_queue['pyxis_stations'] or 'N/A'}")
+        st.caption(f"Priority score: {selected_queue['priority_score']:.0f}")
+
+    nav_prev, nav_next = st.columns(2)
+    if nav_prev.button("Previous", disabled=st.session_state["mobile_queue_index"] == 0, width="stretch"):
+        st.session_state["mobile_queue_index"] -= 1
+        st.rerun()
+    if nav_next.button("Next", disabled=st.session_state["mobile_queue_index"] >= len(queue_rows) - 1, width="stretch"):
+        st.session_state["mobile_queue_index"] += 1
+        st.rerun()
 
 st.caption(
     "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
