@@ -255,35 +255,6 @@ def update_packaged_bud_after_removal(med_id, current_expire_date, new_bud_date)
     return result.rowcount or 0
 
 
-def create_manual_packaged_bud(med_id, med_desc, new_bud_date, reviewed_by):
-    sql = text("""
-        INSERT INTO packaged_meds (
-            pk, dispense_dt, med_id, med_desc, dose_form, qty_per_pack, qoh,
-            hospital_lot_number, bud, packaged_by, confirmer
-        )
-        VALUES (
-            md5(:pk_source), NOW(), :med_id, :med_desc, 'Manual BUD', 0, 0,
-            'MANUAL-BUD', :new_bud_date, :reviewed_by, 'RxTrack'
-        )
-        ON CONFLICT (pk) DO UPDATE SET
-            med_desc = EXCLUDED.med_desc,
-            bud = EXCLUDED.bud,
-            packaged_by = EXCLUDED.packaged_by,
-            confirmer = EXCLUDED.confirmer
-    """)
-    pk_source = f"manual-bud|{med_id}|{new_bud_date}"
-    with engine.begin() as conn:
-        conn.execute(sql, {
-            "pk_source": pk_source,
-            "med_id": med_id,
-            "med_desc": med_desc,
-            "new_bud_date": new_bud_date,
-            "reviewed_by": reviewed_by or "Manual review",
-        })
-    load_packaging_history.clear()
-    return 1
-
-
 @st.cache_data(ttl=60)
 def load_latest_isa_items():
     sql = text("""
@@ -392,6 +363,8 @@ def load_packaging_history():
             confirmer
         FROM packaged_meds
         WHERE dispense_dt IS NOT NULL
+          AND COALESCE(hospital_lot_number, '') <> 'MANUAL-BUD'
+          AND COALESCE(dose_form, '') <> 'Manual BUD'
         ORDER BY dispense_dt DESC
     """)
     with engine.connect() as conn:
@@ -688,7 +661,30 @@ def build_pyxis_exposure_summary(pyxis_inventory):
     return summary[columns]
 
 
-def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary, deduction_summary):
+def build_manual_bud_summary(qc_actions):
+    columns = ["med_id", "manual_bud_date", "manual_bud_by", "manual_bud_note"]
+    if qc_actions.empty:
+        return pd.DataFrame(columns=columns)
+
+    actions = qc_actions[
+        qc_actions["action_status"].isin(["Manual BUD record created", "Old product removed - BUD updated"])
+    ].copy()
+    if actions.empty:
+        return pd.DataFrame(columns=columns)
+
+    actions["replacement_expire_date"] = pd.to_datetime(actions["replacement_expire_date"], errors="coerce")
+    actions["action_dt"] = pd.to_datetime(actions["action_dt"], errors="coerce")
+    actions["med_id"] = actions["med_id"].fillna("").astype(str).str.strip().str.upper()
+    actions = actions.dropna(subset=["replacement_expire_date"]).sort_values("action_dt")
+    latest = actions.groupby("med_id", dropna=False).tail(1).rename(columns={
+        "replacement_expire_date": "manual_bud_date",
+        "action_by": "manual_bud_by",
+        "note": "manual_bud_note",
+    })
+    return latest[columns]
+
+
+def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packaging_summary, stock_add_summary, deduction_summary, manual_bud_summary):
     if isa_items.empty:
         return pd.DataFrame()
 
@@ -699,6 +695,8 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
         base = base.merge(deduction_summary, on="med_id", how="left")
     if not packaging_summary.empty:
         base = base.merge(packaging_summary, on="med_id", how="left")
+    if not manual_bud_summary.empty:
+        base = base.merge(manual_bud_summary, on="med_id", how="left")
     if not inventory_counts.empty:
         inv = inventory_counts.copy()
         inv["isa_name"] = inv["isa_name"].fillna("").astype(str).str.strip()
@@ -731,6 +729,13 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
         base["latest_packaged_expire_date"] = pd.NaT
     base["last_packaged"] = pd.to_datetime(base["last_packaged"], errors="coerce")
     base["latest_packaged_expire_date"] = pd.to_datetime(base["latest_packaged_expire_date"], errors="coerce")
+    if "manual_bud_date" not in base.columns:
+        base["manual_bud_date"] = pd.NaT
+    base["manual_bud_date"] = pd.to_datetime(base["manual_bud_date"], errors="coerce")
+    for col in ["manual_bud_by", "manual_bud_note"]:
+        if col not in base.columns:
+            base[col] = ""
+        base[col] = base[col].fillna("").astype(str)
     base["days_since_last_packaged"] = (today - base["last_packaged"]).dt.days
     base["days_until_packaged_expire"] = (base["latest_packaged_expire_date"] - today).dt.days
     base["receiving_events"] = pd.to_numeric(base["receiving_events"], errors="coerce").fillna(0).astype(int)
@@ -741,6 +746,10 @@ def build_isa_lifecycle(isa_items, receiving_summary, inventory_counts, packagin
         if col not in base.columns:
             base[col] = ""
     base["packaging_events"] = pd.to_numeric(base["packaging_events"], errors="coerce").fillna(0).astype(int)
+    base["active_bud_date"] = base["latest_packaged_expire_date"].fillna(base["manual_bud_date"])
+    base["active_bud_source"] = "None"
+    base.loc[base["latest_packaged_expire_date"].notna(), "active_bud_source"] = "Packaging report"
+    base.loc[base["latest_packaged_expire_date"].isna() & base["manual_bud_date"].notna(), "active_bud_source"] = "Manual BUD update"
     if "current_count" not in base.columns:
         base["current_count"] = 0
     if "pocket_count" not in base.columns:
@@ -809,6 +818,7 @@ stock_add_summary = build_stock_add_summary(stock_add_history)
 deduction_summary = build_deduction_summary(deduction_history)
 pyxis_exposure_summary = build_pyxis_exposure_summary(pyxis_inventory)
 packaging_summary = build_packaging_summary(packaging)
+manual_bud_summary = build_manual_bud_summary(qc_actions)
 isa_lifecycle = build_isa_lifecycle(
     isa_items,
     receiving_summary,
@@ -816,6 +826,7 @@ isa_lifecycle = build_isa_lifecycle(
     packaging_summary,
     stock_add_summary,
     deduction_summary,
+    manual_bud_summary,
 )
 
 tab_lifecycle, tab_unload = st.tabs(["ISA Receiving Lifecycle", "Pyxis 28-Day Unload"])
@@ -1098,6 +1109,9 @@ with tab_lifecycle:
             "days_since_last_packaged",
             "latest_packaged_expire_date",
             "days_until_packaged_expire",
+            "manual_bud_date",
+            "active_bud_date",
+            "active_bud_source",
             "packaging_events",
             "last_packaged_by",
             "latest_hospital_lot_number",
@@ -1116,6 +1130,8 @@ with tab_lifecycle:
                 "last_stock_add": st.column_config.DatetimeColumn("Last Stock Add", format="MM/DD/YYYY HH:mm"),
                 "last_packaged": st.column_config.DatetimeColumn("Last Packaged", format="MM/DD/YYYY HH:mm"),
                 "latest_packaged_expire_date": st.column_config.DatetimeColumn("Packaged Expire", format="MM/DD/YYYY"),
+                "manual_bud_date": st.column_config.DatetimeColumn("Manual BUD", format="MM/DD/YYYY"),
+                "active_bud_date": st.column_config.DatetimeColumn("Active BUD", format="MM/DD/YYYY"),
                 "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
                 "pocket_count": st.column_config.NumberColumn("Carousel Pockets", format="%d"),
                 "days_since_last_cycle_count": st.column_config.NumberColumn("Days Since Cycle Count", format="%.0f"),
@@ -1157,9 +1173,14 @@ with tab_lifecycle:
                 selected_row.get("latest_packaged_expire_date"),
                 errors="coerce",
             )
-            st.markdown("##### Update Packaged BUD After Removal")
-            if pd.isna(current_packaged_expire):
-                st.info("This selected row does not have a packaged BUD/expiration from the packaging report. Create one here after you confirm the active product date.")
+            current_manual_bud = pd.to_datetime(
+                selected_row.get("manual_bud_date"),
+                errors="coerce",
+            )
+            current_active_bud = current_packaged_expire if pd.notna(current_packaged_expire) else current_manual_bud
+            st.markdown("##### Update Active BUD After Removal")
+            if pd.isna(current_active_bud):
+                st.info("This selected row does not have an active BUD yet. Add the current expiration here after you confirm the product date.")
                 with st.form(f"selected_med_bud_create_{selected_med_id}"):
                     created_bud_date = st.date_input(
                         "Active BUD",
@@ -1173,19 +1194,13 @@ with tab_lifecycle:
                     )
                     create_bud = st.form_submit_button("Create active BUD record")
                     if create_bud:
-                        create_manual_packaged_bud(
-                            selected_med_id,
-                            selected_med_desc,
-                            created_bud_date,
-                            created_by,
-                        )
                         action_key = (
                             f"selected-row-bud-create|{selected_row.get('isa_name', '')}|"
                             f"{selected_row.get('location', '')}|{selected_med_id}|{created_bud_date}"
                         )
                         save_inventory_qc_action({
                             "action_key": action_key,
-                            "action_type": "packaged_expiration",
+                            "action_type": "active_bud",
                             "med_id": selected_med_id,
                             "med_desc": selected_med_desc,
                             "isa_name": selected_row.get("isa_name", ""),
@@ -1195,20 +1210,20 @@ with tab_lifecycle:
                             "note": created_note,
                             "replacement_expire_date": created_bud_date,
                         })
-                        st.success("Created active BUD record.")
+                        st.success("Saved active BUD record.")
                         st.rerun()
             else:
-                st.caption("Use this after the old product has been removed and the next remaining package date should become the active BUD.")
+                st.caption("Use this after the old product has been removed and the next remaining date should become the active BUD.")
                 with st.form(f"selected_med_bud_update_{selected_med_id}"):
                     b1, b2 = st.columns(2)
                     b1.date_input(
                         "Current active BUD",
-                        value=current_packaged_expire.date(),
+                        value=current_active_bud.date(),
                         disabled=True,
                     )
                     new_bud_date = b2.date_input(
                         "New active BUD",
-                        value=current_packaged_expire.date(),
+                        value=current_active_bud.date(),
                         min_value=pd.Timestamp.today().date(),
                     )
                     reviewed_by = st.text_input("Reviewed by", value="")
@@ -1218,19 +1233,21 @@ with tab_lifecycle:
                     )
                     update_bud = st.form_submit_button("Save BUD update")
                     if update_bud:
-                        updated_rows = update_packaged_bud_after_removal(
-                            selected_med_id,
-                            current_packaged_expire.date(),
-                            new_bud_date,
-                        )
+                        updated_rows = 0
+                        if pd.notna(current_packaged_expire):
+                            updated_rows = update_packaged_bud_after_removal(
+                                selected_med_id,
+                                current_packaged_expire.date(),
+                                new_bud_date,
+                            )
                         action_key = (
                             f"selected-row-bud|{selected_row.get('isa_name', '')}|"
                             f"{selected_row.get('location', '')}|{selected_med_id}|"
-                            f"{current_packaged_expire.date()}"
+                            f"{current_active_bud.date()}"
                         )
                         save_inventory_qc_action({
                             "action_key": action_key,
-                            "action_type": "packaged_expiration",
+                            "action_type": "active_bud",
                             "med_id": selected_med_id,
                             "med_desc": selected_med_desc,
                             "isa_name": selected_row.get("isa_name", ""),
@@ -1240,7 +1257,9 @@ with tab_lifecycle:
                             "note": bud_note,
                             "replacement_expire_date": new_bud_date,
                         })
-                        if updated_rows:
+                        if pd.isna(current_packaged_expire):
+                            st.success("Updated manual active BUD record.")
+                        elif updated_rows:
                             st.success(f"Updated BUD on {updated_rows} packaged row(s).")
                         else:
                             st.warning("Saved the review, but no packaged rows matched that med/current BUD.")
