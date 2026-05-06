@@ -215,7 +215,7 @@ def decode_barcode_photo(uploaded_image):
     return decoded
 
 
-def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value):
+def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value, action_status="Mobile BUD reviewed"):
     sql = text("""
         INSERT INTO inventory_qc_actions (
             action_key, action_type, med_id, med_desc, isa_name, location,
@@ -223,7 +223,7 @@ def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value):
         )
         VALUES (
             :action_key, 'active_bud', :med_id, :med_desc, :isa_name, :location,
-            'Mobile BUD reviewed', :action_by, :note, :replacement_expire_date
+            :action_status, :action_by, :note, :replacement_expire_date
         )
         ON CONFLICT (action_key) DO UPDATE SET
             action_status = EXCLUDED.action_status,
@@ -247,6 +247,7 @@ def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value):
             "med_desc": str(row.get("med_desc") or ""),
             "isa_name": str(row.get("isa_name") or ""),
             "location": str(row.get("location") or ""),
+            "action_status": action_status,
             "action_by": reviewed_by or "",
             "note": full_note,
             "replacement_expire_date": bud_date,
@@ -463,7 +464,10 @@ def load_mobile_scan_queue():
                 replacement_expire_date
             FROM inventory_qc_actions
             WHERE action_type = 'active_bud'
-              AND replacement_expire_date IS NOT NULL
+              AND (
+                    replacement_expire_date IS NOT NULL
+                 OR action_status = 'Expired product removed - none remaining'
+              )
             ORDER BY UPPER(TRIM(med_id)), COALESCE(isa_name, ''), COALESCE(location, ''), action_dt DESC
         ),
         receiving AS (
@@ -622,7 +626,8 @@ def load_mobile_scan_queue():
     queue.loc[queue["no_recent_movement"], "priority_score"] += 45
     queue.loc[queue["last_deducted"].notna() & queue["days_since_last_deducted"].ge(180), "priority_score"] += 20
     queue.loc[queue["last_stock_add"].notna() & queue["days_since_last_stock_add"].ge(180), "priority_score"] += 20
-    queue.loc[queue["active_bud_date"].isna(), "priority_score"] += 15
+    removed_none_remaining = queue["action_status"].eq("Expired product removed - none remaining")
+    queue.loc[queue["active_bud_date"].isna() & ~removed_none_remaining, "priority_score"] += 15
 
     reasons = []
     for row in queue.itertuples(index=False):
@@ -641,7 +646,9 @@ def load_mobile_scan_queue():
             row_reasons.append("No return/dispense trail")
         elif pd.notna(row.days_since_last_deducted) and row.days_since_last_deducted >= 180:
             row_reasons.append("No recent dispense")
-        if pd.isna(row.active_bud_date):
+        if row.action_status == "Expired product removed - none remaining":
+            row_reasons.append("Expired product removed")
+        elif pd.isna(row.active_bud_date):
             row_reasons.append("No active BUD review")
         reasons.append("; ".join(row_reasons) if row_reasons else "Lower priority")
     queue["queue_reason"] = reasons
@@ -888,14 +895,37 @@ else:
         st.caption(f"Verification source: {auto_by}")
 
     with st.form("mobile_bud_review_form"):
+        review_outcome = st.radio(
+            "Review outcome",
+            ["Remaining product has active BUD", "Expired product removed - none remaining"],
+        )
         default_bud = parsed_expiration or pd.Timestamp.today().date()
-        bud_date = st.date_input("Active BUD", value=default_bud)
+        bud_date = st.date_input(
+            "Active BUD",
+            value=default_bud,
+            disabled=review_outcome == "Expired product removed - none remaining",
+        )
         reviewed_by = st.text_input("Reviewed by", value="")
-        note = st.text_area("Note", value="Mobile barcode BUD review.")
+        default_note = (
+            "Mobile barcode BUD review."
+            if review_outcome == "Remaining product has active BUD"
+            else "Expired product removed; no remaining product available to assign an active BUD."
+        )
+        note = st.text_area("Note", value=default_note)
         submitted = st.form_submit_button("Save Active BUD Review")
         if submitted:
             save_barcode_mapping(selected, scan_value, openfda_matches=openfda_matches)
-            save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
+            if review_outcome == "Expired product removed - none remaining":
+                save_active_bud_review(
+                    selected,
+                    None,
+                    reviewed_by,
+                    note,
+                    scan_value,
+                    action_status="Expired product removed - none remaining",
+                )
+            else:
+                save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
             load_scan_catalog.clear()
             load_mobile_scan_queue.clear()
             st.session_state["mobile_bud_reset"] = True

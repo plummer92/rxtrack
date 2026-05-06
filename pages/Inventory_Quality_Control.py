@@ -687,7 +687,11 @@ def build_manual_bud_summary(qc_actions):
 
     actions = qc_actions[
         qc_actions["action_type"].eq("active_bud")
-        | qc_actions["action_status"].isin(["Manual BUD record created", "Old product removed - BUD updated"])
+        | qc_actions["action_status"].isin([
+            "Manual BUD record created",
+            "Old product removed - BUD updated",
+            "Expired product removed - none remaining",
+        ])
     ].copy()
     if actions.empty:
         return pd.DataFrame(columns=columns)
@@ -695,7 +699,7 @@ def build_manual_bud_summary(qc_actions):
     actions["replacement_expire_date"] = pd.to_datetime(actions["replacement_expire_date"], errors="coerce")
     actions["action_dt"] = pd.to_datetime(actions["action_dt"], errors="coerce")
     actions["med_id"] = actions["med_id"].fillna("").astype(str).str.strip().str.upper()
-    actions = actions.dropna(subset=["replacement_expire_date"]).sort_values("action_dt")
+    actions = actions[actions["replacement_expire_date"].notna()].sort_values("action_dt")
     latest = actions.groupby("med_id", dropna=False).tail(1).rename(columns={
         "replacement_expire_date": "manual_bud_date",
         "action_by": "manual_bud_by",
@@ -720,7 +724,11 @@ def build_active_bud_review_summary(qc_actions):
 
     actions = qc_actions[
         qc_actions["action_type"].eq("active_bud")
-        | qc_actions["action_status"].isin(["Manual BUD record created", "Old product removed - BUD updated"])
+        | qc_actions["action_status"].isin([
+            "Manual BUD record created",
+            "Old product removed - BUD updated",
+            "Expired product removed - none remaining",
+        ])
     ].copy()
     if actions.empty:
         return pd.DataFrame(columns=columns)
