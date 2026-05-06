@@ -757,18 +757,10 @@ else:
         "queue_reason",
         "med_id",
         "med_desc",
-        "isa_name",
         "location",
-        "receiving_status",
         "days_since_last_received",
         "days_since_last_cycle_count",
-        "days_since_last_deducted",
-        "return_restock_events",
-        "deduction_events",
         "pyxis_qty",
-        "pyxis_pockets",
-        "pyxis_stations",
-        "active_bud_date",
     ]
     queue_event = st.dataframe(
         scan_queue[queue_cols].head(50),
@@ -777,22 +769,31 @@ else:
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "priority_score": st.column_config.NumberColumn("Priority", format="%.0f"),
-            "active_bud_date": st.column_config.DatetimeColumn("Active BUD", format="MM/DD/YYYY"),
-            "days_since_last_received": st.column_config.NumberColumn("Days Since Received", format="%.0f"),
-            "days_since_last_cycle_count": st.column_config.NumberColumn("Days Since Cycle Count", format="%.0f"),
-            "days_since_last_deducted": st.column_config.NumberColumn("Days Since Dispense", format="%.0f"),
-            "return_restock_events": st.column_config.NumberColumn("Return/Restock Events", format="%d"),
-            "deduction_events": st.column_config.NumberColumn("Dispense Events", format="%d"),
-            "pyxis_qty": st.column_config.NumberColumn("Pyxis Qty", format="%.0f"),
-            "pyxis_pockets": st.column_config.NumberColumn("Pyxis Pockets", format="%d"),
+            "priority_score": st.column_config.NumberColumn("Pri", format="%.0f", width="small"),
+            "queue_reason": st.column_config.TextColumn("Why", width="medium"),
+            "med_id": st.column_config.TextColumn("Med ID", width="small"),
+            "med_desc": st.column_config.TextColumn("Med", width="medium"),
+            "location": st.column_config.TextColumn("Loc", width="small"),
+            "days_since_last_received": st.column_config.NumberColumn("Recv", format="%.0f", width="small"),
+            "days_since_last_cycle_count": st.column_config.NumberColumn("Cycle", format="%.0f", width="small"),
+            "pyxis_qty": st.column_config.NumberColumn("Qty", format="%.0f", width="small"),
         },
     )
     if queue_event.selection.rows:
         selected_queue = scan_queue.head(50).reset_index(drop=True).iloc[queue_event.selection.rows[0]]
+        st.markdown("###### Selected Queue Item")
+        sq1, sq2, sq3 = st.columns(3)
+        sq1.metric("Med ID", selected_queue["med_id"])
+        sq2.metric("ISA", selected_queue["isa_name"])
+        sq3.metric("Location", selected_queue["location"])
+        st.caption(str(selected_queue["med_desc"]))
         st.caption(
-            f"Selected queue item: {selected_queue['med_id']} | {selected_queue['med_desc']} | "
-            f"{selected_queue['isa_name']} {selected_queue['location']}"
+            f"Reason: {selected_queue['queue_reason']} | "
+            f"Receiving: {selected_queue['receiving_status']} | "
+            f"Days since dispense: {'N/A' if pd.isna(selected_queue['days_since_last_deducted']) else int(selected_queue['days_since_last_deducted'])} | "
+            f"Return/restock events: {int(selected_queue['return_restock_events'])} | "
+            f"Dispense events: {int(selected_queue['deduction_events'])} | "
+            f"Pyxis: {selected_queue['pyxis_stations'] or 'N/A'}"
         )
 
 st.caption(
