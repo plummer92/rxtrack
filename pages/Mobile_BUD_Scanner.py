@@ -200,6 +200,13 @@ def parse_gs1_expiration(raw_value):
         return None
 
 
+def parse_user_date(value):
+    parsed = pd.to_datetime(str(value or "").strip(), errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
+
+
 def decode_barcode_photo(uploaded_image):
     if uploaded_image is None or zxingcpp is None:
         return []
@@ -454,10 +461,8 @@ def load_mobile_scan_queue():
             FROM cycle_count_status
         ),
         latest_action AS (
-            SELECT DISTINCT ON (UPPER(TRIM(med_id)), COALESCE(isa_name, ''), COALESCE(location, ''))
+            SELECT DISTINCT ON (UPPER(TRIM(med_id)))
                 UPPER(TRIM(med_id)) AS med_id,
-                COALESCE(isa_name, '') AS isa_name,
-                COALESCE(location, '') AS location,
                 action_status,
                 action_dt,
                 action_by,
@@ -468,7 +473,7 @@ def load_mobile_scan_queue():
                     replacement_expire_date IS NOT NULL
                  OR action_status = 'Expired product removed - none remaining'
               )
-            ORDER BY UPPER(TRIM(med_id)), COALESCE(isa_name, ''), COALESCE(location, ''), action_dt DESC
+            ORDER BY UPPER(TRIM(med_id)), action_dt DESC
         ),
         receiving AS (
             SELECT
@@ -575,8 +580,6 @@ def load_mobile_scan_queue():
         JOIN latest_snapshot s ON c.snapshot_date = s.snapshot_date
         LEFT JOIN latest_action a
           ON UPPER(TRIM(c.med_id)) = a.med_id
-         AND COALESCE(c.isa_name, '') = a.isa_name
-         AND COALESCE(c.location, '') = a.location
         LEFT JOIN receiving r ON UPPER(TRIM(c.med_id)) = r.med_id
         LEFT JOIN stock_add sa ON UPPER(TRIM(c.med_id)) = sa.med_id
         LEFT JOIN deduction d ON UPPER(TRIM(c.med_id)) = d.med_id
@@ -912,11 +915,13 @@ else:
             ["Remaining product has active BUD", "Expired product removed - none remaining"],
         )
         default_bud = parsed_expiration or pd.Timestamp.today().date()
-        bud_date = st.date_input(
+        bud_text = st.text_input(
             "Active BUD",
-            value=default_bud,
+            value=default_bud.strftime("%m/%d/%Y"),
             disabled=review_outcome == "Expired product removed - none remaining",
+            help="Type the date as MM/DD/YYYY.",
         )
+        bud_date = parse_user_date(bud_text)
         reviewed_by = st.text_input("Reviewed by", value="")
         default_note = (
             "Mobile barcode BUD review."
@@ -926,6 +931,9 @@ else:
         note = st.text_area("Note", value=default_note)
         submitted = st.form_submit_button("Save Active BUD Review")
         if submitted:
+            if review_outcome == "Remaining product has active BUD" and bud_date is None:
+                st.error("Enter the Active BUD as MM/DD/YYYY before saving.")
+                st.stop()
             save_barcode_mapping(selected, scan_value, openfda_matches=openfda_matches)
             if review_outcome == "Expired product removed - none remaining":
                 save_active_bud_review(
