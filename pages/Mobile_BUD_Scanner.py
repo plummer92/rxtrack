@@ -618,6 +618,10 @@ def load_mobile_scan_queue():
         & queue["deduction_events"].eq(0)
     )
 
+    queue = queue[queue["reviewed_dt"].isna()].copy()
+    if queue.empty:
+        return queue
+
     queue["priority_score"] = 0
     queue.loc[queue["receiving_status"].eq("No Receiving Match"), "priority_score"] += 100
     queue.loc[queue["days_since_last_received"].ge(180), "priority_score"] += 80
