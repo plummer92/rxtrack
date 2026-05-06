@@ -1099,45 +1099,23 @@ with tab_lifecycle:
 
             st.markdown(f"**{selected_med_desc}**")
 
-            if pyxis_matches.empty:
-                st.info("This selected med is not currently stocked in any non-carousel Pyxis machine in the latest detailed inventory upload.")
-            else:
-                p1, p2, p3 = st.columns(3)
-                p1.metric("Total Pyxis Count", f"{pyxis_matches['current_count'].sum():,.0f}")
-                p2.metric("Pyxis Pockets", f"{len(pyxis_matches):,}")
-                p3.metric("Estimated Value", f"${pyxis_matches['inventory_value'].sum():,.2f}")
-
-                pyxis_cols = [
-                    "station",
-                    "pocket_location",
-                    "med_id",
-                    "med_desc",
-                    "current_count",
-                    "unit_cost",
-                    "inventory_value",
-                ]
-                st.dataframe(
-                    pyxis_matches[pyxis_cols],
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "station": "Pyxis Machine",
-                        "pocket_location": "Pocket",
-                        "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
-                        "unit_cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
-                        "inventory_value": st.column_config.NumberColumn("Value", format="$%.2f"),
-                    },
-                )
-
             current_packaged_expire = pd.to_datetime(
                 selected_row.get("latest_packaged_expire_date"),
                 errors="coerce",
             )
-            if pd.notna(current_packaged_expire):
-                st.markdown("##### Update Packaged BUD After Removal")
+            st.markdown("##### Update Packaged BUD After Removal")
+            if pd.isna(current_packaged_expire):
+                st.info("This selected row does not have a packaged BUD/expiration from the packaging report, so there is no packaged BUD record to update.")
+            else:
                 st.caption("Use this after the old product has been removed and the next remaining package date should become the active BUD.")
                 with st.form(f"selected_med_bud_update_{selected_med_id}"):
-                    new_bud_date = st.date_input(
+                    b1, b2 = st.columns(2)
+                    b1.date_input(
+                        "Current active BUD",
+                        value=current_packaged_expire.date(),
+                        disabled=True,
+                    )
+                    new_bud_date = b2.date_input(
                         "New active BUD",
                         value=current_packaged_expire.date(),
                         min_value=pd.Timestamp.today().date(),
@@ -1176,6 +1154,36 @@ with tab_lifecycle:
                         else:
                             st.warning("Saved the review, but no packaged rows matched that med/current BUD.")
                         st.rerun()
+
+            if pyxis_matches.empty:
+                st.info("This selected med is not currently stocked in any non-carousel Pyxis machine in the latest detailed inventory upload.")
+            else:
+                p1, p2, p3 = st.columns(3)
+                p1.metric("Total Pyxis Count", f"{pyxis_matches['current_count'].sum():,.0f}")
+                p2.metric("Pyxis Pockets", f"{len(pyxis_matches):,}")
+                p3.metric("Estimated Value", f"${pyxis_matches['inventory_value'].sum():,.2f}")
+
+                pyxis_cols = [
+                    "station",
+                    "pocket_location",
+                    "med_id",
+                    "med_desc",
+                    "current_count",
+                    "unit_cost",
+                    "inventory_value",
+                ]
+                st.dataframe(
+                    pyxis_matches[pyxis_cols],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "station": "Pyxis Machine",
+                        "pocket_location": "Pocket",
+                        "current_count": st.column_config.NumberColumn("Current Count", format="%.0f"),
+                        "unit_cost": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                        "inventory_value": st.column_config.NumberColumn("Value", format="$%.2f"),
+                    },
+                )
 
         st.download_button(
             "Download ISA receiving lifecycle CSV",
