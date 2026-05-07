@@ -269,13 +269,36 @@ if combined.empty:
 combined['dt'] = pd.to_datetime(combined['dt'])
 combined.sort_values(['user_name', 'dt'], inplace=True)
 
+def pharmacy_work_label(event_values, start_dt):
+    values = [str(value or "").strip() for value in event_values if str(value or "").strip()]
+    joined = " ".join(values).lower()
+    if "pyxis" in joined and "pull" in joined:
+        if pd.notna(start_dt) and int(start_dt.hour) < 7:
+            return "0400 Pyxis Pull"
+        return "Pyxis Pull"
+    if values:
+        return pd.Series(values).mode().iloc[0]
+    return "Pharmacy Work"
+
+
+def destination_group_label(destinations):
+    unique_destinations = sorted({str(value or "").strip() for value in destinations if str(value or "").strip()})
+    if not unique_destinations:
+        return "Unknown destination"
+    if len(unique_destinations) == 1:
+        return unique_destinations[0]
+    preview = ", ".join(unique_destinations[:3])
+    if len(unique_destinations) > 3:
+        return f"{preview} + {len(unique_destinations) - 3} more"
+    return preview
+
 # ----------------------------
 # Session Logic
 # ----------------------------
 combined['prev_user'] = combined['user_name'].shift()
 combined['session_work_key'] = np.where(
     combined['source'].eq('Pharmacy'),
-    'Pharmacy|' + combined['event_type'].fillna('').astype(str),
+    'Pharmacy',
     'Pyxis|' + combined['device'].fillna('').astype(str),
 )
 combined['prev_work_key'] = combined['session_work_key'].shift()
@@ -313,13 +336,18 @@ sessions.rename(columns={
     'Primary_Med': 'Primary Med',
     'Tx_Count': 'Tx Count',
 }, inplace=True)
-pharmacy_multi = sessions['Source'].eq('Pharmacy') & sessions['Destinations'].gt(1)
-sessions.loc[pharmacy_multi, 'Device'] = (
-    sessions.loc[pharmacy_multi, 'Primary Event'].fillna('Pharmacy work').astype(str)
-    + ' ('
-    + sessions.loc[pharmacy_multi, 'Destinations'].astype(str)
-    + ' destinations)'
-)
+sessions['Source Type'] = sessions['Source']
+session_labels = combined.groupby('session_id').apply(
+    lambda group: pd.Series({
+        'Display Source': pharmacy_work_label(group['event_type'], group['dt'].min())
+        if group['source'].iloc[0] == 'Pharmacy'
+        else group['source'].iloc[0],
+        'Display Device': destination_group_label(group['device']),
+    })
+).reset_index()
+sessions = sessions.merge(session_labels, on='session_id', how='left')
+sessions.loc[sessions['Source'].eq('Pharmacy'), 'Source'] = sessions.loc[sessions['Source'].eq('Pharmacy'), 'Display Source']
+sessions.loc[sessions['Work Key'].eq('Pharmacy'), 'Device'] = sessions.loc[sessions['Work Key'].eq('Pharmacy'), 'Display Device']
 
 sessions['Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
 sessions['Duration'] = np.where(sessions['Duration'] < 10, 30, sessions['Duration'])
@@ -358,8 +386,8 @@ with tab1:
 
     sel_source = c3.multiselect(
         "Filter Source",
-        ["Pyxis", "Pharmacy"],
-        default=["Pyxis", "Pharmacy"]
+        sorted(sessions['Source'].dropna().unique()),
+        default=sorted(sessions['Source'].dropna().unique())
     )
 
     view = sessions.copy()
@@ -380,8 +408,8 @@ with tab1:
         st.divider()
 
         total_active = view['Duration'].sum()
-        pyxis_time = view[view['Source'] == 'Pyxis']['Duration'].sum()
-        pharm_time = view[view['Source'] == 'Pharmacy']['Duration'].sum()
+        pyxis_time = view[view['Source Type'] == 'Pyxis']['Duration'].sum()
+        pharm_time = view[view['Source Type'] == 'Pharmacy']['Duration'].sum()
 
         top_device = view['Device'].mode()[0] if not view.empty else "N/A"
 
