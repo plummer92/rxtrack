@@ -273,14 +273,19 @@ combined.sort_values(['user_name', 'dt'], inplace=True)
 # Session Logic
 # ----------------------------
 combined['prev_user'] = combined['user_name'].shift()
-combined['prev_device'] = combined['device'].shift()
+combined['session_work_key'] = np.where(
+    combined['source'].eq('Pharmacy'),
+    'Pharmacy|' + combined['event_type'].fillna('').astype(str),
+    'Pyxis|' + combined['device'].fillna('').astype(str),
+)
+combined['prev_work_key'] = combined['session_work_key'].shift()
 combined['prev_dt'] = combined['dt'].shift()
 
 combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
 
 combined['is_new_session'] = np.where(
     (combined['user_name'] != combined['prev_user']) |
-    (combined['device'] != combined['prev_device']) |
+    (combined['session_work_key'] != combined['prev_work_key']) |
     (combined['gap'] > 1200),
     1, 0
 )
@@ -290,17 +295,31 @@ combined['session_id'] = combined['is_new_session'].cumsum()
 # ----------------------------
 # Aggregate Sessions
 # ----------------------------
-sessions = combined.groupby('session_id').agg({
-    'user_name': 'first',
-    'device': 'first',
-    'source': 'first',
-    'event_type': 'first',
-    'med_desc': 'first',
-    'dt': ['min', 'max'],
-    'pk': 'count'
-}).reset_index()
-
-sessions.columns = ['session_id', 'User', 'Device', 'Source', 'Primary Event', 'Primary Med', 'Start', 'End', 'Tx Count']
+sessions = combined.groupby('session_id').agg(
+    User=('user_name', 'first'),
+    Device=('device', 'first'),
+    Work_Key=('session_work_key', 'first'),
+    Source=('source', 'first'),
+    Primary_Event=('event_type', 'first'),
+    Primary_Med=('med_desc', 'first'),
+    Start=('dt', 'min'),
+    End=('dt', 'max'),
+    Destinations=('device', 'nunique'),
+    Tx_Count=('pk', 'count'),
+).reset_index()
+sessions.rename(columns={
+    'Work_Key': 'Work Key',
+    'Primary_Event': 'Primary Event',
+    'Primary_Med': 'Primary Med',
+    'Tx_Count': 'Tx Count',
+}, inplace=True)
+pharmacy_multi = sessions['Source'].eq('Pharmacy') & sessions['Destinations'].gt(1)
+sessions.loc[pharmacy_multi, 'Device'] = (
+    sessions.loc[pharmacy_multi, 'Primary Event'].fillna('Pharmacy work').astype(str)
+    + ' ('
+    + sessions.loc[pharmacy_multi, 'Destinations'].astype(str)
+    + ' destinations)'
+)
 
 sessions['Duration'] = (sessions['End'] - sessions['Start']).dt.total_seconds()
 sessions['Duration'] = np.where(sessions['Duration'] < 10, 30, sessions['Duration'])
@@ -394,7 +413,7 @@ with tab1:
 
     event = st.dataframe(
         disp[['session_id', 'User', 'Date', 'Source', 'Device',
-              'Start_Time', 'End_Time', 'Tx Count',
+              'Start_Time', 'End_Time', 'Destinations', 'Tx Count',
               'Duration_Str', 'Walk_Disp']],
         use_container_width=True,
         on_select="rerun",
@@ -415,7 +434,7 @@ with tab1:
         st.subheader(f"🔬 Session Details: {details['device'].iloc[0]}")
 
         st.dataframe(
-            details[['dt', 'source', 'event_type', 'med_desc', 'qty']],
+            details[['dt', 'source', 'device', 'event_type', 'med_desc', 'qty']],
             use_container_width=True,
             column_config={
                 "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")
