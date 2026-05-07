@@ -159,6 +159,43 @@ def ensure_packaging_table():
             )
         """))
         conn.execute(text("ALTER TABLE inventory_qc_actions ADD COLUMN IF NOT EXISTS replacement_expire_date DATE"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS pyxis_savings_projects (
+                id SERIAL PRIMARY KEY,
+                project_key TEXT UNIQUE,
+                project_name TEXT,
+                device TEXT,
+                zone TEXT,
+                pocket_location TEXT,
+                med_id TEXT,
+                med_desc TEXT,
+                brand_name TEXT,
+                action_type TEXT,
+                project_status TEXT DEFAULT 'Planned',
+                owner TEXT,
+                current_quantity FLOAT,
+                prior_min_qty FLOAT,
+                prior_max_qty FLOAT,
+                new_min_qty FLOAT,
+                new_max_qty FLOAT,
+                excess_quantity FLOAT,
+                cost_per_unit FLOAT,
+                estimated_savings FLOAT,
+                actual_savings FLOAT,
+                identified_dt TIMESTAMP DEFAULT NOW(),
+                implemented_dt DATE,
+                follow_up_dt DATE,
+                note TEXT
+            )
+        """))
+        for ddl in [
+            "ALTER TABLE pyxis_savings_projects ADD COLUMN IF NOT EXISTS project_name TEXT",
+            "ALTER TABLE pyxis_savings_projects ADD COLUMN IF NOT EXISTS project_status TEXT DEFAULT 'Planned'",
+            "ALTER TABLE pyxis_savings_projects ADD COLUMN IF NOT EXISTS actual_savings FLOAT",
+            "ALTER TABLE pyxis_savings_projects ADD COLUMN IF NOT EXISTS implemented_dt DATE",
+            "ALTER TABLE pyxis_savings_projects ADD COLUMN IF NOT EXISTS follow_up_dt DATE",
+        ]:
+            conn.execute(text(ddl))
 
 
 ensure_packaging_table()
@@ -294,6 +331,79 @@ def delete_inventory_qc_action(action_key):
         result = conn.execute(sql, {"action_key": action_key})
     load_inventory_qc_actions.clear()
     return result.rowcount or 0
+
+
+@st.cache_data(ttl=60)
+def load_pyxis_savings_projects():
+    sql = text("""
+        SELECT
+            id,
+            project_key,
+            project_name,
+            device,
+            zone,
+            pocket_location,
+            med_id,
+            med_desc,
+            brand_name,
+            action_type,
+            project_status,
+            owner,
+            current_quantity,
+            prior_min_qty,
+            prior_max_qty,
+            new_min_qty,
+            new_max_qty,
+            excess_quantity,
+            cost_per_unit,
+            estimated_savings,
+            actual_savings,
+            identified_dt,
+            implemented_dt,
+            follow_up_dt,
+            note
+        FROM pyxis_savings_projects
+        ORDER BY identified_dt DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+def save_pyxis_savings_project(project):
+    sql = text("""
+        INSERT INTO pyxis_savings_projects (
+            project_key, project_name, device, zone, pocket_location, med_id, med_desc, brand_name,
+            action_type, project_status, owner, current_quantity, prior_min_qty, prior_max_qty,
+            new_min_qty, new_max_qty, excess_quantity, cost_per_unit, estimated_savings,
+            actual_savings, implemented_dt, follow_up_dt, note
+        )
+        VALUES (
+            :project_key, :project_name, :device, :zone, :pocket_location, :med_id, :med_desc, :brand_name,
+            :action_type, :project_status, :owner, :current_quantity, :prior_min_qty, :prior_max_qty,
+            :new_min_qty, :new_max_qty, :excess_quantity, :cost_per_unit, :estimated_savings,
+            :actual_savings, :implemented_dt, :follow_up_dt, :note
+        )
+        ON CONFLICT (project_key) DO UPDATE SET
+            project_name = EXCLUDED.project_name,
+            action_type = EXCLUDED.action_type,
+            project_status = EXCLUDED.project_status,
+            owner = EXCLUDED.owner,
+            current_quantity = EXCLUDED.current_quantity,
+            prior_min_qty = EXCLUDED.prior_min_qty,
+            prior_max_qty = EXCLUDED.prior_max_qty,
+            new_min_qty = EXCLUDED.new_min_qty,
+            new_max_qty = EXCLUDED.new_max_qty,
+            excess_quantity = EXCLUDED.excess_quantity,
+            cost_per_unit = EXCLUDED.cost_per_unit,
+            estimated_savings = EXCLUDED.estimated_savings,
+            actual_savings = EXCLUDED.actual_savings,
+            implemented_dt = EXCLUDED.implemented_dt,
+            follow_up_dt = EXCLUDED.follow_up_dt,
+            note = EXCLUDED.note
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql, project)
+    load_pyxis_savings_projects.clear()
 
 
 def update_packaged_bud_after_removal(med_id, current_expire_date, new_bud_date):
@@ -649,6 +759,26 @@ def prep_med_costs(df):
     out["med_id"] = out["med_id"].fillna("").astype(str).str.strip().str.upper()
     out["cost_per_unit"] = pd.to_numeric(out["cost_per_unit"], errors="coerce").fillna(0)
     return out.drop_duplicates("med_id", keep="last")
+
+
+def prep_pyxis_savings_projects(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    for col in [
+        "project_name", "device", "zone", "pocket_location", "med_id", "med_desc",
+        "brand_name", "action_type", "project_status", "owner", "note",
+    ]:
+        out[col] = out[col].fillna("").astype(str).str.strip()
+    for col in [
+        "current_quantity", "prior_min_qty", "prior_max_qty", "new_min_qty", "new_max_qty",
+        "excess_quantity", "cost_per_unit", "estimated_savings", "actual_savings",
+    ]:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    out["identified_dt"] = pd.to_datetime(out["identified_dt"], errors="coerce")
+    out["implemented_dt"] = pd.to_datetime(out["implemented_dt"], errors="coerce")
+    out["follow_up_dt"] = pd.to_datetime(out["follow_up_dt"], errors="coerce")
+    return out
 
 
 PROCEDURAL_DEVICE_TERMS = [
@@ -1087,6 +1217,7 @@ device_inventory = prep_device_inventory(load_device_inventory())
 device_inventory_snapshot_dates = load_device_inventory_snapshot_dates()
 device_inventory_daily_delta = load_device_inventory_daily_delta()
 med_costs = prep_med_costs(load_med_costs())
+pyxis_savings_projects = prep_pyxis_savings_projects(load_pyxis_savings_projects())
 receiving_summary = build_receiving_summary(receiving)
 stock_add_summary = build_stock_add_summary(stock_add_history)
 deduction_summary = build_deduction_summary(deduction_history)
@@ -2077,9 +2208,188 @@ with tab_savings:
             },
         )
 
+        if savings_view.empty:
+            st.info("No savings opportunities match the current filters.")
+        else:
+            st.markdown("##### Log Savings Project Action")
+            project_options = savings_view.sort_values(
+                ["estimated_excess_value", "excess_quantity", "days_unused"],
+                ascending=[False, False, False],
+            ).copy()
+            project_options["project_label"] = project_options.apply(
+                lambda row: (
+                    f"{row.get('med_id', '')} | {row.get('device', '')} | {row.get('pocket_location', '')} | "
+                    f"${row.get('estimated_excess_value', 0):,.0f}"
+                ),
+                axis=1,
+            )
+            selected_project_label = st.selectbox(
+                "Opportunity to log",
+                project_options["project_label"].tolist(),
+                key="savings_project_opportunity",
+            )
+            selected_project = project_options[project_options["project_label"].eq(selected_project_label)].iloc[0]
+
+            with st.form("pyxis_savings_project_form"):
+                p1, p2, p3 = st.columns(3)
+                project_status = p1.selectbox(
+                    "Project status",
+                    ["Planned", "Implemented", "Monitoring", "Completed", "Cancelled"],
+                    index=1,
+                )
+                action_type = p2.selectbox(
+                    "Action taken",
+                    [
+                        "Reduced max",
+                        "Reduced min/max",
+                        "Removed from device",
+                        "Moved quantity",
+                        "Verified no change",
+                        "Other",
+                    ],
+                )
+                owner = p3.text_input("Owner", value="")
+
+                q1, q2, q3 = st.columns(3)
+                new_min_qty = q1.number_input(
+                    "New min",
+                    min_value=0.0,
+                    value=float(selected_project.get("min_qty", 0) or 0),
+                    step=1.0,
+                )
+                new_max_qty = q2.number_input(
+                    "New max",
+                    min_value=0.0,
+                    value=float(selected_project.get("suggested_max", 0) or 0),
+                    step=1.0,
+                )
+                actual_savings = q3.number_input(
+                    "Actual savings",
+                    min_value=0.0,
+                    value=float(selected_project.get("estimated_excess_value", 0) or 0),
+                    step=5.0,
+                )
+
+                d1, d2 = st.columns(2)
+                implemented_dt = d1.date_input("Implemented date", value=pd.Timestamp.today().date())
+                follow_up_dt = d2.date_input("Follow-up date", value=(pd.Timestamp.today() + pd.Timedelta(days=30)).date())
+                project_note = st.text_area(
+                    "Project note",
+                    value=f"{selected_project.get('suggested_action', '')}. Original max {selected_project.get('max_qty', 0):.0f}; suggested max {selected_project.get('suggested_max', 0):.0f}.",
+                )
+                log_project = st.form_submit_button("Save to project portfolio")
+
+                if log_project:
+                    project_key = "|".join([
+                        "pyxis-savings",
+                        str(selected_project.get("device", "")),
+                        str(selected_project.get("pocket_location", "")),
+                        str(selected_project.get("med_id", "")),
+                    ])
+                    save_pyxis_savings_project({
+                        "project_key": project_key,
+                        "project_name": f"{selected_project.get('med_id', '')} par review - {selected_project.get('device', '')}",
+                        "device": selected_project.get("device", ""),
+                        "zone": selected_project.get("zone", ""),
+                        "pocket_location": selected_project.get("pocket_location", ""),
+                        "med_id": selected_project.get("med_id", ""),
+                        "med_desc": selected_project.get("med_desc", ""),
+                        "brand_name": selected_project.get("brand_name", ""),
+                        "action_type": action_type,
+                        "project_status": project_status,
+                        "owner": owner,
+                        "current_quantity": float(selected_project.get("current_quantity", 0) or 0),
+                        "prior_min_qty": float(selected_project.get("min_qty", 0) or 0),
+                        "prior_max_qty": float(selected_project.get("max_qty", 0) or 0),
+                        "new_min_qty": new_min_qty,
+                        "new_max_qty": new_max_qty,
+                        "excess_quantity": float(selected_project.get("excess_quantity", 0) or 0),
+                        "cost_per_unit": float(selected_project.get("cost_per_unit", 0) or 0),
+                        "estimated_savings": float(selected_project.get("estimated_excess_value", 0) or 0),
+                        "actual_savings": actual_savings,
+                        "implemented_dt": implemented_dt if project_status in ["Implemented", "Monitoring", "Completed"] else None,
+                        "follow_up_dt": follow_up_dt,
+                        "note": project_note,
+                    })
+                    st.success("Saved project action to the Pyxis savings portfolio.")
+                    st.rerun()
+
         st.download_button(
             "Download Pyxis overstock savings CSV",
             data=savings_view[savings_cols].to_csv(index=False).encode("utf-8"),
             file_name="pyxis_overstock_savings.csv",
+            mime="text/csv",
+        )
+
+    st.markdown("##### Pyxis Savings Project Portfolio")
+    if pyxis_savings_projects.empty:
+        st.info("No Pyxis savings project actions have been logged yet.")
+    else:
+        portfolio = pyxis_savings_projects.copy()
+        active_statuses = ["Planned", "Implemented", "Monitoring"]
+        pf1, pf2, pf3, pf4 = st.columns(4)
+        pf1.metric("Projects", f"{len(portfolio):,}")
+        pf2.metric("Active Projects", f"{int(portfolio['project_status'].isin(active_statuses).sum()):,}")
+        pf3.metric("Estimated Savings", f"${portfolio['estimated_savings'].sum():,.0f}")
+        pf4.metric("Actual Savings", f"${portfolio['actual_savings'].sum():,.0f}")
+
+        portfolio_summary = (
+            portfolio.groupby("project_status", dropna=False)[["estimated_savings", "actual_savings"]]
+            .sum()
+            .reset_index()
+        )
+        st.plotly_chart(
+            px.bar(
+                portfolio_summary,
+                x="project_status",
+                y=["estimated_savings", "actual_savings"],
+                barmode="group",
+            ),
+            width="stretch",
+        )
+
+        portfolio_cols = [
+            "project_status",
+            "project_name",
+            "device",
+            "pocket_location",
+            "med_id",
+            "med_desc",
+            "action_type",
+            "owner",
+            "prior_min_qty",
+            "prior_max_qty",
+            "new_min_qty",
+            "new_max_qty",
+            "excess_quantity",
+            "estimated_savings",
+            "actual_savings",
+            "implemented_dt",
+            "follow_up_dt",
+            "note",
+        ]
+        st.dataframe(
+            portfolio.sort_values(["project_status", "estimated_savings"], ascending=[True, False])[portfolio_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "project_status": "Status",
+                "project_name": "Project",
+                "pocket_location": "Pocket",
+                "prior_min_qty": st.column_config.NumberColumn("Old Min", format="%.0f"),
+                "prior_max_qty": st.column_config.NumberColumn("Old Max", format="%.0f"),
+                "new_min_qty": st.column_config.NumberColumn("New Min", format="%.0f"),
+                "new_max_qty": st.column_config.NumberColumn("New Max", format="%.0f"),
+                "excess_quantity": st.column_config.NumberColumn("Excess Qty", format="%.0f"),
+                "estimated_savings": st.column_config.NumberColumn("Estimated Savings", format="$%.2f"),
+                "actual_savings": st.column_config.NumberColumn("Actual Savings", format="$%.2f"),
+                "implemented_dt": st.column_config.DatetimeColumn("Implemented", format="MM/DD/YYYY"),
+                "follow_up_dt": st.column_config.DatetimeColumn("Follow Up", format="MM/DD/YYYY"),
+            },
+        )
+        st.download_button(
+            "Download Pyxis savings portfolio CSV",
+            data=portfolio[portfolio_cols].to_csv(index=False).encode("utf-8"),
+            file_name="pyxis_savings_project_portfolio.csv",
             mime="text/csv",
         )
