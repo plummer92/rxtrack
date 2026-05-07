@@ -126,6 +126,30 @@ def init_db():
             days_unused FLOAT,
             snapshot_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );""",
+        """CREATE TABLE IF NOT EXISTS device_inventory_history (
+            snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            pk TEXT NOT NULL,
+            med_desc TEXT,
+            device TEXT,
+            zone TEXT,
+            pocket_location TEXT,
+            status TEXT,
+            brand_name TEXT,
+            med_id TEXT,
+            med_class TEXT,
+            current_quantity FLOAT,
+            min_qty FLOAT,
+            max_qty FLOAT,
+            outdate_tracking TEXT,
+            loaded_as_fraction TEXT,
+            backordered TEXT,
+            standard_stock TEXT,
+            active_orders TEXT,
+            days_unused FLOAT,
+            snapshot_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_device_inventory_history_snapshot_pk
+            ON device_inventory_history (snapshot_date, pk);""",
         """CREATE TABLE IF NOT EXISTS iv_room_workload (
             pk TEXT PRIMARY KEY,
             facility_name TEXT,
@@ -2289,6 +2313,33 @@ if _is_main:
 
                 elif u_type == "Device Inventory List":
                     clean = clean_device_inventory(raw)
+                    history_sql = """INSERT INTO device_inventory_history
+                             (snapshot_date, pk, med_desc, device, zone, pocket_location, status, brand_name, med_id, med_class,
+                              current_quantity, min_qty, max_qty, outdate_tracking, loaded_as_fraction,
+                              backordered, standard_stock, active_orders, days_unused, snapshot_dt)
+                             VALUES (CURRENT_DATE, %(pk)s, %(med_desc)s, %(device)s, %(zone)s, %(pocket_location)s, %(status)s,
+                                     %(brand_name)s, %(med_id)s, %(med_class)s, %(current_quantity)s, %(min_qty)s,
+                                     %(max_qty)s, %(outdate_tracking)s, %(loaded_as_fraction)s, %(backordered)s,
+                                     %(standard_stock)s, %(active_orders)s, %(days_unused)s, NOW())
+                             ON CONFLICT (snapshot_date, pk) DO UPDATE SET
+                                 med_desc = EXCLUDED.med_desc,
+                                 device = EXCLUDED.device,
+                                 zone = EXCLUDED.zone,
+                                 pocket_location = EXCLUDED.pocket_location,
+                                 status = EXCLUDED.status,
+                                 brand_name = EXCLUDED.brand_name,
+                                 med_id = EXCLUDED.med_id,
+                                 med_class = EXCLUDED.med_class,
+                                 current_quantity = EXCLUDED.current_quantity,
+                                 min_qty = EXCLUDED.min_qty,
+                                 max_qty = EXCLUDED.max_qty,
+                                 outdate_tracking = EXCLUDED.outdate_tracking,
+                                 loaded_as_fraction = EXCLUDED.loaded_as_fraction,
+                                 backordered = EXCLUDED.backordered,
+                                 standard_stock = EXCLUDED.standard_stock,
+                                 active_orders = EXCLUDED.active_orders,
+                                 days_unused = EXCLUDED.days_unused,
+                                 snapshot_dt = NOW();"""
                     sql = """INSERT INTO device_inventory
                              (pk, med_desc, device, zone, pocket_location, status, brand_name, med_id, med_class,
                               current_quantity, min_qty, max_qty, outdate_tracking, loaded_as_fraction,
@@ -2313,6 +2364,10 @@ if _is_main:
                                  active_orders = EXCLUDED.active_orders,
                                  days_unused = EXCLUDED.days_unused,
                                  snapshot_dt = NOW();"""
+                    with db_cursor() as (conn, cur):
+                        cur.execute("DELETE FROM device_inventory_history WHERE snapshot_date = CURRENT_DATE;")
+                        conn.commit()
+                    execute_statement(history_sql, clean.to_dict("records"), batch=True, table_name="Device Inventory History")
                     with db_cursor() as (conn, cur):
                         cur.execute("DELETE FROM device_inventory;")
                         conn.commit()

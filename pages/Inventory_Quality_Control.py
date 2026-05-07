@@ -115,6 +115,34 @@ def ensure_packaging_table():
             )
         """))
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS device_inventory_history (
+                snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+                pk TEXT NOT NULL,
+                med_desc TEXT,
+                device TEXT,
+                zone TEXT,
+                pocket_location TEXT,
+                status TEXT,
+                brand_name TEXT,
+                med_id TEXT,
+                med_class TEXT,
+                current_quantity FLOAT,
+                min_qty FLOAT,
+                max_qty FLOAT,
+                outdate_tracking TEXT,
+                loaded_as_fraction TEXT,
+                backordered TEXT,
+                standard_stock TEXT,
+                active_orders TEXT,
+                days_unused FLOAT,
+                snapshot_dt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_device_inventory_history_snapshot_pk
+            ON device_inventory_history (snapshot_date, pk)
+        """))
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS inventory_qc_actions (
                 id SERIAL PRIMARY KEY,
                 action_key TEXT UNIQUE,
@@ -369,6 +397,74 @@ def load_device_inventory():
             snapshot_dt
         FROM device_inventory
         ORDER BY days_unused DESC, device, med_desc
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
+def load_device_inventory_snapshot_dates():
+    sql = text("""
+        SELECT snapshot_date
+        FROM device_inventory_history
+        GROUP BY snapshot_date
+        ORDER BY snapshot_date DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
+def load_device_inventory_daily_delta():
+    sql = text("""
+        WITH latest_date AS (
+            SELECT MAX(snapshot_date) AS snapshot_date
+            FROM device_inventory_history
+        ),
+        previous_date AS (
+            SELECT MAX(snapshot_date) AS snapshot_date
+            FROM device_inventory_history
+            WHERE snapshot_date < (SELECT snapshot_date FROM latest_date)
+        ),
+        latest_rows AS (
+            SELECT *
+            FROM device_inventory_history
+            WHERE snapshot_date = (SELECT snapshot_date FROM latest_date)
+        ),
+        previous_rows AS (
+            SELECT *
+            FROM device_inventory_history
+            WHERE snapshot_date = (SELECT snapshot_date FROM previous_date)
+        )
+        SELECT
+            COALESCE(l.pk, p.pk) AS pk,
+            (SELECT snapshot_date FROM latest_date) AS latest_snapshot_date,
+            (SELECT snapshot_date FROM previous_date) AS previous_snapshot_date,
+            COALESCE(l.device, p.device) AS device,
+            COALESCE(l.zone, p.zone) AS zone,
+            COALESCE(l.pocket_location, p.pocket_location) AS pocket_location,
+            COALESCE(l.med_id, p.med_id) AS med_id,
+            COALESCE(l.med_desc, p.med_desc) AS med_desc,
+            COALESCE(l.brand_name, p.brand_name) AS brand_name,
+            COALESCE(l.status, p.status) AS status,
+            COALESCE(l.standard_stock, p.standard_stock) AS standard_stock,
+            COALESCE(l.active_orders, p.active_orders) AS active_orders,
+            COALESCE(l.days_unused, p.days_unused) AS days_unused,
+            COALESCE(p.current_quantity, 0) AS previous_quantity,
+            COALESCE(l.current_quantity, 0) AS current_quantity,
+            COALESCE(l.current_quantity, 0) - COALESCE(p.current_quantity, 0) AS net_quantity_change,
+            GREATEST(COALESCE(p.current_quantity, 0) - COALESCE(l.current_quantity, 0), 0) AS removed_quantity,
+            GREATEST(COALESCE(l.current_quantity, 0) - COALESCE(p.current_quantity, 0), 0) AS added_quantity,
+            CASE
+                WHEN l.pk IS NULL THEN 'Removed from device/pocket'
+                WHEN p.pk IS NULL THEN 'New on device/pocket'
+                WHEN COALESCE(l.current_quantity, 0) < COALESCE(p.current_quantity, 0) THEN 'Net removed'
+                WHEN COALESCE(l.current_quantity, 0) > COALESCE(p.current_quantity, 0) THEN 'Net added'
+                ELSE 'No quantity change'
+            END AS movement_type
+        FROM latest_rows l
+        FULL OUTER JOIN previous_rows p ON l.pk = p.pk
+        ORDER BY removed_quantity DESC, added_quantity DESC, device, med_desc
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn)
@@ -890,6 +986,8 @@ inventory_counts = load_inventory_counts()
 pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
 packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
+device_inventory_snapshot_dates = load_device_inventory_snapshot_dates()
+device_inventory_daily_delta = load_device_inventory_daily_delta()
 receiving_summary = build_receiving_summary(receiving)
 stock_add_summary = build_stock_add_summary(stock_add_history)
 deduction_summary = build_deduction_summary(deduction_history)
@@ -1582,6 +1680,111 @@ with tab_unload:
                 st.info("No unload-due rows match the current filters.")
             else:
                 st.plotly_chart(px.bar(due_by_device.sort_values("due_rows"), x="due_rows", y="device", orientation="h"), width="stretch")
+
+        st.markdown("##### Daily Device Quantity Movement")
+        st.caption(
+            "Compares the latest Device Inventory upload with the previous Device Inventory upload. "
+            "Negative net change is the quantity no longer in that Pyxis pocket/device."
+        )
+        if device_inventory_snapshot_dates.empty or len(device_inventory_snapshot_dates) < 2:
+            st.info("Upload Device Inventory on at least two different days to unlock day-to-day quantity movement.")
+        elif device_inventory_daily_delta.empty:
+            st.info("No device quantity movement was found between the latest two Device Inventory snapshots.")
+        else:
+            delta_view = device_inventory_daily_delta.copy()
+            for col in [
+                "previous_quantity", "current_quantity", "net_quantity_change",
+                "removed_quantity", "added_quantity", "days_unused",
+            ]:
+                delta_view[col] = pd.to_numeric(delta_view[col], errors="coerce").fillna(0)
+            for col in ["device", "zone", "pocket_location", "med_id", "med_desc", "brand_name", "movement_type"]:
+                delta_view[col] = delta_view[col].fillna("").astype(str)
+
+            if selected_devices:
+                delta_view = delta_view[delta_view["device"].isin(selected_devices)]
+            if exclude_procedural and excluded_devices:
+                delta_view = delta_view[~delta_view["device"].isin(excluded_devices)]
+            if device_med_search:
+                delta_search_mask = (
+                    delta_view["med_id"].str.contains(device_med_search, case=False, na=False)
+                    | delta_view["med_desc"].str.contains(device_med_search, case=False, na=False)
+                    | delta_view["brand_name"].str.contains(device_med_search, case=False, na=False)
+                    | delta_view["device"].str.contains(device_med_search, case=False, na=False)
+                )
+                delta_view = delta_view[delta_search_mask]
+
+            movement_only = st.toggle("Only show rows with quantity changes", value=True)
+            removals_only = st.toggle("Only show net removals", value=True)
+            if movement_only:
+                delta_view = delta_view[delta_view["net_quantity_change"].ne(0)]
+            if removals_only:
+                delta_view = delta_view[delta_view["removed_quantity"].gt(0)]
+
+            latest_delta_date = pd.to_datetime(device_inventory_daily_delta["latest_snapshot_date"].dropna().max(), errors="coerce")
+            previous_delta_date = pd.to_datetime(device_inventory_daily_delta["previous_snapshot_date"].dropna().max(), errors="coerce")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Latest Snapshot", latest_delta_date.strftime("%m/%d/%Y") if pd.notna(latest_delta_date) else "Unknown")
+            m2.metric("Compared To", previous_delta_date.strftime("%m/%d/%Y") if pd.notna(previous_delta_date) else "Unknown")
+            m3.metric("Quantity Removed", f"{delta_view['removed_quantity'].sum():,.0f}")
+            m4.metric("Changed Pockets", f"{int(delta_view['net_quantity_change'].ne(0).sum()):,}")
+
+            removed_by_device = (
+                delta_view[delta_view["removed_quantity"].gt(0)]
+                .groupby("device", dropna=False)["removed_quantity"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(20)
+                .reset_index()
+            )
+            if not removed_by_device.empty:
+                st.plotly_chart(
+                    px.bar(
+                        removed_by_device.sort_values("removed_quantity"),
+                        x="removed_quantity",
+                        y="device",
+                        orientation="h",
+                    ),
+                    width="stretch",
+                )
+
+            movement_cols = [
+                "movement_type",
+                "device",
+                "zone",
+                "pocket_location",
+                "med_id",
+                "med_desc",
+                "brand_name",
+                "previous_quantity",
+                "current_quantity",
+                "net_quantity_change",
+                "removed_quantity",
+                "added_quantity",
+                "days_unused",
+                "standard_stock",
+                "active_orders",
+            ]
+            st.dataframe(
+                delta_view.sort_values(["removed_quantity", "added_quantity", "device", "med_desc"], ascending=[False, False, True, True])[movement_cols],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "movement_type": "Movement",
+                    "pocket_location": "Pocket",
+                    "previous_quantity": st.column_config.NumberColumn("Previous Qty", format="%.0f"),
+                    "current_quantity": st.column_config.NumberColumn("Current Qty", format="%.0f"),
+                    "net_quantity_change": st.column_config.NumberColumn("Net Change", format="%.0f"),
+                    "removed_quantity": st.column_config.NumberColumn("Removed Qty", format="%.0f"),
+                    "added_quantity": st.column_config.NumberColumn("Added Qty", format="%.0f"),
+                    "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
+                },
+            )
+            st.download_button(
+                "Download daily device movement CSV",
+                data=delta_view[movement_cols].to_csv(index=False).encode("utf-8"),
+                file_name="daily_device_inventory_movement.csv",
+                mime="text/csv",
+            )
 
         st.markdown("##### Device Inventory 28-Day Review")
         device_cols = [
