@@ -105,6 +105,32 @@ def ensure_qc_actions_table():
                OR verification_status = 'Pending pharmacist check'
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_barcode_med_map_digits ON barcode_med_map (barcode_digits)"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS mobile_bud_project_portfolio (
+                id SERIAL PRIMARY KEY,
+                project_key TEXT UNIQUE,
+                med_id TEXT,
+                med_desc TEXT,
+                isa_name TEXT,
+                location TEXT,
+                barcode_text TEXT,
+                action_type TEXT,
+                project_status TEXT DEFAULT 'Logged',
+                quantity_checked FLOAT,
+                project_value FLOAT,
+                action_by TEXT,
+                action_dt TIMESTAMP DEFAULT NOW(),
+                follow_up_dt DATE,
+                note TEXT
+            )
+        """))
+        for ddl in [
+            "ALTER TABLE mobile_bud_project_portfolio ADD COLUMN IF NOT EXISTS project_status TEXT DEFAULT 'Logged'",
+            "ALTER TABLE mobile_bud_project_portfolio ADD COLUMN IF NOT EXISTS quantity_checked FLOAT",
+            "ALTER TABLE mobile_bud_project_portfolio ADD COLUMN IF NOT EXISTS project_value FLOAT",
+            "ALTER TABLE mobile_bud_project_portfolio ADD COLUMN IF NOT EXISTS follow_up_dt DATE",
+        ]:
+            conn.execute(text(ddl))
 
 
 def normalize_digits(value):
@@ -270,6 +296,78 @@ def save_active_bud_review(row, bud_date, reviewed_by, note, barcode_value, acti
             "note": full_note,
             "replacement_expire_date": bud_date,
         })
+
+
+def save_mobile_bud_project(row, action_type, action_by, note, barcode_value="", project_status="Logged"):
+    project_key = "|".join([
+        "mobile-bud",
+        normalize_text(action_type),
+        normalize_text(row.get("isa_name")),
+        normalize_text(row.get("location")),
+        normalize_text(row.get("med_id")),
+    ])
+    quantity_checked = float(row.get("pyxis_qty", 0) or 0)
+    sql = text("""
+        INSERT INTO mobile_bud_project_portfolio (
+            project_key, med_id, med_desc, isa_name, location, barcode_text, action_type,
+            project_status, quantity_checked, project_value, action_by, follow_up_dt, note
+        )
+        VALUES (
+            :project_key, :med_id, :med_desc, :isa_name, :location, :barcode_text, :action_type,
+            :project_status, :quantity_checked, :project_value, :action_by, :follow_up_dt, :note
+        )
+        ON CONFLICT (project_key) DO UPDATE SET
+            barcode_text = EXCLUDED.barcode_text,
+            action_type = EXCLUDED.action_type,
+            project_status = EXCLUDED.project_status,
+            quantity_checked = EXCLUDED.quantity_checked,
+            project_value = EXCLUDED.project_value,
+            action_by = EXCLUDED.action_by,
+            action_dt = NOW(),
+            follow_up_dt = EXCLUDED.follow_up_dt,
+            note = EXCLUDED.note
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql, {
+            "project_key": project_key,
+            "med_id": normalize_text(row.get("med_id")),
+            "med_desc": str(row.get("med_desc") or ""),
+            "isa_name": str(row.get("isa_name") or ""),
+            "location": str(row.get("location") or ""),
+            "barcode_text": str(barcode_value or ""),
+            "action_type": action_type,
+            "project_status": project_status,
+            "quantity_checked": quantity_checked,
+            "project_value": None,
+            "action_by": action_by or "",
+            "follow_up_dt": (pd.Timestamp.today() + pd.Timedelta(days=30)).date(),
+            "note": note or "",
+        })
+    load_mobile_bud_projects.clear()
+
+
+@st.cache_data(ttl=60)
+def load_mobile_bud_projects():
+    sql = text("""
+        SELECT
+            med_id,
+            med_desc,
+            isa_name,
+            location,
+            barcode_text,
+            action_type,
+            project_status,
+            quantity_checked,
+            project_value,
+            action_by,
+            action_dt,
+            follow_up_dt,
+            note
+        FROM mobile_bud_project_portfolio
+        ORDER BY action_dt DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
 
 
 def automated_verification(row, barcode_value, openfda_matches):
@@ -483,6 +581,7 @@ def load_mobile_scan_queue():
               AND (
                     replacement_expire_date IS NOT NULL
                  OR action_status = 'Expired product removed - none remaining'
+                 OR action_status = 'No inventory on hand'
               )
             ORDER BY UPPER(TRIM(med_id)), action_dt DESC
         ),
@@ -647,7 +746,10 @@ def load_mobile_scan_queue():
     queue.loc[queue["no_recent_movement"], "priority_score"] += 45
     queue.loc[queue["last_deducted"].notna() & queue["days_since_last_deducted"].ge(180), "priority_score"] += 20
     queue.loc[queue["last_stock_add"].notna() & queue["days_since_last_stock_add"].ge(180), "priority_score"] += 20
-    removed_none_remaining = queue["action_status"].eq("Expired product removed - none remaining")
+    removed_none_remaining = queue["action_status"].isin([
+        "Expired product removed - none remaining",
+        "No inventory on hand",
+    ])
     queue.loc[queue["active_bud_date"].isna() & ~removed_none_remaining, "priority_score"] += 15
 
     reasons = []
@@ -669,6 +771,8 @@ def load_mobile_scan_queue():
             row_reasons.append("No recent dispense")
         if row.action_status == "Expired product removed - none remaining":
             row_reasons.append("Expired product removed")
+        elif row.action_status == "No inventory on hand":
+            row_reasons.append("No inventory on hand")
         elif pd.isna(row.active_bud_date):
             row_reasons.append("No active BUD review")
         reasons.append("; ".join(row_reasons) if row_reasons else "Lower priority")
@@ -763,6 +867,8 @@ if st.session_state.pop("mobile_bud_reset", False):
 catalog = load_scan_catalog()
 barcode_crosswalk = load_barcode_crosswalk()
 scan_queue = load_mobile_scan_queue()
+mobile_bud_projects = load_mobile_bud_projects()
+current_queue_item = None
 
 st.markdown("##### Priority Scan Queue")
 if scan_queue.empty:
@@ -807,6 +913,7 @@ else:
         q3.metric("No Movement Trail", f"{int(visible_queue['no_recent_movement'].sum()):,}")
         queue_rows = visible_queue.reset_index(drop=True)
         selected_queue = queue_rows.iloc[st.session_state["mobile_queue_index"]]
+        current_queue_item = selected_queue
         st.caption(f"Queue item {st.session_state['mobile_queue_index'] + 1} of {len(queue_rows)}")
         st.markdown(f"### {selected_queue['med_id']}")
         st.markdown(f"**{selected_queue['med_desc']}**")
@@ -834,6 +941,35 @@ else:
         if nav_next.button("Next", disabled=st.session_state["mobile_queue_index"] >= len(queue_rows) - 1, width="stretch"):
             st.session_state["mobile_queue_index"] += 1
             st.rerun()
+
+        with st.expander("Pocket empty / no inventory on hand"):
+            st.caption("Use this when the queue points you to a med/location but there is physically no product there to scan.")
+            with st.form("queue_no_inventory_form"):
+                no_inventory_by = st.text_input("Checked by", value="")
+                no_inventory_note = st.text_area(
+                    "Note",
+                    value="Queue item checked in Pyxis/ISA location; no inventory was physically on hand.",
+                )
+                no_inventory_submit = st.form_submit_button("Mark no inventory on hand")
+                if no_inventory_submit:
+                    save_active_bud_review(
+                        selected_queue,
+                        None,
+                        no_inventory_by,
+                        no_inventory_note,
+                        "",
+                        action_status="No inventory on hand",
+                    )
+                    save_mobile_bud_project(
+                        selected_queue,
+                        "No inventory on hand",
+                        no_inventory_by,
+                        no_inventory_note,
+                    )
+                    load_mobile_scan_queue.clear()
+                    st.session_state["mobile_bud_reset"] = True
+                    st.success("Marked no inventory on hand and removed this item from the queue.")
+                    st.rerun()
 
 st.caption(
     "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
@@ -864,6 +1000,10 @@ scan_value = st.text_input("Barcode or Med ID", key="mobile_barcode_input")
 parsed_expiration = parse_gs1_expiration(scan_value)
 matches = find_matches(catalog, barcode_crosswalk, scan_value)
 openfda_matches = lookup_openfda_ndc(scan_value) if scan_value else pd.DataFrame()
+if scan_value and matches.empty and current_queue_item is not None:
+    queue_row = current_queue_item.copy()
+    queue_row["match_type"] = "Current queue item"
+    matches = pd.DataFrame([queue_row])
 
 if scan_value:
     st.caption(f"Scanned value: `{scan_value}`")
@@ -900,11 +1040,25 @@ elif matches.empty:
                 st.rerun()
 else:
     st.subheader("Matched Med")
+    if current_queue_item is not None and not matches.empty:
+        queue_med_id = normalize_text(current_queue_item.get("med_id"))
+        queue_match = matches["med_id"].fillna("").astype(str).str.strip().str.upper().eq(queue_med_id)
+        if not queue_match.any():
+            queue_row = current_queue_item.copy()
+            queue_row["match_type"] = "Current queue item"
+            matches = pd.concat([pd.DataFrame([queue_row]), matches], ignore_index=True, sort=False)
     labels = [
         f"{row.med_id} | {row.med_desc} | {row.isa_name} {row.location} | {row.match_type}"
         for row in matches.itertuples(index=False)
     ]
-    selected_label = st.selectbox("Match", labels)
+    default_match_index = 0
+    if current_queue_item is not None:
+        queue_med_id = normalize_text(current_queue_item.get("med_id"))
+        for index, row in enumerate(matches.itertuples(index=False)):
+            if normalize_text(getattr(row, "med_id", "")) == queue_med_id:
+                default_match_index = index
+                break
+    selected_label = st.selectbox("Match", labels, index=default_match_index)
     selected_index = labels.index(selected_label)
     selected = matches.iloc[selected_index]
 
@@ -948,29 +1102,35 @@ else:
     with st.form("mobile_bud_review_form"):
         review_outcome = st.radio(
             "Review outcome",
-            ["Remaining product has active BUD", "Expired product removed - none remaining"],
+            [
+                "Remaining product has active BUD",
+                "Expired product removed - none remaining",
+                "No inventory on hand",
+            ],
         )
         default_bud = parsed_expiration or pd.Timestamp.today().date()
         bud_text = st.text_input(
             "Active BUD",
             value=default_bud.strftime("%m/%d/%Y"),
-            disabled=review_outcome == "Expired product removed - none remaining",
+            disabled=review_outcome != "Remaining product has active BUD",
             help="Type MMDDYY, MMDDYYYY, or MM/DD/YYYY.",
         )
         bud_date = parse_user_date(bud_text)
         reviewed_by = st.text_input("Reviewed by", value="")
-        default_note = (
-            "Mobile barcode BUD review."
-            if review_outcome == "Remaining product has active BUD"
-            else "Expired product removed; no remaining product available to assign an active BUD."
-        )
+        default_notes = {
+            "Remaining product has active BUD": "Mobile barcode BUD review.",
+            "Expired product removed - none remaining": "Expired product removed; no remaining product available to assign an active BUD.",
+            "No inventory on hand": "Queue item checked in Pyxis/ISA location; no inventory was physically on hand.",
+        }
+        default_note = default_notes.get(review_outcome, "Mobile barcode BUD review.")
         note = st.text_area("Note", value=default_note)
         submitted = st.form_submit_button("Save Active BUD Review")
         if submitted:
             if review_outcome == "Remaining product has active BUD" and bud_date is None:
                 st.error("Enter the Active BUD as MMDDYY, MMDDYYYY, or MM/DD/YYYY before saving.")
                 st.stop()
-            save_barcode_mapping(selected, scan_value, openfda_matches=openfda_matches)
+            if review_outcome != "No inventory on hand":
+                save_barcode_mapping(selected, scan_value, openfda_matches=openfda_matches)
             if review_outcome == "Expired product removed - none remaining":
                 save_active_bud_review(
                     selected,
@@ -980,6 +1140,29 @@ else:
                     scan_value,
                     action_status="Expired product removed - none remaining",
                 )
+                save_mobile_bud_project(
+                    selected,
+                    "Expired product removed",
+                    reviewed_by,
+                    note,
+                    scan_value,
+                )
+            elif review_outcome == "No inventory on hand":
+                save_active_bud_review(
+                    selected,
+                    None,
+                    reviewed_by,
+                    note,
+                    scan_value,
+                    action_status="No inventory on hand",
+                )
+                save_mobile_bud_project(
+                    selected,
+                    "No inventory on hand",
+                    reviewed_by,
+                    note,
+                    scan_value,
+                )
             else:
                 save_active_bud_review(selected, bud_date, reviewed_by, note, scan_value)
             st.session_state["mobile_last_saved_barcode"] = scan_value
@@ -988,3 +1171,48 @@ else:
             st.session_state["mobile_bud_reset"] = True
             st.success("Saved Active BUD review.")
             st.rerun()
+
+st.markdown("##### Mobile BUD Project Portfolio")
+if mobile_bud_projects.empty:
+    st.info("No mobile BUD project actions have been logged yet.")
+else:
+    portfolio = mobile_bud_projects.copy()
+    portfolio["action_dt"] = pd.to_datetime(portfolio["action_dt"], errors="coerce")
+    portfolio["follow_up_dt"] = pd.to_datetime(portfolio["follow_up_dt"], errors="coerce")
+    portfolio["quantity_checked"] = pd.to_numeric(portfolio["quantity_checked"], errors="coerce").fillna(0)
+    p1, p2, p3 = st.columns(3)
+    p1.metric("Logged Actions", f"{len(portfolio):,}")
+    p2.metric("Expired Removed", f"{int(portfolio['action_type'].eq('Expired product removed').sum()):,}")
+    p3.metric("No Inventory Found", f"{int(portfolio['action_type'].eq('No inventory on hand').sum()):,}")
+
+    portfolio_cols = [
+        "action_type",
+        "project_status",
+        "med_id",
+        "med_desc",
+        "isa_name",
+        "location",
+        "quantity_checked",
+        "action_by",
+        "action_dt",
+        "follow_up_dt",
+        "note",
+    ]
+    st.dataframe(
+        portfolio[portfolio_cols],
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "action_type": "Action",
+            "project_status": "Status",
+            "quantity_checked": st.column_config.NumberColumn("Qty Checked", format="%.0f"),
+            "action_dt": st.column_config.DatetimeColumn("Logged", format="MM/DD/YYYY HH:mm"),
+            "follow_up_dt": st.column_config.DatetimeColumn("Follow Up", format="MM/DD/YYYY"),
+        },
+    )
+    st.download_button(
+        "Download mobile BUD project portfolio CSV",
+        data=portfolio[portfolio_cols].to_csv(index=False).encode("utf-8"),
+        file_name="mobile_bud_project_portfolio.csv",
+        mime="text/csv",
+    )
