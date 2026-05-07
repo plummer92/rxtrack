@@ -471,6 +471,19 @@ def load_device_inventory_daily_delta():
 
 
 @st.cache_data(ttl=60)
+def load_med_costs():
+    sql = text("""
+        SELECT
+            UPPER(TRIM(med_id)) AS med_id,
+            cost_per_unit
+        FROM med_costs
+        WHERE COALESCE(TRIM(med_id), '') <> ''
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
 def load_packaging_history():
     sql = text("""
         SELECT
@@ -629,6 +642,15 @@ def prep_device_inventory(df):
     return out
 
 
+def prep_med_costs(df):
+    if df.empty:
+        return pd.DataFrame(columns=["med_id", "cost_per_unit"])
+    out = df.copy()
+    out["med_id"] = out["med_id"].fillna("").astype(str).str.strip().str.upper()
+    out["cost_per_unit"] = pd.to_numeric(out["cost_per_unit"], errors="coerce").fillna(0)
+    return out.drop_duplicates("med_id", keep="last")
+
+
 PROCEDURAL_DEVICE_TERMS = [
     "ANES",
     "ANESTH",
@@ -673,6 +695,82 @@ def build_receiving_summary(receiving):
     last_rows = sorted_receiving.groupby("med_id", dropna=False).tail(1)[["med_id", "user_name"]]
     last_rows = last_rows.rename(columns={"user_name": "last_received_by"})
     return summary.merge(last_rows, on="med_id", how="left")
+
+
+def build_pyxis_overstock_savings(device_inventory, deduction_history, med_costs):
+    columns = [
+        "device", "zone", "pocket_location", "med_id", "med_desc", "brand_name",
+        "current_quantity", "min_qty", "max_qty", "days_unused", "standard_stock",
+        "active_orders", "status", "cost_per_unit", "current_value", "deduct_qty_30d",
+        "deduct_qty_90d", "last_deducted", "avg_daily_use_90d", "suggested_max",
+        "excess_quantity", "estimated_excess_value", "savings_priority", "suggested_action",
+    ]
+    if device_inventory.empty:
+        return pd.DataFrame(columns=columns)
+
+    base = device_inventory.copy()
+    if not med_costs.empty:
+        base = base.merge(med_costs, on="med_id", how="left")
+    if "cost_per_unit" not in base.columns:
+        base["cost_per_unit"] = 0
+    base["cost_per_unit"] = pd.to_numeric(base["cost_per_unit"], errors="coerce").fillna(0)
+
+    today = pd.Timestamp.today().normalize()
+    if deduction_history.empty:
+        usage = pd.DataFrame(columns=["med_id", "deduct_qty_30d", "deduct_qty_90d", "last_deducted"])
+    else:
+        deductions = deduction_history.copy()
+        deductions["deducted_dt"] = pd.to_datetime(deductions["deducted_dt"], errors="coerce")
+        deductions["med_id"] = deductions["med_id"].fillna("").astype(str).str.strip().str.upper()
+        deductions["qty"] = pd.to_numeric(deductions["qty"], errors="coerce").fillna(0).abs()
+        recent_90 = deductions[deductions["deducted_dt"].ge(today - pd.Timedelta(days=90))]
+        recent_30 = deductions[deductions["deducted_dt"].ge(today - pd.Timedelta(days=30))]
+        usage_90 = recent_90.groupby("med_id", dropna=False).agg(
+            deduct_qty_90d=("qty", "sum"),
+            last_deducted=("deducted_dt", "max"),
+        )
+        usage_30 = recent_30.groupby("med_id", dropna=False).agg(deduct_qty_30d=("qty", "sum"))
+        usage = usage_90.join(usage_30, how="outer").reset_index()
+
+    base = base.merge(usage, on="med_id", how="left")
+    for col in ["deduct_qty_30d", "deduct_qty_90d"]:
+        base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0)
+    base["last_deducted"] = pd.to_datetime(base["last_deducted"], errors="coerce")
+    base["avg_daily_use_90d"] = base["deduct_qty_90d"] / 90
+    base["current_value"] = base["current_quantity"] * base["cost_per_unit"]
+
+    is_exempt = base["standard_stock"].str.upper().eq("Y") | base["active_orders"].str.upper().eq("Y")
+    usage_buffer = (base["avg_daily_use_90d"] * 14).apply(lambda value: int(value) + (0 if value == int(value) else 1))
+    conservative_floor = base["min_qty"].clip(lower=0)
+    base["suggested_max"] = pd.concat([usage_buffer, conservative_floor], axis=1).max(axis=1)
+    base.loc[base["deduct_qty_90d"].eq(0) & base["days_unused"].ge(28) & ~is_exempt, "suggested_max"] = conservative_floor
+    base.loc[is_exempt, "suggested_max"] = base[["suggested_max", "min_qty"]].max(axis=1)
+    max_cap = base["max_qty"].where(base["max_qty"].gt(0), base["suggested_max"])
+    base["suggested_max"] = pd.concat([base["suggested_max"], max_cap], axis=1).min(axis=1)
+    base["excess_quantity"] = (base["current_quantity"] - base["suggested_max"]).clip(lower=0)
+    base["estimated_excess_value"] = base["excess_quantity"] * base["cost_per_unit"]
+
+    base["savings_priority"] = "Monitor"
+    base.loc[base["estimated_excess_value"].ge(100), "savings_priority"] = "High Dollar Review"
+    base.loc[base["estimated_excess_value"].between(25, 99.99, inclusive="both"), "savings_priority"] = "Review"
+    base.loc[
+        base["deduct_qty_90d"].eq(0) & base["days_unused"].ge(28) & base["current_quantity"].gt(0) & ~is_exempt,
+        "savings_priority",
+    ] = "No-Movement Removal Review"
+    base.loc[is_exempt, "savings_priority"] = "Exempt / Verify Need"
+
+    base["suggested_action"] = "Monitor usage"
+    base.loc[base["excess_quantity"].gt(0), "suggested_action"] = "Review Pyxis max/par reduction"
+    base.loc[
+        base["deduct_qty_90d"].eq(0) & base["days_unused"].ge(28) & base["current_quantity"].gt(0) & ~is_exempt,
+        "suggested_action",
+    ] = "Consider unload or remove from device"
+    base.loc[is_exempt & base["excess_quantity"].gt(0), "suggested_action"] = "Verify standard stock/active order need"
+
+    return base[columns].sort_values(
+        ["estimated_excess_value", "excess_quantity", "days_unused"],
+        ascending=[False, False, False],
+    )
 
 
 def build_packaging_summary(packaging):
@@ -988,9 +1086,11 @@ packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
 device_inventory_snapshot_dates = load_device_inventory_snapshot_dates()
 device_inventory_daily_delta = load_device_inventory_daily_delta()
+med_costs = prep_med_costs(load_med_costs())
 receiving_summary = build_receiving_summary(receiving)
 stock_add_summary = build_stock_add_summary(stock_add_history)
 deduction_summary = build_deduction_summary(deduction_history)
+pyxis_overstock_savings = build_pyxis_overstock_savings(device_inventory, deduction_history, med_costs)
 pyxis_exposure_summary = build_pyxis_exposure_summary(pyxis_inventory)
 packaging_summary = build_packaging_summary(packaging)
 manual_bud_summary = build_manual_bud_summary(qc_actions)
@@ -1020,7 +1120,11 @@ for col in ["active_bud_review_dt", "reviewed_active_bud_date"]:
     isa_lifecycle[col] = pd.to_datetime(isa_lifecycle[col], errors="coerce")
 isa_lifecycle["active_bud_reviewed"] = isa_lifecycle["active_bud_review_dt"].notna()
 
-tab_lifecycle, tab_unload = st.tabs(["ISA Receiving Lifecycle", "Pyxis 28-Day Unload"])
+tab_lifecycle, tab_unload, tab_savings = st.tabs([
+    "ISA Receiving Lifecycle",
+    "Pyxis 28-Day Unload",
+    "Pyxis Overstock Savings",
+])
 
 with tab_lifecycle:
     st.subheader("ISA Receiving Lifecycle")
@@ -1826,5 +1930,156 @@ with tab_unload:
             "Download 28-day unload review CSV",
             data=device_view[device_cols].to_csv(index=False).encode("utf-8"),
             file_name="pyxis_28_day_unload_review.csv",
+            mime="text/csv",
+        )
+
+with tab_savings:
+    st.subheader("Pyxis Overstock Savings")
+    st.caption(
+        "Flags Pyxis pockets where current quantity appears higher than recent pull activity supports. "
+        "Use this as a par-level review queue before changing min/max settings."
+    )
+
+    if pyxis_overstock_savings.empty:
+        st.warning("No Device Inventory rows are loaded yet. Upload the Device Inventory List and med cost file to estimate savings.")
+    else:
+        savings_view = pyxis_overstock_savings.copy()
+        savings_devices = sorted(savings_view["device"].dropna().unique())
+        savings_priorities = [
+            "No-Movement Removal Review",
+            "High Dollar Review",
+            "Review",
+            "Exempt / Verify Need",
+            "Monitor",
+        ]
+
+        s_filter_1, s_filter_2, s_filter_3, s_filter_4 = st.columns(4)
+        selected_savings_devices = s_filter_1.multiselect("Device", savings_devices, key="savings_device_filter")
+        selected_savings_priorities = s_filter_2.multiselect(
+            "Savings priority",
+            savings_priorities,
+            default=["No-Movement Removal Review", "High Dollar Review", "Review"],
+            key="savings_priority_filter",
+        )
+        min_excess_value = s_filter_3.number_input(
+            "Minimum excess value",
+            min_value=0,
+            value=10,
+            step=5,
+            key="savings_min_excess_value",
+        )
+        savings_search = s_filter_4.text_input("Med/device search", key="savings_search")
+
+        suggested_procedural = suggest_procedural_devices(savings_devices)
+        exclude_savings_procedural = st.toggle(
+            "Exclude procedural/anesthesia machines",
+            value=True,
+            key="savings_exclude_procedural",
+        )
+        if selected_savings_devices:
+            savings_view = savings_view[savings_view["device"].isin(selected_savings_devices)]
+        if exclude_savings_procedural and suggested_procedural:
+            savings_view = savings_view[~savings_view["device"].isin(suggested_procedural)]
+        if selected_savings_priorities:
+            savings_view = savings_view[savings_view["savings_priority"].isin(selected_savings_priorities)]
+        savings_view = savings_view[savings_view["estimated_excess_value"].ge(min_excess_value)]
+        if savings_search:
+            savings_mask = (
+                savings_view["med_id"].str.contains(savings_search, case=False, na=False)
+                | savings_view["med_desc"].str.contains(savings_search, case=False, na=False)
+                | savings_view["brand_name"].str.contains(savings_search, case=False, na=False)
+                | savings_view["device"].str.contains(savings_search, case=False, na=False)
+            )
+            savings_view = savings_view[savings_mask]
+
+        sv1, sv2, sv3, sv4 = st.columns(4)
+        sv1.metric("Review Rows", f"{len(savings_view):,}")
+        sv2.metric("Estimated Excess Value", f"${savings_view['estimated_excess_value'].sum():,.0f}")
+        sv3.metric("Excess Quantity", f"{savings_view['excess_quantity'].sum():,.0f}")
+        sv4.metric(
+            "No 90-Day Pull Rows",
+            f"{int(savings_view['deduct_qty_90d'].eq(0).sum()):,}",
+        )
+
+        chart_left, chart_right = st.columns(2)
+        with chart_left:
+            priority_summary = (
+                savings_view.groupby("savings_priority", dropna=False)["estimated_excess_value"]
+                .sum()
+                .reindex(savings_priorities, fill_value=0)
+                .reset_index()
+                .rename(columns={"index": "savings_priority"})
+            )
+            st.markdown("##### Excess Value by Priority")
+            st.plotly_chart(px.bar(priority_summary, x="savings_priority", y="estimated_excess_value"), width="stretch")
+
+        with chart_right:
+            device_savings = (
+                savings_view.groupby("device", dropna=False)["estimated_excess_value"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(20)
+                .reset_index()
+            )
+            st.markdown("##### Top Devices by Excess Value")
+            if device_savings.empty:
+                st.info("No rows match the current savings filters.")
+            else:
+                st.plotly_chart(
+                    px.bar(device_savings.sort_values("estimated_excess_value"), x="estimated_excess_value", y="device", orientation="h"),
+                    width="stretch",
+                )
+
+        savings_cols = [
+            "savings_priority",
+            "suggested_action",
+            "device",
+            "zone",
+            "pocket_location",
+            "med_id",
+            "med_desc",
+            "brand_name",
+            "current_quantity",
+            "min_qty",
+            "max_qty",
+            "suggested_max",
+            "excess_quantity",
+            "cost_per_unit",
+            "estimated_excess_value",
+            "days_unused",
+            "deduct_qty_30d",
+            "deduct_qty_90d",
+            "last_deducted",
+            "standard_stock",
+            "active_orders",
+            "status",
+        ]
+        st.markdown("##### Overstock Review Queue")
+        st.dataframe(
+            savings_view.sort_values(["estimated_excess_value", "excess_quantity", "days_unused"], ascending=[False, False, False])[savings_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "savings_priority": "Priority",
+                "suggested_action": "Suggested Action",
+                "pocket_location": "Pocket",
+                "current_quantity": st.column_config.NumberColumn("Current Qty", format="%.0f"),
+                "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
+                "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
+                "suggested_max": st.column_config.NumberColumn("Suggested Max", format="%.0f"),
+                "excess_quantity": st.column_config.NumberColumn("Excess Qty", format="%.0f"),
+                "cost_per_unit": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+                "estimated_excess_value": st.column_config.NumberColumn("Excess Value", format="$%.2f"),
+                "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
+                "deduct_qty_30d": st.column_config.NumberColumn("30d Pull Qty", format="%.0f"),
+                "deduct_qty_90d": st.column_config.NumberColumn("90d Pull Qty", format="%.0f"),
+                "last_deducted": st.column_config.DatetimeColumn("Last Pull", format="MM/DD/YYYY"),
+            },
+        )
+
+        st.download_button(
+            "Download Pyxis overstock savings CSV",
+            data=savings_view[savings_cols].to_csv(index=False).encode("utf-8"),
+            file_name="pyxis_overstock_savings.csv",
             mime="text/csv",
         )
