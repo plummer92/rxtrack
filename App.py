@@ -2235,6 +2235,19 @@ if _is_main:
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded = st.file_uploader(f"Upload {u_type}", type=upload_types)
+        device_inventory_snapshot_date = date.today()
+        update_current_device_inventory = True
+        if u_type == "Device Inventory List":
+            device_inventory_snapshot_date = st.date_input(
+                "Device Inventory snapshot date",
+                value=date.today(),
+                help="Use this to backfill older Device Inventory CSVs so daily movement can compare the correct days.",
+            )
+            update_current_device_inventory = st.checkbox(
+                "Replace current Device Inventory table with this file",
+                value=device_inventory_snapshot_date == date.today(),
+                help="Leave this unchecked when backfilling older files. The file will still be saved to daily history.",
+            )
         if uploaded and st.button(f"Process {u_type}"):
             try:
                 processed_count = 0
@@ -2317,7 +2330,7 @@ if _is_main:
                              (snapshot_date, pk, med_desc, device, zone, pocket_location, status, brand_name, med_id, med_class,
                               current_quantity, min_qty, max_qty, outdate_tracking, loaded_as_fraction,
                               backordered, standard_stock, active_orders, days_unused, snapshot_dt)
-                             VALUES (CURRENT_DATE, %(pk)s, %(med_desc)s, %(device)s, %(zone)s, %(pocket_location)s, %(status)s,
+                             VALUES (%(snapshot_date)s, %(pk)s, %(med_desc)s, %(device)s, %(zone)s, %(pocket_location)s, %(status)s,
                                      %(brand_name)s, %(med_id)s, %(med_class)s, %(current_quantity)s, %(min_qty)s,
                                      %(max_qty)s, %(outdate_tracking)s, %(loaded_as_fraction)s, %(backordered)s,
                                      %(standard_stock)s, %(active_orders)s, %(days_unused)s, NOW())
@@ -2364,14 +2377,18 @@ if _is_main:
                                  active_orders = EXCLUDED.active_orders,
                                  days_unused = EXCLUDED.days_unused,
                                  snapshot_dt = NOW();"""
+                    clean_records = clean.to_dict("records")
+                    for row in clean_records:
+                        row["snapshot_date"] = device_inventory_snapshot_date
                     with db_cursor() as (conn, cur):
-                        cur.execute("DELETE FROM device_inventory_history WHERE snapshot_date = CURRENT_DATE;")
+                        cur.execute("DELETE FROM device_inventory_history WHERE snapshot_date = %s;", (device_inventory_snapshot_date,))
                         conn.commit()
-                    execute_statement(history_sql, clean.to_dict("records"), batch=True, table_name="Device Inventory History")
-                    with db_cursor() as (conn, cur):
-                        cur.execute("DELETE FROM device_inventory;")
-                        conn.commit()
-                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Device Inventory")
+                    execute_statement(history_sql, clean_records, batch=True, table_name="Device Inventory History")
+                    if update_current_device_inventory:
+                        with db_cursor() as (conn, cur):
+                            cur.execute("DELETE FROM device_inventory;")
+                            conn.commit()
+                        execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Device Inventory")
 
                 elif u_type == "Days Since Last Cycle Count Report":
                     clean = clean_cycle_count_status_report(uploaded)
