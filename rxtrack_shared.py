@@ -80,13 +80,15 @@ def execute_statement(sql, params, batch=False, table_name="Data"):
         params = _normalize_params(params)
         with db_cursor() as (conn, cur):
             if batch:
-                execute_batch(cur, sql, params, page_size=2000)
+                execute_batch(cur, sql, params, page_size=5000)
             else:
                 cur.execute(sql, params)
             conn.commit()
-            st.toast(f"Successfully processed {len(params)} records for {table_name}!")
+            record_count = len(params) if batch else 1
+            st.toast(f"Successfully processed {record_count} records for {table_name}!")
     except Exception as e:
         st.error(f"Error executing {table_name}: {e}")
+        raise
 
 
 def seconds_to_mmss(seconds):

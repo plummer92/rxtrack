@@ -18,6 +18,7 @@ import re
 import io
 import warnings
 import json
+import time
 from openpyxl import load_workbook
 
 from sqlalchemy import text
@@ -1763,6 +1764,28 @@ def load_overnight_cartfill_context():
         results["staffing"]["schedule_date"] = pd.to_datetime(results["staffing"]["schedule_date"], errors="coerce")
     return results.get("windows", pd.DataFrame()), results.get("staffing", pd.DataFrame())
 
+
+def clear_app_upload_caches():
+    cached_loaders = [
+        load_admin_users,
+        load_shift_audit_profiles,
+        load_shift_schedule_for_date,
+        load_day_events_for_shift_audit,
+        load_day_pharmacy_for_shift_audit,
+        load_shift_audit_results,
+        load_data,
+        load_iv_room_data,
+        load_wcc_compounding_stats,
+        load_wcc_cartfill_stats,
+        load_overnight_cartfill_orders,
+        load_overnight_cartfill_context,
+    ]
+    for loader in cached_loaders:
+        clear_func = getattr(loader, "clear", None)
+        if callable(clear_func):
+            clear_func()
+
+
 def get_stats_range():
     base_dates = [
         "SELECT dt::date as d FROM events WHERE dt IS NOT NULL",
@@ -2461,6 +2484,7 @@ if _is_main:
             )
         if uploaded and st.button(f"Process {u_type}"):
             try:
+                upload_started = time.perf_counter()
                 processed_count = 0
                 # 1. Load raw file
                 if u_type in {"IV Overnight Cartfill Model", "Days Since Last Cycle Count Report", "Packaging Report"}:
@@ -2748,9 +2772,9 @@ if _is_main:
 
                 # 3. Success & Refresh
                 if clean is not None:
-                    st.cache_data.clear()
-                    st.success(f"Successfully uploaded {processed_count or len(clean)} records!")
-                    st.rerun()
+                    clear_app_upload_caches()
+                    elapsed = time.perf_counter() - upload_started
+                    st.success(f"Successfully uploaded {processed_count or len(clean)} records in {elapsed:.1f} seconds.")
                 else:
                     st.warning("File type logic not yet implemented for this selection.")
 
