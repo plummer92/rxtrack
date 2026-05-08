@@ -1910,6 +1910,7 @@ def render_page_links():
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
     safe_page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
     safe_page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
+    safe_page_link("pages/WCC.py", label="WCC", icon="🍼")
     safe_page_link("pages/🌙_Cartfill_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
     safe_page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
     safe_page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin & Cassettes", icon="🗑️")
