@@ -2,6 +2,11 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import App
+from rxtrack_shared import (
+    add_return_compare_qty,
+    group_return_compare_qty,
+    group_return_unit_notes,
+)
 
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
@@ -11,32 +16,6 @@ st.set_page_config(page_title="Return Reconciliation", page_icon="🔄", layout=
 load_data = App.load_data
 render_sidebar = App.render_sidebar
 engine = App.engine
-
-INHALER_PUFF_CONVERSIONS = [
-    {
-        "label": "Flovent HFA",
-        "patterns": ["fluticasone propionate", "flovent hfa", "puff"],
-        "med_id_patterns": [],
-        "puffs_per_each": 124,
-    },
-    {
-        "label": "Albuterol HFA 6.7 g",
-        "patterns": ["albuterol sulfate hfa", "proventil hfa", "puff"],
-        "med_id_patterns": ["ALBUT108INH6Z7G"],
-        "puffs_per_each": 160,
-    },
-]
-
-
-def return_unit_conversion(row):
-    med_desc = str(row.get("med_desc", "")).lower()
-    med_id = str(row.get("med_id", "")).strip().upper()
-    for conversion in INHALER_PUFF_CONVERSIONS:
-        desc_match = all(pattern in med_desc for pattern in conversion["patterns"])
-        id_match = med_id in conversion["med_id_patterns"]
-        if desc_match or id_match:
-            return conversion["puffs_per_each"], f"{conversion['label']}: {conversion['puffs_per_each']} puffs = 1 each"
-    return 1, "Each"
 
 start_date, end_date = render_sidebar()
 if hasattr(App, "render_page_intro"):
@@ -266,36 +245,12 @@ detail_pyxis_reference_removals = ensure_date_column(detail_pyxis_reference_remo
 # --- Aggregate ---
 
 def safe_group(df, qty_name):
-    if df.empty or not {"med_id", "med_desc", "date", "qty"}.issubset(df.columns):
-        return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
-    work = df.copy()
-    work["med_id"] = work["med_id"].astype(str).str.strip().str.upper()
-    work["qty"] = pd.to_numeric(work["qty"], errors="coerce").fillna(0)
-    if qty_name == "qty_pyxis":
-        conversions = work.apply(return_unit_conversion, axis=1, result_type="expand")
-        work["return_unit_divisor"] = pd.to_numeric(conversions[0], errors="coerce").fillna(1)
-        work["return_unit_note"] = conversions[1]
-        work["compare_qty"] = work["qty"] / work["return_unit_divisor"]
-    else:
-        work["compare_qty"] = work["qty"]
-    return work.groupby(["med_id", "med_desc", "date"])["compare_qty"].sum().reset_index().rename(columns={"compare_qty": qty_name})
+    source = "pyxis" if qty_name == "qty_pyxis" else "carousel"
+    return group_return_compare_qty(df, qty_name, source=source)
 
 
 def conversion_note_group(df):
-    if df.empty or not {"med_id", "date", "qty", "med_desc"}.issubset(df.columns):
-        return pd.DataFrame(columns=["med_id", "date", "unit_note"])
-    work = df.copy()
-    work["med_id"] = work["med_id"].astype(str).str.strip().str.upper()
-    conversions = work.apply(return_unit_conversion, axis=1, result_type="expand")
-    work["unit_note"] = conversions[1]
-    work = work[work["unit_note"].ne("Each")]
-    if work.empty:
-        return pd.DataFrame(columns=["med_id", "date", "unit_note"])
-    return (
-        work.groupby(["med_id", "date"])["unit_note"]
-        .apply(lambda values: "; ".join(sorted(set(values.dropna().astype(str)))))
-        .reset_index()
-    )
+    return group_return_unit_notes(df)
 
 pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
 pharm_sum = safe_group(pharm_return, "qty_pharm")
@@ -424,10 +379,7 @@ if user_unloads.empty:
     st.info("No Pyxis unload rows found for this selection.")
 else:
     user_unloads = user_unloads.sort_values("dt", ascending=False)
-    unload_conversions = user_unloads.apply(return_unit_conversion, axis=1, result_type="expand")
-    user_unloads["return_unit_divisor"] = pd.to_numeric(unload_conversions[0], errors="coerce").fillna(1)
-    user_unloads["return_unit_note"] = unload_conversions[1]
-    user_unloads["compare_qty"] = pd.to_numeric(user_unloads["qty"], errors="coerce").fillna(0) / user_unloads["return_unit_divisor"]
+    user_unloads = add_return_compare_qty(user_unloads, source="pyxis")
     total_user_unload_qty = user_unloads["qty"].sum() if "qty" in user_unloads.columns else 0
     unique_unload_meds = user_unloads["med_id"].nunique() if "med_id" in user_unloads.columns else 0
     active_unload_days = user_unloads["date"].nunique() if "date" in user_unloads.columns else 0
@@ -497,10 +449,7 @@ else:
             st.markdown("### Pyxis Removal Events")
             if not unload_detail.empty:
                 unload_detail["med_id"] = unload_detail["med_id"].astype(str).str.strip().str.upper()
-                drill_conversions = unload_detail.apply(return_unit_conversion, axis=1, result_type="expand")
-                unload_detail["return_unit_divisor"] = pd.to_numeric(drill_conversions[0], errors="coerce").fillna(1)
-                unload_detail["return_unit_note"] = drill_conversions[1]
-                unload_detail["compare_qty"] = pd.to_numeric(unload_detail["qty"], errors="coerce").fillna(0) / unload_detail["return_unit_divisor"]
+                unload_detail = add_return_compare_qty(unload_detail, source="pyxis")
             drill_cols = [c for c in ["dt", "user_name", "device", "qty", "return_unit_note", "compare_qty"] if c in unload_detail.columns]
             st.dataframe(unload_detail[drill_cols], width="stretch")
         with c2:

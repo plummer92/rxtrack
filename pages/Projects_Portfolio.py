@@ -6,6 +6,7 @@ import streamlit as st
 from sqlalchemy import text
 
 import App
+from rxtrack_shared import add_return_compare_qty, group_return_compare_qty
 
 
 st.set_page_config(page_title="Projects Portfolio", page_icon="📁", layout="wide")
@@ -32,7 +33,6 @@ load_data = App.load_data
 UNLOAD_PROJECT_START = date(2025, 12, 15)
 UNLOAD_PROJECT_END = date(2026, 1, 5)
 UNLOAD_PROJECT_USERS = ["Isaac Vizral", "Jaycie Cole", "Lauren Voudrie"]
-FLOVENT_PUFFS_PER_INHALER = 124
 WEEKEND_OLD_MORNING_SHIFT = ("07:00", "15:30")
 WEEKEND_OLD_EVENING_SHIFT = ("13:00", "21:30")
 WEEKEND_NEW_HYBRID_SHIFT = ("10:00", "18:30")
@@ -204,18 +204,6 @@ def is_likely_bulk_package_return(df):
     return qty.isin([60, 90, 100, 500]) | ((qty >= 50) & (qty % 10 == 0))
 
 
-def impact_unit_divisor(row):
-    med_desc = str(row.get("med_desc", "")).lower()
-    if (
-        "fluticasone propionate" in med_desc
-        and "flovent hfa" in med_desc
-        and "puff" in med_desc
-        and ("110 mcg" in med_desc or "220 mcg" in med_desc)
-    ):
-        return FLOVENT_PUFFS_PER_INHALER
-    return 1
-
-
 def matches_project_user(user_name, project_users):
     raw = str(user_name or "").strip().lower()
     if not raw:
@@ -311,15 +299,16 @@ def build_unload_window_impact(
     project_source = pyxis_unload.copy()
     if not project_source.empty:
         project_source["med_id"] = project_source["med_id"].astype(str).str.strip()
-        project_source["qty"] = pd.to_numeric(project_source["qty"], errors="coerce").fillna(0)
-        project_source["impact_unit_divisor"] = project_source.apply(impact_unit_divisor, axis=1)
-        project_source["impact_qty"] = project_source["qty"] / project_source["impact_unit_divisor"]
+        project_source = add_return_compare_qty(project_source, source="pyxis")
+        project_source["impact_unit_divisor"] = project_source["return_unit_divisor"]
+        project_source["impact_qty"] = project_source["compare_qty"]
         returned = (
             project_source.groupby(["med_id", "med_desc"], dropna=False)
             .agg(
                 returned_qty=("qty", "sum"),
                 impact_qty=("impact_qty", "sum"),
                 impact_unit_divisor=("impact_unit_divisor", "max"),
+                impact_unit_note=("return_unit_note", lambda values: "; ".join(sorted(set(values.dropna().astype(str))))),
                 unload_rows=("qty", "size"),
                 users=("user_name", lambda values: ", ".join(sorted({str(v) for v in values if pd.notna(v)}))),
                 devices=("device", lambda values: ", ".join(sorted({str(v) for v in values if pd.notna(v)}))),
@@ -330,7 +319,7 @@ def build_unload_window_impact(
         returned = pd.DataFrame(
             columns=[
                 "med_id", "med_desc", "returned_qty", "impact_qty", "impact_unit_divisor",
-                "unload_rows", "users", "devices"
+                "impact_unit_note", "unload_rows", "users", "devices"
             ]
         )
 
@@ -355,9 +344,9 @@ def build_unload_window_impact(
     returned["carousel_return_qty"] = returned["carousel_return_qty"].fillna(0)
     returned["impact_qty"] = returned["impact_qty"].fillna(returned["returned_qty"])
     returned["impact_unit_divisor"] = returned["impact_unit_divisor"].fillna(1)
-    returned["impact_unit_note"] = returned["impact_unit_divisor"].apply(
-        lambda divisor: f"{int(divisor)} puffs = 1 inhaler" if divisor > 1 else "Each"
-    )
+    if "impact_unit_note" not in returned.columns:
+        returned["impact_unit_note"] = ""
+    returned["impact_unit_note"] = returned["impact_unit_note"].fillna("").replace("", "Each")
     returned["returned_value"] = returned["impact_qty"] * returned["cost_per_unit"]
     returned = returned.sort_values("returned_value", ascending=False)
 
@@ -449,16 +438,8 @@ def build_return_reconciliation_trends(
             pharm_all = pharm_all[~is_likely_bulk_package_return(pharm_all)].copy()
 
     def safe_group(df, qty_name):
-        if df.empty or not {"med_id", "med_desc", "date", "qty"}.issubset(df.columns):
-            return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
-        df = df.copy()
-        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
-        return (
-            df.groupby(["med_id", "med_desc", "date"], dropna=False)["qty"]
-            .sum()
-            .reset_index()
-            .rename(columns={"qty": qty_name})
-        )
+        source = "pyxis" if qty_name == "qty_pyxis" else "carousel"
+        return group_return_compare_qty(df, qty_name, source=source)
 
     pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
     pharm_sum = safe_group(pharm_return, "qty_pharm")

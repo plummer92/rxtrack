@@ -30,6 +30,84 @@ AMBIGUOUS_NAMES = {
     "jessica", "andy", "heather", "michelle", "taylor",
 }
 
+INHALER_PUFF_CONVERSIONS = [
+    {
+        "label": "Flovent HFA",
+        "patterns": ["fluticasone propionate", "flovent hfa", "puff"],
+        "med_id_patterns": [],
+        "puffs_per_each": 124,
+    },
+    {
+        "label": "Albuterol HFA 6.7 g",
+        "patterns": ["albuterol sulfate hfa", "proventil hfa", "puff"],
+        "med_id_patterns": ["ALBUT108INH6Z7G"],
+        "puffs_per_each": 160,
+    },
+]
+
+
+def return_unit_conversion(row):
+    """Return the Pyxis-to-carousel comparison divisor and label for a med row."""
+    med_desc = str(row.get("med_desc", "")).lower()
+    med_id = str(row.get("med_id", "")).strip().upper()
+    for conversion in INHALER_PUFF_CONVERSIONS:
+        desc_match = all(pattern in med_desc for pattern in conversion["patterns"])
+        id_match = med_id in conversion["med_id_patterns"]
+        if desc_match or id_match:
+            puffs = conversion["puffs_per_each"]
+            return puffs, f"{conversion['label']}: {puffs} puffs = 1 each"
+    return 1, "Each"
+
+
+def add_return_compare_qty(df, qty_col="qty", source="pyxis"):
+    """Add normalized comparison quantity for Pyxis-to-carousel return math.
+
+    Pyxis stores some inhalers as puffs, while the carousel stores them as eaches.
+    Only Pyxis-side quantities should be divided; carousel-side rows are already eaches.
+    """
+    if df.empty or qty_col not in df.columns:
+        return df.copy()
+    out = df.copy()
+    out[qty_col] = pd.to_numeric(out[qty_col], errors="coerce").fillna(0)
+    if source == "pyxis":
+        conversions = out.apply(return_unit_conversion, axis=1, result_type="expand")
+        out["return_unit_divisor"] = pd.to_numeric(conversions[0], errors="coerce").fillna(1)
+        out["return_unit_note"] = conversions[1]
+        out["compare_qty"] = out[qty_col] / out["return_unit_divisor"]
+    else:
+        out["return_unit_divisor"] = 1
+        out["return_unit_note"] = "Each"
+        out["compare_qty"] = out[qty_col]
+    return out
+
+
+def group_return_compare_qty(df, qty_name, source="pyxis"):
+    if df.empty or not {"med_id", "med_desc", "date", "qty"}.issubset(df.columns):
+        return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
+    work = add_return_compare_qty(df, source=source)
+    work["med_id"] = work["med_id"].astype(str).str.strip().str.upper()
+    return (
+        work.groupby(["med_id", "med_desc", "date"], dropna=False)["compare_qty"]
+        .sum()
+        .reset_index()
+        .rename(columns={"compare_qty": qty_name})
+    )
+
+
+def group_return_unit_notes(df):
+    if df.empty or not {"med_id", "date", "qty", "med_desc"}.issubset(df.columns):
+        return pd.DataFrame(columns=["med_id", "date", "unit_note"])
+    work = add_return_compare_qty(df, source="pyxis")
+    work["med_id"] = work["med_id"].astype(str).str.strip().str.upper()
+    work = work[work["return_unit_note"].ne("Each")]
+    if work.empty:
+        return pd.DataFrame(columns=["med_id", "date", "unit_note"])
+    return (
+        work.groupby(["med_id", "date"], dropna=False)["return_unit_note"]
+        .apply(lambda values: "; ".join(sorted(set(values.dropna().astype(str)))))
+        .reset_index(name="unit_note")
+    )
+
 
 @st.cache_data(ttl=300)
 def load_admin_users():

@@ -6,6 +6,7 @@ import plotly.express as px
 import streamlit as st
 
 import App
+from rxtrack_shared import group_return_compare_qty, group_return_unit_notes
 
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
@@ -68,14 +69,8 @@ def ensure_date_column(df):
 
 
 def safe_group(df, qty_name):
-    if df.empty or not {"med_id", "med_desc", "date", "qty"}.issubset(df.columns):
-        return pd.DataFrame(columns=["med_id", "med_desc", "date", qty_name])
-    return (
-        df.groupby(["med_id", "med_desc", "date"])["qty"]
-        .sum()
-        .reset_index()
-        .rename(columns={"qty": qty_name})
-    )
+    source = "pyxis" if qty_name == "qty_pyxis" else "carousel"
+    return group_return_compare_qty(df, qty_name, source=source)
 
 
 def compute_reconciliation(df_events, df_pharm, selected_users=None, exclude_controls=False, exclude_dummy=True):
@@ -145,6 +140,7 @@ def compute_reconciliation(df_events, df_pharm, selected_users=None, exclude_con
 
     pyxis_sum = safe_group(pyxis_unload, "qty_pyxis")
     pharm_sum = safe_group(pharm_return, "qty_pharm")
+    unit_notes = group_return_unit_notes(pyxis_unload)
 
     recon = pd.merge(
         pyxis_sum.drop(columns=["med_desc"], errors="ignore"),
@@ -160,6 +156,11 @@ def compute_reconciliation(df_events, df_pharm, selected_users=None, exclude_con
             [pyxis_sum[["med_id", "med_desc"]], pharm_sum[["med_id", "med_desc"]]]
         ).drop_duplicates("med_id")
         recon = recon.merge(med_lookup, on="med_id", how="left")
+        if not unit_notes.empty:
+            recon = recon.merge(unit_notes, on=["med_id", "date"], how="left")
+        else:
+            recon["unit_note"] = ""
+        recon["unit_note"] = recon["unit_note"].fillna("")
         recon["difference"] = recon["qty_pyxis"] - recon["qty_pharm"]
 
     total_unload = recon["qty_pyxis"].sum() if "qty_pyxis" in recon.columns else 0
