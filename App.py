@@ -1725,7 +1725,65 @@ def load_wcc_cartfill_stats(start_date, end_date):
 @st.cache_data(ttl=300)
 def load_overnight_cartfill_orders(start_date, end_date):
     query = """
-        SELECT
+        SELECT * FROM (
+            SELECT
+                'legacy-' || pk AS pk,
+                order_id,
+                order_medication,
+                ready_for_dispense_dt,
+                admin_given_dt,
+                prepared_dt,
+                prep_or_dispense_user,
+                pharmacy,
+                event_date,
+                required_start_dt,
+                prep_lead_hours,
+                hold_hours,
+                is_sjs_cleanroom
+            FROM overnight_iv_cartfill_orders
+            WHERE event_date BETWEEN %s AND %s
+
+            UNION ALL
+
+            SELECT
+                'all-' || pk AS pk,
+                pk AS order_id,
+                order_medication,
+                ready_for_dispense_dt,
+                NULL::timestamp AS admin_given_dt,
+                prepared_dt,
+                prep_or_dispense_user,
+                pharmacy,
+                ready_for_dispense_dt::date AS event_date,
+                ready_for_dispense_dt - INTERVAL '4 hours' AS required_start_dt,
+                EXTRACT(EPOCH FROM (ready_for_dispense_dt - prepared_dt)) / 3600.0 AS prep_lead_hours,
+                NULL::float AS hold_hours,
+                (COALESCE(cartfill_area, '') = 'IV Room' OR UPPER(COALESCE(pharmacy, '')) LIKE '%CLEANROOM%') AS is_sjs_cleanroom
+            FROM wcc_cartfill_stats
+            WHERE ready_for_dispense_dt::date BETWEEN %s AND %s
+        ) cartfill_orders
+        ORDER BY COALESCE(admin_given_dt, ready_for_dispense_dt, prepared_dt)
+    """
+    try:
+        with db_cursor() as (conn, cur):
+            df = pd.read_sql(query, conn, params=(start_date, end_date, start_date, end_date))
+        for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        if "order_id" in df.columns:
+            df["order_id"] = df["order_id"].apply(normalize_identifier_text)
+        dedupe_cols = [
+            c for c in [
+                "order_medication", "ready_for_dispense_dt", "prepared_dt",
+                "prep_or_dispense_user", "pharmacy", "event_date", "is_sjs_cleanroom"
+            ] if c in df.columns
+        ]
+        if dedupe_cols:
+            df = df.drop_duplicates(subset=dedupe_cols, keep="first").copy()
+        return df
+    except Exception:
+        fallback_query = """
+            SELECT
             pk,
             order_id,
             order_medication,
@@ -1743,9 +1801,8 @@ def load_overnight_cartfill_orders(start_date, end_date):
         WHERE event_date BETWEEN %s AND %s
         ORDER BY COALESCE(admin_given_dt, ready_for_dispense_dt, prepared_dt)
     """
-    try:
         with db_cursor() as (conn, cur):
-            df = pd.read_sql(query, conn, params=(start_date, end_date))
+            df = pd.read_sql(fallback_query, conn, params=(start_date, end_date))
         for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -1761,8 +1818,6 @@ def load_overnight_cartfill_orders(start_date, end_date):
         if dedupe_cols:
             df = df.drop_duplicates(subset=dedupe_cols, keep="first").copy()
         return df
-    except Exception:
-        return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
@@ -2484,7 +2539,7 @@ if _is_main:
         u_type = st.selectbox("File Type:", [
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
-            "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model",
+            "IV Room Workload", "IV Room Batching",
             "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
@@ -2507,7 +2562,7 @@ if _is_main:
                 upload_started = time.perf_counter()
                 processed_count = 0
                 # 1. Load raw file
-                if u_type in {"IV Overnight Cartfill Model", "Days Since Last Cycle Count Report", "Packaging Report"}:
+                if u_type in {"Days Since Last Cycle Count Report", "Packaging Report"}:
                     raw = None
                 elif uploaded.name.endswith('.xlsx'):
                     raw = pd.read_excel(uploaded)

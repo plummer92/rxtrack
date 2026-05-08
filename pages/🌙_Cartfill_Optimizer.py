@@ -186,12 +186,12 @@ else:
     _debug_event("Cartfill Optimizer", "fallback_header_used")
     _debug_panel("Cartfill Optimizer", intro_mode="fallback")
 
-with st.spinner("Loading overnight cartfill model..."):
+with st.spinner("Loading cartfill data..."):
     df_orders = load_orders(start_date, end_date)
     df_windows, df_staffing = load_context()
 
 if df_orders.empty:
-    st.info("No overnight cartfill model data found for this date range. Upload an `IV Overnight Cartfill Model` workbook from the sidebar to get started.")
+    st.info("No cartfill data found for this date range. Upload `Cartfill Stats (All Areas)` from the sidebar to get started.")
     st.stop()
 
 orders = df_orders.copy()
