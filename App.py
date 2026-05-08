@@ -168,6 +168,16 @@ def init_db():
             approved_by TEXT,
             secondary_approved_by TEXT
         );""",
+        """CREATE TABLE IF NOT EXISTS wcc_compounding_stats (
+            pk TEXT PRIMARY KEY,
+            component_name TEXT,
+            component_id TEXT,
+            order_name TEXT,
+            administration_dt TIMESTAMP,
+            barcode_status TEXT,
+            source_file TEXT,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        );""",
         """CREATE TABLE IF NOT EXISTS overnight_iv_cartfill_orders (
             pk TEXT PRIMARY KEY,
             order_id TEXT,
@@ -1209,6 +1219,52 @@ def clean_iv_room_report(df):
     return df[required + ["order_dt", "pk"]]
 
 
+def clean_wcc_compounding_stats(df, source_file=""):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    colmap = {
+        "Slices by Medication Component Name": "component_name",
+        "Order Name": "order_name",
+        "Administration Instant": "administration_dt",
+        "Barcode Scanning Compliance Status": "barcode_status",
+    }
+    df.rename(columns=colmap, inplace=True)
+
+    required = list(colmap.values())
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    for col in ["component_name", "order_name", "barcode_status"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+
+    component_id = df["component_name"].str.extract(r"\[([^\]]+)\]", expand=False)
+    df["component_id"] = component_id.fillna("").astype(str).str.strip()
+
+    raw_admin = df["administration_dt"]
+    numeric_admin = pd.to_numeric(raw_admin, errors="coerce")
+    parsed_admin = pd.to_datetime(raw_admin.where(numeric_admin.isna()), errors="coerce")
+    excel_admin = pd.to_datetime(numeric_admin, unit="D", origin="1899-12-30", errors="coerce")
+    df["administration_dt"] = excel_admin.where(numeric_admin.notna(), parsed_admin)
+
+    df = df[df["component_name"].ne("") & df["administration_dt"].notna()].copy()
+    df["source_file"] = source_file or ""
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row.get("component_name") or ""),
+                str(row.get("order_name") or ""),
+                str(row.get("administration_dt") or ""),
+                str(row.get("barcode_status") or ""),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    df = df.astype(object)
+    df = df.where(pd.notna(df), None)
+    return df[["pk", "component_name", "component_id", "order_name", "administration_dt", "barcode_status", "source_file"]]
+
+
 def clean_overnight_cartfill_workbook(uploaded):
     uploaded.seek(0)
     excel = pd.ExcelFile(uploaded)
@@ -1486,6 +1542,33 @@ def load_iv_room_data(start_date, end_date):
         ]
         if dedupe_cols:
             df = df.drop_duplicates(subset=dedupe_cols, keep="first").copy()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_wcc_compounding_stats(start_date, end_date):
+    query = """
+        SELECT
+            pk,
+            component_name,
+            component_id,
+            order_name,
+            administration_dt,
+            barcode_status,
+            source_file,
+            uploaded_at
+        FROM wcc_compounding_stats
+        WHERE administration_dt::date BETWEEN %s AND %s
+        ORDER BY administration_dt
+    """
+    try:
+        with db_cursor() as (conn, cur):
+            df = pd.read_sql(query, conn, params=(start_date, end_date))
+        for col in ["administration_dt", "uploaded_at"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
     except Exception:
         return pd.DataFrame()
@@ -2231,7 +2314,7 @@ if _is_main:
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model",
-            "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
+            "WCC Compounding Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded = st.file_uploader(f"Upload {u_type}", type=upload_types)
@@ -2449,6 +2532,23 @@ if _is_main:
                                      %(secondary_approved_by)s)
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name=u_type)
+                    processed_count = len(clean)
+
+                elif u_type == "WCC Compounding Stats":
+                    clean = clean_wcc_compounding_stats(raw, uploaded.name)
+                    sql = """INSERT INTO wcc_compounding_stats
+                             (pk, component_name, component_id, order_name, administration_dt, barcode_status, source_file)
+                             VALUES (%(pk)s, %(component_name)s, %(component_id)s, %(order_name)s,
+                                     %(administration_dt)s, %(barcode_status)s, %(source_file)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 component_name = EXCLUDED.component_name,
+                                 component_id = EXCLUDED.component_id,
+                                 order_name = EXCLUDED.order_name,
+                                 administration_dt = EXCLUDED.administration_dt,
+                                 barcode_status = EXCLUDED.barcode_status,
+                                 source_file = EXCLUDED.source_file,
+                                 uploaded_at = NOW();"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="WCC Compounding Stats")
                     processed_count = len(clean)
 
                 elif u_type == "IV Overnight Cartfill Model":
