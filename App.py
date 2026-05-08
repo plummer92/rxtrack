@@ -178,6 +178,20 @@ def init_db():
             source_file TEXT,
             uploaded_at TIMESTAMP DEFAULT NOW()
         );""",
+        """CREATE TABLE IF NOT EXISTS wcc_cartfill_stats (
+            pk TEXT PRIMARY KEY,
+            report_start_date DATE,
+            report_end_date DATE,
+            order_medication TEXT,
+            med_id TEXT,
+            ready_for_dispense_dt TIMESTAMP,
+            prepared_dt TIMESTAMP,
+            prep_or_dispense_user TEXT,
+            location TEXT,
+            pharmacy TEXT,
+            source_file TEXT,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        );""",
         """CREATE TABLE IF NOT EXISTS overnight_iv_cartfill_orders (
             pk TEXT PRIMARY KEY,
             order_id TEXT,
@@ -1265,6 +1279,65 @@ def clean_wcc_compounding_stats(df, source_file=""):
     return df[["pk", "component_name", "component_id", "order_name", "administration_dt", "barcode_status", "source_file"]]
 
 
+def parse_excel_datetime_series(series):
+    numeric_values = pd.to_numeric(series, errors="coerce")
+    parsed_values = pd.to_datetime(series.where(numeric_values.isna()), errors="coerce")
+    excel_values = pd.to_datetime(numeric_values, unit="D", origin="1899-12-30", errors="coerce")
+    return excel_values.where(numeric_values.notna(), parsed_values)
+
+
+def clean_wcc_cartfill_stats(df, source_file=""):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    colmap = {
+        "Start Date": "report_start_date",
+        "End Date": "report_end_date",
+        "Order Medication": "order_medication",
+        "Ready for Dispense for Date & Time": "ready_for_dispense_dt",
+        "Prepared Date & Time": "prepared_dt",
+        "Prep or Dispense User": "prep_or_dispense_user",
+        "Location": "location",
+        "Pharmacy": "pharmacy",
+    }
+    df.rename(columns=colmap, inplace=True)
+
+    required = list(colmap.values())
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    for col in ["order_medication", "prep_or_dispense_user", "location", "pharmacy"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+
+    df["med_id"] = df["order_medication"].str.extract(r"\[([^\]]+)\]", expand=False).fillna("").astype(str).str.strip()
+    df["report_start_date"] = parse_excel_datetime_series(df["report_start_date"]).dt.date
+    df["report_end_date"] = parse_excel_datetime_series(df["report_end_date"]).dt.date
+    df["ready_for_dispense_dt"] = parse_excel_datetime_series(df["ready_for_dispense_dt"])
+    df["prepared_dt"] = parse_excel_datetime_series(df["prepared_dt"])
+
+    df = df[df["order_medication"].ne("") & df["ready_for_dispense_dt"].notna()].copy()
+    df["source_file"] = source_file or ""
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row.get("order_medication") or ""),
+                str(row.get("ready_for_dispense_dt") or ""),
+                str(row.get("prepared_dt") or ""),
+                str(row.get("pharmacy") or ""),
+                str(row.get("location") or ""),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    df = df.astype(object)
+    df = df.where(pd.notna(df), None)
+    return df[[
+        "pk", "report_start_date", "report_end_date", "order_medication", "med_id",
+        "ready_for_dispense_dt", "prepared_dt", "prep_or_dispense_user", "location",
+        "pharmacy", "source_file",
+    ]]
+
+
 def clean_overnight_cartfill_workbook(uploaded):
     uploaded.seek(0)
     excel = pd.ExcelFile(uploaded)
@@ -1567,6 +1640,37 @@ def load_wcc_compounding_stats(start_date, end_date):
         with db_cursor() as (conn, cur):
             df = pd.read_sql(query, conn, params=(start_date, end_date))
         for col in ["administration_dt", "uploaded_at"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_wcc_cartfill_stats(start_date, end_date):
+    query = """
+        SELECT
+            pk,
+            report_start_date,
+            report_end_date,
+            order_medication,
+            med_id,
+            ready_for_dispense_dt,
+            prepared_dt,
+            prep_or_dispense_user,
+            location,
+            pharmacy,
+            source_file,
+            uploaded_at
+        FROM wcc_cartfill_stats
+        WHERE ready_for_dispense_dt::date BETWEEN %s AND %s
+        ORDER BY ready_for_dispense_dt
+    """
+    try:
+        with db_cursor() as (conn, cur):
+            df = pd.read_sql(query, conn, params=(start_date, end_date))
+        for col in ["report_start_date", "report_end_date", "ready_for_dispense_dt", "prepared_dt", "uploaded_at"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
@@ -2315,7 +2419,7 @@ if _is_main:
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model",
-            "WCC Compounding Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
+            "WCC Compounding Stats", "WCC Cartfill Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded = st.file_uploader(f"Upload {u_type}", type=upload_types)
@@ -2550,6 +2654,29 @@ if _is_main:
                                  source_file = EXCLUDED.source_file,
                                  uploaded_at = NOW();"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="WCC Compounding Stats")
+                    processed_count = len(clean)
+
+                elif u_type == "WCC Cartfill Stats":
+                    clean = clean_wcc_cartfill_stats(raw, uploaded.name)
+                    sql = """INSERT INTO wcc_cartfill_stats
+                             (pk, report_start_date, report_end_date, order_medication, med_id,
+                              ready_for_dispense_dt, prepared_dt, prep_or_dispense_user, location, pharmacy, source_file)
+                             VALUES (%(pk)s, %(report_start_date)s, %(report_end_date)s, %(order_medication)s,
+                                     %(med_id)s, %(ready_for_dispense_dt)s, %(prepared_dt)s,
+                                     %(prep_or_dispense_user)s, %(location)s, %(pharmacy)s, %(source_file)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 report_start_date = EXCLUDED.report_start_date,
+                                 report_end_date = EXCLUDED.report_end_date,
+                                 order_medication = EXCLUDED.order_medication,
+                                 med_id = EXCLUDED.med_id,
+                                 ready_for_dispense_dt = EXCLUDED.ready_for_dispense_dt,
+                                 prepared_dt = EXCLUDED.prepared_dt,
+                                 prep_or_dispense_user = EXCLUDED.prep_or_dispense_user,
+                                 location = EXCLUDED.location,
+                                 pharmacy = EXCLUDED.pharmacy,
+                                 source_file = EXCLUDED.source_file,
+                                 uploaded_at = NOW();"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="WCC Cartfill Stats")
                     processed_count = len(clean)
 
                 elif u_type == "IV Overnight Cartfill Model":
