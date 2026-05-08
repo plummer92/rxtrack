@@ -186,6 +186,7 @@ def init_db():
             order_medication TEXT,
             med_id TEXT,
             ready_for_dispense_dt TIMESTAMP,
+            admin_given_dt TIMESTAMP,
             prepared_dt TIMESTAMP,
             prep_or_dispense_user TEXT,
             location TEXT,
@@ -292,7 +293,8 @@ def init_db():
         """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;""",
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS schedule_status TEXT;""",
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;""",
-        """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS cartfill_area TEXT;"""
+        """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS cartfill_area TEXT;""",
+        """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS admin_given_dt TIMESTAMP;"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
@@ -1332,6 +1334,7 @@ def clean_wcc_cartfill_stats(df, source_file=""):
         "End Date": "report_end_date",
         "Order Medication": "order_medication",
         "Ready for Dispense for Date & Time": "ready_for_dispense_dt",
+        "Admin Given Date & Time": "admin_given_dt",
         "Prepared Date & Time": "prepared_dt",
         "Prep or Dispense User": "prep_or_dispense_user",
         "Location": "location",
@@ -1351,6 +1354,7 @@ def clean_wcc_cartfill_stats(df, source_file=""):
     df["report_start_date"] = parse_excel_datetime_series(df["report_start_date"]).dt.date
     df["report_end_date"] = parse_excel_datetime_series(df["report_end_date"]).dt.date
     df["ready_for_dispense_dt"] = parse_excel_datetime_series(df["ready_for_dispense_dt"])
+    df["admin_given_dt"] = parse_excel_datetime_series(df["admin_given_dt"])
     df["prepared_dt"] = parse_excel_datetime_series(df["prepared_dt"])
     df["cartfill_area"] = df.apply(
         lambda row: infer_cartfill_area(row.get("order_medication"), row.get("pharmacy"), row.get("location")),
@@ -1375,8 +1379,8 @@ def clean_wcc_cartfill_stats(df, source_file=""):
     df = df.where(pd.notna(df), None)
     return df[[
         "pk", "report_start_date", "report_end_date", "order_medication", "med_id",
-        "ready_for_dispense_dt", "prepared_dt", "prep_or_dispense_user", "location",
-        "pharmacy", "cartfill_area", "source_file",
+        "ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "prep_or_dispense_user",
+        "location", "pharmacy", "cartfill_area", "source_file",
     ]]
 
 
@@ -1700,6 +1704,7 @@ def load_wcc_cartfill_stats(start_date, end_date):
             order_medication,
             med_id,
             ready_for_dispense_dt,
+            admin_given_dt,
             prepared_dt,
             prep_or_dispense_user,
             location,
@@ -1714,7 +1719,7 @@ def load_wcc_cartfill_stats(start_date, end_date):
     try:
         with db_cursor() as (conn, cur):
             df = pd.read_sql(query, conn, params=(start_date, end_date))
-        for col in ["report_start_date", "report_end_date", "ready_for_dispense_dt", "prepared_dt", "uploaded_at"]:
+        for col in ["report_start_date", "report_end_date", "ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "uploaded_at"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
@@ -1750,7 +1755,7 @@ def load_overnight_cartfill_orders(start_date, end_date):
                 pk AS order_id,
                 order_medication,
                 ready_for_dispense_dt,
-                NULL::timestamp AS admin_given_dt,
+                admin_given_dt,
                 prepared_dt,
                 prep_or_dispense_user,
                 pharmacy,
@@ -2782,18 +2787,19 @@ if _is_main:
                     clean = clean_wcc_cartfill_stats(raw, uploaded.name)
                     sql = """INSERT INTO wcc_cartfill_stats
                              (pk, report_start_date, report_end_date, order_medication, med_id,
-                              ready_for_dispense_dt, prepared_dt, prep_or_dispense_user, location, pharmacy,
-                              cartfill_area, source_file)
+                              ready_for_dispense_dt, admin_given_dt, prepared_dt, prep_or_dispense_user,
+                              location, pharmacy, cartfill_area, source_file)
                              VALUES (%(pk)s, %(report_start_date)s, %(report_end_date)s, %(order_medication)s,
-                                     %(med_id)s, %(ready_for_dispense_dt)s, %(prepared_dt)s,
-                                     %(prep_or_dispense_user)s, %(location)s, %(pharmacy)s,
-                                     %(cartfill_area)s, %(source_file)s)
+                                     %(med_id)s, %(ready_for_dispense_dt)s, %(admin_given_dt)s,
+                                     %(prepared_dt)s, %(prep_or_dispense_user)s, %(location)s,
+                                     %(pharmacy)s, %(cartfill_area)s, %(source_file)s)
                              ON CONFLICT (pk) DO UPDATE SET
                                  report_start_date = EXCLUDED.report_start_date,
                                  report_end_date = EXCLUDED.report_end_date,
                                  order_medication = EXCLUDED.order_medication,
                                  med_id = EXCLUDED.med_id,
                                  ready_for_dispense_dt = EXCLUDED.ready_for_dispense_dt,
+                                 admin_given_dt = EXCLUDED.admin_given_dt,
                                  prepared_dt = EXCLUDED.prepared_dt,
                                  prep_or_dispense_user = EXCLUDED.prep_or_dispense_user,
                                  location = EXCLUDED.location,

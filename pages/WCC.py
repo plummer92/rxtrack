@@ -126,15 +126,17 @@ if not df_cartfill.empty:
 
     with st.expander("Raw 12:30 Cartfill Rows"):
         cart_cols = [
-            "ready_for_dispense_dt", "prepared_dt", "prep_or_dispense_user",
+            "ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "prep_or_dispense_user",
             "order_medication", "med_id", "cartfill_area", "location", "pharmacy", "source_file",
         ]
+        cart_cols = [col for col in cart_cols if col in cf_view.columns]
         st.dataframe(
             cf_view.sort_values("ready_for_dispense_dt", ascending=False)[cart_cols],
             width="stretch",
             hide_index=True,
             column_config={
                 "ready_for_dispense_dt": st.column_config.DatetimeColumn("Ready", format="MM/DD/YYYY HH:mm"),
+                "admin_given_dt": st.column_config.DatetimeColumn("Admin Given", format="MM/DD/YYYY HH:mm"),
                 "prepared_dt": st.column_config.DatetimeColumn("Prepared", format="MM/DD/YYYY HH:mm"),
             },
         )
