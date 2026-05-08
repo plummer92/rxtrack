@@ -453,14 +453,15 @@ with ctx_col2:
         staffing["schedule_date"] = pd.to_datetime(staffing["schedule_date"], errors="coerce")
         if staffing["schedule_date"].notna().any():
             staffing = staffing[staffing["schedule_date"].dt.date.between(start_date, end_date)].copy()
-        overnight_staff = staffing[
-            staffing["shift_name"].fillna("").astype(str).str.contains("IV|Central|Narc|Pyxis|Pack", case=False, na=False)
+        shift_text = staffing["shift_name"].fillna("").astype(str)
+        iv_staff = staffing[
+            shift_text.str.contains(r"\bIV\b|Cleanroom|Sterile", case=False, na=False, regex=True)
         ].copy()
-        if overnight_staff.empty:
-            st.info("No IV-adjacent staffing rows match the selected date range.")
+        if iv_staff.empty:
+            st.info("No IV staffing rows match the selected date range.")
         else:
             st.dataframe(
-                overnight_staff[["schedule_date", "day_name", "shift_name", "assigned_staff"]],
+                iv_staff[["schedule_date", "day_name", "shift_name", "assigned_staff"]],
                 width="stretch",
                 hide_index=True,
             )
