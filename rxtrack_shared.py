@@ -1,5 +1,6 @@
 import contextlib
 import hashlib
+import math
 import re
 
 import pandas as pd
@@ -43,6 +44,12 @@ INHALER_PUFF_CONVERSIONS = [
         "med_id_patterns": ["ALBUT108INH6Z7G"],
         "puffs_per_each": 160,
     },
+    {
+        "label": "Dulera",
+        "patterns": ["mometasone-formoterol", "dulera", "puff"],
+        "med_id_patterns": ["MOMET100INH13", "MOMET200INH13", "MOMET200INH8Z8"],
+        "puffs_per_each": 124,
+    },
 ]
 
 
@@ -74,6 +81,14 @@ def add_return_compare_qty(df, qty_col="qty", source="pyxis"):
         out["return_unit_divisor"] = pd.to_numeric(conversions[0], errors="coerce").fillna(1)
         out["return_unit_note"] = conversions[1]
         out["compare_qty"] = out[qty_col] / out["return_unit_divisor"]
+        inhaler_mask = out["return_unit_divisor"].gt(1) & out[qty_col].ne(0)
+        out.loc[inhaler_mask, "compare_qty"] = out.loc[inhaler_mask].apply(
+            lambda row: math.copysign(
+                math.ceil(abs(row[qty_col]) / row["return_unit_divisor"]),
+                row[qty_col],
+            ),
+            axis=1,
+        )
     else:
         out["return_unit_divisor"] = 1
         out["return_unit_note"] = "Each"

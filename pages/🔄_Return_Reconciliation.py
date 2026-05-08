@@ -199,8 +199,13 @@ def is_likely_bulk_package_return(df):
     if df.empty or "qty" not in df.columns:
         return pd.Series(False, index=df.index)
     qty = pd.to_numeric(df["qty"], errors="coerce").fillna(0).abs()
-    # Packaged-med returns often arrive as clean bulk counts rather than Pyxis patient-return quantities.
-    return qty.isin([60, 90, 100, 500]) | ((qty >= 50) & (qty % 10 == 0))
+    dt = pd.to_datetime(df["dt"], errors="coerce") if "dt" in df.columns else pd.Series(pd.NaT, index=df.index)
+    after_buyer_overstock_walk = dt.dt.hour.mul(60).add(dt.dt.minute).ge((14 * 60) + 30)
+    # Packaged-med and buyer-overstock returns can be entered as carousel returns even though
+    # they are not Pyxis-return reconciliation work.
+    clean_bulk_count = qty.isin([60, 90, 100, 500]) | ((qty >= 50) & (qty % 10 == 0))
+    buyer_overstock_return = qty.ge(50) & after_buyer_overstock_walk
+    return clean_bulk_count | buyer_overstock_return
 
 if exclude_dummy:
     pyxis_unload = remove_dummy(pyxis_unload)
@@ -319,7 +324,7 @@ m4.metric("Unmatched Med-Days", len(unmatched))
 m5.metric("Inv Moves (excl.)", int(inv_move_qty))
 m6.metric("Restocks (excl.)", int(restock_qty))
 m7.metric("Eject Events (excl.)", int(eject_qty))
-m8.metric("Bulk Returns (excl.)", int(bulk_package_qty))
+m8.metric("Bulk/Overstock Returns (excl.)", int(bulk_package_qty))
 
 st.divider()
 st.caption("Core reconciliation now starts with Pyxis `Unload` transactions only. Empty return bin, return-bin, and destock rows are shown as reference until the workflow rules are clearer.")
@@ -521,8 +526,8 @@ with st.expander(f"Pyxis Non-Unload Removal Events - Reference Only ({int(refere
             hide_index=True,
         )
 
-with st.expander(f"Likely Packaging Bulk Returns — Excluded from Reconciliation ({int(bulk_package_qty)} units)", expanded=False):
-    st.caption("These are carousel return rows with clean bulk quantities such as 60, 90, 100, or 500. They often represent packaged meds returned through the return function instead of the receiving workflow.")
+with st.expander(f"Likely Bulk/Buyer Overstock Returns — Excluded from Reconciliation ({int(bulk_package_qty)} units)", expanded=False):
+    st.caption("These are carousel return rows with clean bulk quantities or high quantities after 14:30. They often represent packaged meds or buyer overstock-shelf moves entered through return instead of restock/receiving.")
     if bulk_package_returns.empty:
         st.info("No likely packaging bulk returns were excluded for this date range.")
     else:
