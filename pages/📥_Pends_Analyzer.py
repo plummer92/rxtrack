@@ -679,11 +679,11 @@ with tab1:
 
     # Pended meds NOT in carousel master
     st.divider()
-    st.subheader("New Additions — Not in Carousel Master")
-    st.caption("These meds were pended but don't appear in your carousel master mapping. Possible new stock additions or one-offs.")
+    st.subheader("New Additions — Not in Logistics Carousel Master")
+    st.caption("These meds were pended but don't appear in the logistics carousel master mapping. Possible new stock additions or one-offs.")
     new_meds = par_audit[par_audit["in_master"] == False]
     if new_meds.empty:
-        st.success("All pended medications are in the carousel master mapping.")
+        st.success("All pended medications are in the logistics carousel master mapping.")
     else:
         st.dataframe(
             new_meds[[c for c in [
