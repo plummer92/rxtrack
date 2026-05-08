@@ -189,6 +189,7 @@ def init_db():
             prep_or_dispense_user TEXT,
             location TEXT,
             pharmacy TEXT,
+            cartfill_area TEXT,
             source_file TEXT,
             uploaded_at TIMESTAMP DEFAULT NOW()
         );""",
@@ -289,7 +290,8 @@ def init_db():
         );""",
         """ALTER TABLE daily_ops ADD COLUMN IF NOT EXISTS recurring_task_id INTEGER;""",
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS schedule_status TEXT;""",
-        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;"""
+        """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;""",
+        """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS cartfill_area TEXT;"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
@@ -1286,6 +1288,21 @@ def parse_excel_datetime_series(series):
     return excel_values.where(numeric_values.notna(), parsed_values)
 
 
+def infer_cartfill_area(order_medication, pharmacy, location):
+    text = " ".join([
+        str(order_medication or ""),
+        str(pharmacy or ""),
+        str(location or ""),
+    ]).upper()
+    if any(token in text for token in ["WCC", "WOMEN", "WOMENS", "CHILD", "CHILDREN", "CANCER"]):
+        return "WCC"
+    if any(token in text for token in ["CLEANROOM", "IV ROOM", "STERILE"]):
+        return "IV Room"
+    if any(token in text for token in ["CAROUSEL", "CENTRAL PHARMACY", "SJS CENTRAL", "MAIN PHARMACY"]):
+        return "Central Pharmacy"
+    return "Needs Review"
+
+
 def clean_wcc_cartfill_stats(df, source_file=""):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -1314,6 +1331,10 @@ def clean_wcc_cartfill_stats(df, source_file=""):
     df["report_end_date"] = parse_excel_datetime_series(df["report_end_date"]).dt.date
     df["ready_for_dispense_dt"] = parse_excel_datetime_series(df["ready_for_dispense_dt"])
     df["prepared_dt"] = parse_excel_datetime_series(df["prepared_dt"])
+    df["cartfill_area"] = df.apply(
+        lambda row: infer_cartfill_area(row.get("order_medication"), row.get("pharmacy"), row.get("location")),
+        axis=1,
+    )
 
     df = df[df["order_medication"].ne("") & df["ready_for_dispense_dt"].notna()].copy()
     df["source_file"] = source_file or ""
@@ -1334,7 +1355,7 @@ def clean_wcc_cartfill_stats(df, source_file=""):
     return df[[
         "pk", "report_start_date", "report_end_date", "order_medication", "med_id",
         "ready_for_dispense_dt", "prepared_dt", "prep_or_dispense_user", "location",
-        "pharmacy", "source_file",
+        "pharmacy", "cartfill_area", "source_file",
     ]]
 
 
@@ -1649,6 +1670,7 @@ def load_wcc_compounding_stats(start_date, end_date):
 
 @st.cache_data(ttl=300)
 def load_wcc_cartfill_stats(start_date, end_date):
+    init_db()
     query = """
         SELECT
             pk,
@@ -1661,6 +1683,7 @@ def load_wcc_cartfill_stats(start_date, end_date):
             prep_or_dispense_user,
             location,
             pharmacy,
+            COALESCE(cartfill_area, 'Needs Review') AS cartfill_area,
             source_file,
             uploaded_at
         FROM wcc_cartfill_stats
@@ -2419,7 +2442,7 @@ if _is_main:
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching", "IV Overnight Cartfill Model",
-            "WCC Compounding Stats", "WCC Cartfill Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
+            "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded = st.file_uploader(f"Upload {u_type}", type=upload_types)
@@ -2656,14 +2679,16 @@ if _is_main:
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="WCC Compounding Stats")
                     processed_count = len(clean)
 
-                elif u_type == "WCC Cartfill Stats":
+                elif u_type in {"Cartfill Stats (All Areas)", "WCC Cartfill Stats"}:
                     clean = clean_wcc_cartfill_stats(raw, uploaded.name)
                     sql = """INSERT INTO wcc_cartfill_stats
                              (pk, report_start_date, report_end_date, order_medication, med_id,
-                              ready_for_dispense_dt, prepared_dt, prep_or_dispense_user, location, pharmacy, source_file)
+                              ready_for_dispense_dt, prepared_dt, prep_or_dispense_user, location, pharmacy,
+                              cartfill_area, source_file)
                              VALUES (%(pk)s, %(report_start_date)s, %(report_end_date)s, %(order_medication)s,
                                      %(med_id)s, %(ready_for_dispense_dt)s, %(prepared_dt)s,
-                                     %(prep_or_dispense_user)s, %(location)s, %(pharmacy)s, %(source_file)s)
+                                     %(prep_or_dispense_user)s, %(location)s, %(pharmacy)s,
+                                     %(cartfill_area)s, %(source_file)s)
                              ON CONFLICT (pk) DO UPDATE SET
                                  report_start_date = EXCLUDED.report_start_date,
                                  report_end_date = EXCLUDED.report_end_date,
@@ -2674,9 +2699,10 @@ if _is_main:
                                  prep_or_dispense_user = EXCLUDED.prep_or_dispense_user,
                                  location = EXCLUDED.location,
                                  pharmacy = EXCLUDED.pharmacy,
+                                 cartfill_area = EXCLUDED.cartfill_area,
                                  source_file = EXCLUDED.source_file,
                                  uploaded_at = NOW();"""
-                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="WCC Cartfill Stats")
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cartfill Stats")
                     processed_count = len(clean)
 
                 elif u_type == "IV Overnight Cartfill Model":

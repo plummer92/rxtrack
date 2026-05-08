@@ -25,7 +25,8 @@ else:
 
 with st.spinner("Loading WCC data..."):
     df_wcc = App.load_wcc_compounding_stats(start_date, end_date)
-    df_cartfill = App.load_wcc_cartfill_stats(start_date, end_date)
+    load_cartfill = getattr(App, "load_wcc_cartfill_stats", None)
+    df_cartfill = load_cartfill(start_date, end_date) if callable(load_cartfill) else pd.DataFrame()
 
 if df_wcc.empty and df_cartfill.empty:
     st.info("No WCC data found for this date range. Upload `WCC Compounding Stats` or `WCC Cartfill Stats` from the sidebar to get started.")
@@ -42,16 +43,24 @@ if not df_cartfill.empty:
     cartfill["prep_or_dispense_user"] = cartfill["prep_or_dispense_user"].fillna("Unassigned").astype(str).str.strip().replace("", "Unassigned")
     cartfill["location"] = cartfill["location"].fillna("").astype(str).str.strip()
     cartfill["pharmacy"] = cartfill["pharmacy"].fillna("").astype(str).str.strip()
+    if "cartfill_area" not in cartfill.columns:
+        cartfill["cartfill_area"] = "Needs Review"
+    cartfill["cartfill_area"] = cartfill["cartfill_area"].fillna("Needs Review").astype(str).str.strip().replace("", "Needs Review")
     cartfill["is_1230_window"] = cartfill["ready_minute"].between(12 * 60, 13 * 60)
     cartfill["is_prepared"] = cartfill["prepared_dt"].notna()
 
     st.subheader("WCC 12:30 Cartfill")
     cf_view = cartfill.copy()
-    cf1, cf2, cf3 = st.columns(3)
+    cf0, cf1, cf2, cf3 = st.columns(4)
+    area_options = sorted(cf_view["cartfill_area"].dropna().unique().tolist())
+    default_areas = [area for area in ["WCC"] if area in area_options] or area_options
+    selected_areas = cf0.multiselect("Cartfill area", area_options, default=default_areas)
     pharmacy_options = sorted(cf_view["pharmacy"].dropna().unique().tolist())
     selected_pharmacies = cf1.multiselect("Cartfill pharmacy", pharmacy_options, default=pharmacy_options)
     cartfill_search = cf2.text_input("Cartfill med/search")
     only_1230 = cf3.toggle("Only 12:30 fill window", value=True)
+    if selected_areas:
+        cf_view = cf_view[cf_view["cartfill_area"].isin(selected_areas)]
     if selected_pharmacies:
         cf_view = cf_view[cf_view["pharmacy"].isin(selected_pharmacies)]
     if only_1230:
@@ -87,7 +96,7 @@ if not df_cartfill.empty:
             st.plotly_chart(px.bar(by_pharmacy.sort_values("items"), x="items", y="pharmacy", orientation="h"), width="stretch")
 
     med_summary = (
-        cf_view.groupby(["order_medication", "pharmacy"], as_index=False)
+        cf_view.groupby(["order_medication", "cartfill_area", "pharmacy"], as_index=False)
         .agg(
             items=("pk", "count"),
             prepared=("is_prepared", "sum"),
@@ -98,7 +107,7 @@ if not df_cartfill.empty:
     if not med_summary.empty:
         med_summary["unprepared"] = med_summary["items"] - med_summary["prepared"]
     st.markdown("##### 12:30 Cartfill Item Summary")
-    summary_cols = ["order_medication", "pharmacy", "items", "prepared", "unprepared", "first_ready", "last_ready"]
+    summary_cols = ["order_medication", "cartfill_area", "pharmacy", "items", "prepared", "unprepared", "first_ready", "last_ready"]
     if med_summary.empty:
         st.info("No cartfill items match the current filters.")
     else:
@@ -118,7 +127,7 @@ if not df_cartfill.empty:
     with st.expander("Raw 12:30 Cartfill Rows"):
         cart_cols = [
             "ready_for_dispense_dt", "prepared_dt", "prep_or_dispense_user",
-            "order_medication", "med_id", "location", "pharmacy", "source_file",
+            "order_medication", "med_id", "cartfill_area", "location", "pharmacy", "source_file",
         ]
         st.dataframe(
             cf_view.sort_values("ready_for_dispense_dt", ascending=False)[cart_cols],
