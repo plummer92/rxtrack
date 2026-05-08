@@ -1239,32 +1239,52 @@ def clean_iv_room_report(df):
 def clean_wcc_compounding_stats(df, source_file=""):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
-    colmap = {
-        "Slices by Medication Component Name": "component_name",
-        "Order Name": "order_name",
-        "Administration Instant": "administration_dt",
-        "Barcode Scanning Compliance Status": "barcode_status",
-    }
-    df.rename(columns=colmap, inplace=True)
 
-    required = list(colmap.values())
-    for col in required:
-        if col not in df.columns:
-            df[col] = None
+    def _norm_col(value):
+        return re.sub(r"[^a-z0-9]+", "", str(value).lower())
+
+    normalized_cols = {_norm_col(col): col for col in df.columns}
+
+    def _pick_col(*aliases):
+        for alias in aliases:
+            match = normalized_cols.get(_norm_col(alias))
+            if match is not None:
+                return match
+        alias_tokens = [_norm_col(alias) for alias in aliases]
+        for norm_name, original_name in normalized_cols.items():
+            if any(token and token in norm_name for token in alias_tokens):
+                return original_name
+        return None
+
+    component_col = _pick_col("Slices by Medication Component Name", "Medication Component Name", "Component Name")
+    order_col = _pick_col("Order Name", "Order")
+    admin_col = _pick_col("Administration Instant", "Administration Date Time", "Administration Date & Time", "Admin Instant")
+    barcode_col = _pick_col("Barcode Scanning Compliance Status", "Barcode Compliance Status", "Barcode Status")
+
+    if not component_col and len(df.columns) >= 4:
+        component_col, order_col, admin_col, barcode_col = df.columns[:4]
+
+    def _series_or_default(col, default):
+        if col in df.columns:
+            return df[col]
+        return pd.Series([default] * len(df), index=df.index)
+
+    clean_df = pd.DataFrame({
+        "component_name": _series_or_default(component_col, ""),
+        "order_name": _series_or_default(order_col, ""),
+        "administration_dt": _series_or_default(admin_col, None),
+        "barcode_status": _series_or_default(barcode_col, ""),
+    })
 
     for col in ["component_name", "order_name", "barcode_status"]:
-        df[col] = df[col].fillna("").astype(str).str.strip()
+        clean_df[col] = clean_df[col].fillna("").astype(str).str.strip()
 
-    component_id = df["component_name"].str.extract(r"\[([^\]]+)\]", expand=False)
-    df["component_id"] = component_id.fillna("").astype(str).str.strip()
+    component_id = clean_df["component_name"].str.extract(r"\[([^\]]+)\]", expand=False)
+    clean_df["component_id"] = component_id.fillna("").astype(str).str.strip()
 
-    raw_admin = df["administration_dt"]
-    numeric_admin = pd.to_numeric(raw_admin, errors="coerce")
-    parsed_admin = pd.to_datetime(raw_admin.where(numeric_admin.isna()), errors="coerce")
-    excel_admin = pd.to_datetime(numeric_admin, unit="D", origin="1899-12-30", errors="coerce")
-    df["administration_dt"] = excel_admin.where(numeric_admin.notna(), parsed_admin)
+    clean_df["administration_dt"] = parse_excel_datetime_series(clean_df["administration_dt"])
 
-    df = df[df["component_name"].ne("") & df["administration_dt"].notna()].copy()
+    df = clean_df[clean_df["component_name"].ne("") & clean_df["administration_dt"].notna()].copy()
     df["source_file"] = source_file or ""
     df["pk"] = df.apply(
         lambda row: hashlib.sha256(

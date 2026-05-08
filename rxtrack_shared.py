@@ -78,6 +78,8 @@ def execute_statement(sql, params, batch=False, table_name="Data"):
             return payload
 
         params = _normalize_params(params)
+        if batch and not params:
+            raise ValueError(f"No rows were found to upload for {table_name}. Check the selected file type and report columns.")
         with db_cursor() as (conn, cur):
             if batch:
                 execute_batch(cur, sql, params, page_size=5000)
