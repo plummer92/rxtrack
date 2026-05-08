@@ -52,9 +52,10 @@ with st.sidebar:
     st.divider()
     st.subheader("Filters")
     selected_users   = st.multiselect("Filter by User", options=all_users)
-    exclude_controls = st.checkbox("Exclude Controlled Substances")
+    exclude_controls = st.checkbox("Exclude Controlled Substances", value=True)
     exclude_dummy    = st.checkbox("Exclude Dummy Medications", value=True)
     exclude_pat_refs = st.checkbox("Exclude PAT/ref med IDs (9000...)", value=True)
+    exclude_patient_specific_refs = st.checkbox("Exclude patient-specific/ref/cassette descriptions", value=True)
     exclude_bulk_package_returns = st.checkbox("Exclude likely packaging bulk returns", value=True)
 
 # --- Identify Workflow Events ---
@@ -154,6 +155,18 @@ def remove_dummy(df):
     if df.empty or "med_desc" not in df.columns: return df
     return df[~df["med_desc"].astype(str).str.contains("cassette", case=False, na=False)]
 
+def remove_patient_specific_refs(df):
+    if df.empty or "med_desc" not in df.columns:
+        return df
+    med_text = df["med_desc"].fillna("").astype(str)
+    pattern = (
+        r"patient\s*specific|pat\s*specific|"
+        r"patient\s*(?:ref|relat|cass)|pat\s*(?:ref|relat|cass)|"
+        r"\bpat\s*cassette\b|\bpatient\s*cassette\b|"
+        r"\bref\s*(?:relat|related|only)?\b"
+    )
+    return df[~med_text.str.contains(pattern, case=False, regex=True, na=False)]
+
 @st.cache_data(ttl=3600)
 def get_control_ids():
     """Query CW vault med_ids directly — no import cache dependency."""
@@ -214,6 +227,16 @@ if exclude_pat_refs:
     detail_restocks = remove_pat_refs(detail_restocks)
     pyxis_reference_removals = remove_pat_refs(pyxis_reference_removals)
     detail_pyxis_reference_removals = remove_pat_refs(detail_pyxis_reference_removals)
+
+if exclude_patient_specific_refs:
+    pyxis_unload = remove_patient_specific_refs(pyxis_unload)
+    pharm_return = remove_patient_specific_refs(pharm_return)
+    detail_pyxis_unload = remove_patient_specific_refs(detail_pyxis_unload)
+    detail_pharm_return = remove_patient_specific_refs(detail_pharm_return)
+    detail_inv_moves = remove_patient_specific_refs(detail_inv_moves)
+    detail_restocks = remove_patient_specific_refs(detail_restocks)
+    pyxis_reference_removals = remove_patient_specific_refs(pyxis_reference_removals)
+    detail_pyxis_reference_removals = remove_patient_specific_refs(detail_pyxis_reference_removals)
 
 bulk_package_returns = pd.DataFrame()
 if exclude_bulk_package_returns and not pharm_return.empty:
