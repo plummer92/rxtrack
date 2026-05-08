@@ -13,6 +13,7 @@ st.set_page_config(page_title="Cartfill Optimizer", page_icon="🌙", layout="wi
 render_sidebar = App.render_sidebar
 load_orders = App.load_overnight_cartfill_orders
 load_context = App.load_overnight_cartfill_context
+get_cartfill_available_range = getattr(App, "get_cartfill_available_range", lambda: (None, None, 0))
 
 
 CURRENT_WAVES = ["0600", "0900", "1400", "1700", "2000"]
@@ -191,7 +192,15 @@ with st.spinner("Loading cartfill data..."):
     df_windows, df_staffing = load_context()
 
 if df_orders.empty:
-    st.info("No cartfill data found for this date range. Upload `Cartfill Stats (All Areas)` from the sidebar to get started.")
+    available_min, available_max, available_rows = get_cartfill_available_range()
+    if available_min and available_max:
+        st.info(
+            "No cartfill data matched the selected date range. "
+            f"The uploaded cartfill table currently has {available_rows:,} rows from "
+            f"{pd.to_datetime(available_min).date()} through {pd.to_datetime(available_max).date()}."
+        )
+    else:
+        st.info("No cartfill data found. Upload `Cartfill Stats (All Areas)` from the sidebar to get started.")
     st.stop()
 
 orders = df_orders.copy()
