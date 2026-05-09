@@ -57,6 +57,13 @@ with st.sidebar:
     exclude_pat_refs = st.checkbox("Exclude PAT/ref med IDs (9000...)", value=True)
     exclude_patient_specific_refs = st.checkbox("Exclude patient-specific/ref/cassette descriptions", value=True)
     exclude_bulk_package_returns = st.checkbox("Exclude likely packaging bulk returns", value=True)
+    return_match_window_hours = st.number_input(
+        "Return match window after unload (hours)",
+        min_value=1,
+        max_value=48,
+        value=12,
+        step=1,
+    )
 
 # --- Identify Workflow Events ---
 
@@ -207,6 +214,77 @@ def is_likely_bulk_package_return(df):
     buyer_overstock_return = qty.ge(50) & after_buyer_overstock_walk
     return clean_bulk_count | buyer_overstock_return
 
+
+def split_returns_by_unload_timing(return_df, unload_df, match_window_hours=12):
+    if (
+        return_df.empty
+        or unload_df.empty
+        or not {"med_id", "dt"}.issubset(return_df.columns)
+        or not {"med_id", "dt", "date"}.issubset(unload_df.columns)
+    ):
+        return return_df.copy(), pd.DataFrame()
+
+    returns = return_df.copy()
+    returns["dt"] = pd.to_datetime(returns["dt"], errors="coerce")
+    returns["med_id"] = returns["med_id"].astype(str).str.strip().str.upper()
+    unloads = unload_df.copy()
+    unloads["dt"] = pd.to_datetime(unloads["dt"], errors="coerce")
+    unloads["med_id"] = unloads["med_id"].astype(str).str.strip().str.upper()
+    unloads = unloads[unloads["dt"].notna() & unloads["med_id"].ne("")]
+    if unloads.empty:
+        return returns, pd.DataFrame()
+
+    windows = (
+        unloads.groupby(["med_id", "date"], dropna=False)["dt"]
+        .min()
+        .reset_index(name="first_unload_dt")
+    )
+    windows["match_end_dt"] = windows["first_unload_dt"] + pd.to_timedelta(match_window_hours, unit="h")
+    windows_by_med = {
+        med_id: group.sort_values("first_unload_dt").reset_index(drop=True)
+        for med_id, group in windows.groupby("med_id", dropna=False)
+    }
+
+    matched_rows = []
+    excluded_rows = []
+    for _, row in returns.iterrows():
+        row_dt = row.get("dt")
+        med_id = row.get("med_id")
+        med_windows = windows_by_med.get(med_id)
+        if med_windows is None or med_windows.empty or pd.isna(row_dt):
+            matched_rows.append(row)
+            continue
+
+        eligible_windows = med_windows[
+            (row_dt >= med_windows["first_unload_dt"])
+            & (row_dt <= med_windows["match_end_dt"])
+        ]
+        if eligible_windows.empty:
+            excluded = row.copy()
+            next_unload = med_windows[med_windows["first_unload_dt"] > row_dt].head(1)
+            previous_unload = med_windows[med_windows["first_unload_dt"] <= row_dt].tail(1)
+            if not next_unload.empty:
+                excluded["timing_exclusion_reason"] = "Carousel return happened before Pyxis unload"
+                excluded["nearest_unload_dt"] = next_unload.iloc[0]["first_unload_dt"]
+            elif not previous_unload.empty:
+                excluded["timing_exclusion_reason"] = f"Carousel return happened more than {match_window_hours}h after Pyxis unload"
+                excluded["nearest_unload_dt"] = previous_unload.iloc[0]["first_unload_dt"]
+            else:
+                excluded["timing_exclusion_reason"] = "No matching Pyxis unload window"
+                excluded["nearest_unload_dt"] = pd.NaT
+            excluded_rows.append(excluded)
+            continue
+
+        selected_window = eligible_windows.iloc[-1]
+        matched = row.copy()
+        matched["date"] = selected_window["date"]
+        matched["matched_unload_start_dt"] = selected_window["first_unload_dt"]
+        matched_rows.append(matched)
+
+    matched = pd.DataFrame(matched_rows) if matched_rows else returns.iloc[0:0].copy()
+    excluded = pd.DataFrame(excluded_rows) if excluded_rows else returns.iloc[0:0].copy()
+    return matched, excluded
+
 if exclude_dummy:
     pyxis_unload = remove_dummy(pyxis_unload)
     pharm_return = remove_dummy(pharm_return)
@@ -270,6 +348,17 @@ detail_inv_moves    = ensure_date_column(detail_inv_moves)
 detail_restocks     = ensure_date_column(detail_restocks)
 detail_pyxis_reference_removals = ensure_date_column(detail_pyxis_reference_removals)
 
+pharm_return, timing_excluded_returns = split_returns_by_unload_timing(
+    pharm_return,
+    pyxis_unload,
+    return_match_window_hours,
+)
+detail_pharm_return, detail_timing_excluded_returns = split_returns_by_unload_timing(
+    detail_pharm_return,
+    detail_pyxis_unload,
+    return_match_window_hours,
+)
+
 # --- Aggregate ---
 
 def safe_group(df, qty_name):
@@ -315,8 +404,9 @@ restock_qty   = restocks["qty"].sum() if not restocks.empty and "qty" in restock
 eject_qty     = unload_eject["qty"].sum() if not unload_eject.empty and "qty" in unload_eject.columns else 0
 reference_removal_qty = pyxis_reference_removals["qty"].sum() if not pyxis_reference_removals.empty and "qty" in pyxis_reference_removals.columns else 0
 bulk_package_qty = bulk_package_returns["qty"].sum() if not bulk_package_returns.empty and "qty" in bulk_package_returns.columns else 0
+timing_excluded_qty = timing_excluded_returns["qty"].sum() if not timing_excluded_returns.empty and "qty" in timing_excluded_returns.columns else 0
 
-m1, m2, m3, m4, m5, m6, m7, m8 = st.columns(8)
+m1, m2, m3, m4, m5, m6, m7, m8, m9 = st.columns(9)
 m1.metric("Total Pyxis Removal Qty", int(total_unload))
 m2.metric("Total Carousel Return Qty", int(total_return))
 m3.metric("Reconciliation %", f"{recon_pct:.1f}%")
@@ -325,9 +415,10 @@ m5.metric("Inv Moves (excl.)", int(inv_move_qty))
 m6.metric("Restocks (excl.)", int(restock_qty))
 m7.metric("Eject Events (excl.)", int(eject_qty))
 m8.metric("Bulk/Overstock Returns (excl.)", int(bulk_package_qty))
+m9.metric("Early/Late Returns (excl.)", int(timing_excluded_qty))
 
 st.divider()
-st.caption("Core reconciliation now starts with Pyxis `Unload` transactions only. Empty return bin, return-bin, and destock rows are shown as reference until the workflow rules are clearer.")
+st.caption(f"Core reconciliation starts with Pyxis `Unload` transactions only. Carousel returns count only when they occur after the Pyxis unload start within {return_match_window_hours} hours.")
 
 # --- User Return Lookup ---
 
@@ -482,7 +573,11 @@ else:
             st.dataframe(unload_detail[drill_cols], width="stretch")
         with c2:
             st.markdown("### Carousel Return Events")
-            st.dataframe(return_detail[["dt", "user_name", "workflow_type", "qty"]], width="stretch")
+            return_cols = [
+                c for c in ["dt", "matched_unload_start_dt", "user_name", "workflow_type", "qty"]
+                if c in return_detail.columns
+            ]
+            st.dataframe(return_detail[return_cols], width="stretch")
 
 # --- Inventory Moves (reference only, excluded from reconciliation) ---
 
@@ -533,3 +628,27 @@ with st.expander(f"Likely Bulk/Buyer Overstock Returns — Excluded from Reconci
     else:
         cols = [c for c in ["dt", "date", "user_name", "med_id", "med_desc", "qty", "workflow_type", "priority"] if c in bulk_package_returns.columns]
         st.dataframe(bulk_package_returns[cols].sort_values("dt") if "dt" in cols else bulk_package_returns[cols], width="stretch")
+
+with st.expander(f"Early/Late Carousel Returns — Excluded from Reconciliation ({int(timing_excluded_qty)} units)", expanded=False):
+    st.caption(f"These carousel return rows did not happen after a matching Pyxis unload within the {return_match_window_hours}-hour return window.")
+    if detail_timing_excluded_returns.empty:
+        st.info("No carousel returns were excluded by timing for this selection.")
+    else:
+        cols = [
+            c for c in [
+                "dt", "nearest_unload_dt", "timing_exclusion_reason", "date", "user_name",
+                "med_id", "med_desc", "qty", "workflow_type", "priority"
+            ]
+            if c in detail_timing_excluded_returns.columns
+        ]
+        st.dataframe(
+            detail_timing_excluded_returns[cols].sort_values("dt") if "dt" in cols else detail_timing_excluded_returns[cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "dt": st.column_config.DatetimeColumn("Carousel Return Time"),
+                "nearest_unload_dt": st.column_config.DatetimeColumn("Nearest Pyxis Unload"),
+                "timing_exclusion_reason": "Reason",
+                "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+            },
+        )
