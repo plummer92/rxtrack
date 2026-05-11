@@ -93,6 +93,17 @@ def load_drug_names():
             axis=1
         )
         df["is_controlled"] = df["carousel_location"].astype(str).str.startswith("CW")
+        df = (
+            df.sort_values(["med_id", "is_controlled"], ascending=[True, False])
+            .groupby("med_id", as_index=False)
+            .agg(
+                drug_name=("drug_name", "first"),
+                trade_name=("trade_name", "first"),
+                display_name=("display_name", "first"),
+                carousel_location=("carousel_location", "first"),
+                is_controlled=("is_controlled", "max"),
+            )
+        )
         return df[["med_id", "drug_name", "trade_name", "display_name",
                    "carousel_location", "is_controlled"]]
     except Exception as e:
