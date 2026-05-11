@@ -595,19 +595,22 @@ def classify_boomerang_source(event_type):
     return "Other"
 
 
-def add_prior_pend_context(par_events, pend_history, reload_history):
+def add_prior_pend_context(par_events, pend_history, reload_history, unload_history):
     if par_events.empty:
         return par_events
 
     enriched = par_events.copy()
     for col in [
         "prev_min", "prev_max", "delta_min", "delta_max", "last_loaded_qty",
-        "hours_since_last_load",
+        "hours_since_last_load", "last_unloaded_qty", "hours_since_last_unload",
     ]:
         enriched[col] = np.nan
-    for col in ["prev_pend_dt", "last_loaded_dt"]:
+    for col in ["prev_pend_dt", "last_loaded_dt", "last_unloaded_dt"]:
         enriched[col] = pd.NaT
-    for col in ["prev_pend_user", "last_loaded_user", "last_loaded_event_type"]:
+    for col in [
+        "prev_pend_user", "last_loaded_user", "last_loaded_event_type",
+        "last_unloaded_user", "last_unloaded_event_type",
+    ]:
         enriched[col] = ""
 
     pend_work = pend_history.copy() if not pend_history.empty else pd.DataFrame()
@@ -623,6 +626,13 @@ def add_prior_pend_context(par_events, pend_history, reload_history):
     reload_work = reload_history.copy() if not reload_history.empty else pd.DataFrame()
     if not reload_work.empty:
         reload_work = reload_work.drop_duplicates(
+            subset=["dt", "user_name", "device", "med_id", "event_type", "qty"],
+            keep="first",
+        ).sort_values("dt")
+
+    unload_work = unload_history.copy() if not unload_history.empty else pd.DataFrame()
+    if not unload_work.empty:
+        unload_work = unload_work.drop_duplicates(
             subset=["dt", "user_name", "device", "med_id", "event_type", "qty"],
             keep="first",
         ).sort_values("dt")
@@ -658,10 +668,26 @@ def add_prior_pend_context(par_events, pend_history, reload_history):
                 enriched.at[idx, "last_loaded_event_type"] = str(prior_load.get("event_type") or "")
                 enriched.at[idx, "last_loaded_qty"] = prior_load.get("qty", np.nan)
 
+        if not unload_work.empty and pd.notna(event_dt):
+            prior_unloads = unload_work[
+                unload_work["med_id"].eq(med_id) &
+                unload_work["device"].eq(device) &
+                unload_work["dt"].lt(event_dt)
+            ]
+            if not prior_unloads.empty:
+                prior_unload = prior_unloads.iloc[-1]
+                enriched.at[idx, "last_unloaded_dt"] = prior_unload.get("dt", pd.NaT)
+                enriched.at[idx, "last_unloaded_user"] = str(prior_unload.get("user_name") or "")
+                enriched.at[idx, "last_unloaded_event_type"] = str(prior_unload.get("event_type") or "")
+                enriched.at[idx, "last_unloaded_qty"] = prior_unload.get("qty", np.nan)
+
     enriched["delta_min"] = enriched["min_qty"] - enriched["prev_min"]
     enriched["delta_max"] = enriched["max_qty"] - enriched["prev_max"]
     enriched["hours_since_last_load"] = (
         enriched["dt"] - enriched["last_loaded_dt"]
+    ).dt.total_seconds().div(3600)
+    enriched["hours_since_last_unload"] = (
+        enriched["dt"] - enriched["last_unloaded_dt"]
     ).dt.total_seconds().div(3600)
     return enriched
 
@@ -1571,7 +1597,7 @@ with tab7:
                 .sort_values(["med_id", "device", "dt"])
                 .copy()
             )
-            par_events = add_prior_pend_context(par_events, df_hist, df_reloads)
+            par_events = add_prior_pend_context(par_events, df_hist, df_reloads, df_unloads)
 
             # Summary metrics
             total_changes  = len(par_events)
@@ -1612,7 +1638,9 @@ with tab7:
                 "prev_min", "prev_max", "delta_min", "delta_max",
                 "prev_pend_dt", "prev_pend_user",
                 "last_loaded_dt", "hours_since_last_load", "last_loaded_qty",
-                "last_loaded_user", "last_loaded_event_type", "is_standard"
+                "last_loaded_user", "last_loaded_event_type",
+                "last_unloaded_dt", "hours_since_last_unload", "last_unloaded_qty",
+                "last_unloaded_user", "last_unloaded_event_type", "is_standard"
             ] if c in view.columns]
 
             st.dataframe(
@@ -1634,6 +1662,11 @@ with tab7:
                     "last_loaded_qty": st.column_config.NumberColumn("Last Load Qty", format="%.0f"),
                     "last_loaded_user": st.column_config.TextColumn("Last Load User"),
                     "last_loaded_event_type": st.column_config.TextColumn("Last Load Event"),
+                    "last_unloaded_dt": st.column_config.DatetimeColumn("Last Unloaded", format="MM/DD/YY HH:mm"),
+                    "hours_since_last_unload": st.column_config.NumberColumn("Hours Since Unload", format="%.1f"),
+                    "last_unloaded_qty": st.column_config.NumberColumn("Last Unload Qty", format="%.0f"),
+                    "last_unloaded_user": st.column_config.TextColumn("Last Unload User"),
+                    "last_unloaded_event_type": st.column_config.TextColumn("Last Unload Event"),
                     "is_standard": st.column_config.CheckboxColumn("Standard"),
                 }
             )
