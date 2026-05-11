@@ -632,6 +632,9 @@ def add_prior_pend_context(par_events, pend_history, reload_history, unload_hist
 
     unload_work = unload_history.copy() if not unload_history.empty else pd.DataFrame()
     if not unload_work.empty:
+        unload_work = unload_work[
+            ~unload_work["event_type"].astype(str).str.contains("empty|return bin", case=False, na=False)
+        ]
         unload_work = unload_work.drop_duplicates(
             subset=["dt", "user_name", "device", "med_id", "event_type", "qty"],
             keep="first",
