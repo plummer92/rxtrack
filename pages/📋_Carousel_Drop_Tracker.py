@@ -713,6 +713,104 @@ def build_window_trend_df(date_values):
     return pd.DataFrame(trend_rows)
 
 
+@st.cache_data(ttl=300)
+def build_tech_pull_sessions(date_values):
+    session_rows = []
+    for sel_day in date_values:
+        pulls = load_pyxis_pulls(sel_day)
+        if pulls.empty:
+            continue
+
+        for drop in get_schedule(sel_day):
+            start_min = drop["win_start"][0] * 60 + drop["win_start"][1]
+            end_min = drop["win_end"][0] * 60 + drop["win_end"][1]
+            pull_win = _time_mask(pulls, start_min, end_min)
+            if pull_win.empty:
+                continue
+
+            grouped = (
+                pull_win
+                .sort_values("dt")
+                .groupby("user_name", dropna=False)
+                .agg(
+                    first_pull=("dt", "min"),
+                    last_pull=("dt", "max"),
+                    pull_lines=("pk", "count"),
+                    pull_qty=("qty", "sum"),
+                    devices=("destination", lambda s: ", ".join(sorted(set(s.dropna().astype(str))))),
+                    device_count=("destination", "nunique"),
+                )
+                .reset_index()
+            )
+            grouped["Date"] = sel_day
+            grouped["Drop"] = drop["label"]
+            grouped["Scheduled"] = drop["time"]
+            grouped["span_minutes"] = (
+                grouped["last_pull"] - grouped["first_pull"]
+            ).dt.total_seconds().div(60).clip(lower=0)
+            grouped["rate_minutes"] = grouped["span_minutes"].where(
+                grouped["span_minutes"] >= 1,
+                1,
+            )
+            grouped["single_line_session"] = grouped["pull_lines"].eq(1)
+            session_rows.append(grouped)
+
+    if not session_rows:
+        return pd.DataFrame()
+    return pd.concat(session_rows, ignore_index=True)
+
+
+def summarize_tech_pull_baseline(tech_sessions, min_pull_lines):
+    if tech_sessions.empty:
+        return pd.DataFrame(), np.nan
+
+    summary = (
+        tech_sessions
+        .groupby("user_name", dropna=False)
+        .agg(
+            pull_sessions=("Drop", "count"),
+            pull_days=("Date", "nunique"),
+            pull_lines=("pull_lines", "sum"),
+            pull_qty=("pull_qty", "sum"),
+            device_count=("device_count", "sum"),
+            first_pull=("first_pull", "min"),
+            last_pull=("last_pull", "max"),
+            total_span_minutes=("span_minutes", "sum"),
+            rate_minutes=("rate_minutes", "sum"),
+            single_line_sessions=("single_line_session", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"user_name": "Tech"})
+    )
+    summary = summary[summary["pull_lines"] >= min_pull_lines].copy()
+    if summary.empty:
+        return summary, np.nan
+
+    summary["avg_lines_per_session"] = summary["pull_lines"] / summary["pull_sessions"]
+    summary["minutes_per_line"] = summary["rate_minutes"] / summary["pull_lines"]
+    summary["lines_per_hour"] = np.where(
+        summary["rate_minutes"] > 0,
+        summary["pull_lines"] / summary["rate_minutes"] * 60,
+        np.nan,
+    )
+    baseline = summary["minutes_per_line"].median()
+    summary["baseline_delta_minutes_per_line"] = summary["minutes_per_line"] - baseline
+    summary["baseline_delta_pct"] = np.where(
+        baseline > 0,
+        summary["baseline_delta_minutes_per_line"] / baseline * 100,
+        np.nan,
+    )
+    summary["coaching_signal"] = np.select(
+        [
+            summary["baseline_delta_pct"] <= -20,
+            summary["baseline_delta_pct"] >= 20,
+        ],
+        ["Faster than baseline", "Slower than baseline"],
+        default="Typical range",
+    )
+    return summary.sort_values("minutes_per_line"), baseline
+
+
 drop_summaries = []
 drop_details = {}
 drop_pull_windows = {}
@@ -726,6 +824,7 @@ for drop in schedule:
 
 summary_df = pd.DataFrame(drop_summaries)
 trend_df = build_window_trend_df(tuple(available_dates))
+tech_pull_sessions = build_tech_pull_sessions(tuple(available_dates))
 
 st.info(
     "This stripped-down view answers two questions first: how much pull demand sits on each drop, "
@@ -750,7 +849,13 @@ k4.metric("Avg Pull Completion", _format_duration(avg_completion))
 if summary_df.empty or day_pull_lines == 0:
     st.warning("No pull activity was found for this date in Carousel Drop Tracker.")
 else:
-    overview_tab, trend_tab, detail_tab, raw_tab = st.tabs(["Drop Overview", "Across Days", "Device Breakdown", "Raw Activity"])
+    overview_tab, trend_tab, tech_tab, detail_tab, raw_tab = st.tabs([
+        "Drop Overview",
+        "Across Days",
+        "Tech Pull Baseline",
+        "Device Breakdown",
+        "Raw Activity",
+    ])
 
     with overview_tab:
         st.markdown("### Drop Overview")
@@ -919,6 +1024,153 @@ else:
                 "Median Across Window",
                 f"{median_value:,.0f}" if selected_metric_label in {"Pull Demand", "Pull Lines"} else _format_duration(median_value),
             )
+
+    with tech_tab:
+        st.markdown("### Tech Pull Baseline")
+        st.caption("Compares Pyxis pull work by technician using pull lines per minute inside the scheduled drop windows.")
+
+        if tech_pull_sessions.empty:
+            st.info("No technician pull sessions were found in the selected sidebar window.")
+        else:
+            b1, b2, b3 = st.columns([1, 1, 2])
+            min_pull_lines = b1.number_input(
+                "Minimum pull lines",
+                min_value=1,
+                max_value=500,
+                value=10,
+                step=1,
+                key="tech_pull_baseline_min_lines",
+            )
+            drop_options = ["All Drops"] + sorted(tech_pull_sessions["Drop"].dropna().unique().tolist())
+            selected_baseline_drop = b2.selectbox(
+                "Drop",
+                options=drop_options,
+                key="tech_pull_baseline_drop",
+            )
+            b3.caption(
+                "The threshold keeps tiny samples out of coaching comparisons. Single-line pull sessions count as one estimated active minute for rate math."
+            )
+
+            baseline_sessions = tech_pull_sessions.copy()
+            if selected_baseline_drop != "All Drops":
+                baseline_sessions = baseline_sessions[baseline_sessions["Drop"].eq(selected_baseline_drop)].copy()
+
+            tech_summary, baseline_minutes_per_line = summarize_tech_pull_baseline(
+                baseline_sessions,
+                int(min_pull_lines),
+            )
+
+            if tech_summary.empty:
+                st.warning("No technicians met the current minimum sample threshold.")
+            else:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Techs Compared", f"{len(tech_summary):,}")
+                c2.metric("Baseline Min / Line", f"{baseline_minutes_per_line:.2f}")
+                c3.metric("Total Pull Lines", f"{int(tech_summary['pull_lines'].sum()):,}")
+                c4.metric("Median Lines / Hour", f"{tech_summary['lines_per_hour'].median():.1f}")
+
+                display = tech_summary.copy()
+                display["Avg Span"] = display["total_span_minutes"].div(display["pull_sessions"]).apply(_format_duration)
+                display["First Pull"] = display["first_pull"].apply(_format_clock)
+                display["Last Pull"] = display["last_pull"].apply(_format_clock)
+                display["Baseline Delta"] = display["baseline_delta_pct"].map(lambda value: f"{value:+.0f}%" if pd.notna(value) else "-")
+                display = display[
+                    [
+                        "Tech",
+                        "coaching_signal",
+                        "pull_sessions",
+                        "pull_days",
+                        "pull_lines",
+                        "pull_qty",
+                        "avg_lines_per_session",
+                        "minutes_per_line",
+                        "lines_per_hour",
+                        "Baseline Delta",
+                        "Avg Span",
+                        "single_line_sessions",
+                        "First Pull",
+                        "Last Pull",
+                    ]
+                ].rename(
+                    columns={
+                        "coaching_signal": "Signal",
+                        "pull_sessions": "Pull Sessions",
+                        "pull_days": "Days",
+                        "pull_lines": "Pull Lines",
+                        "pull_qty": "Pull Qty",
+                        "avg_lines_per_session": "Avg Lines / Session",
+                        "minutes_per_line": "Min / Line",
+                        "lines_per_hour": "Lines / Hour",
+                        "single_line_sessions": "Single-Line Sessions",
+                    }
+                )
+                st.dataframe(
+                    display,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "Pull Qty": st.column_config.NumberColumn("Pull Qty", format="%.0f"),
+                        "Avg Lines / Session": st.column_config.NumberColumn("Avg Lines / Session", format="%.1f"),
+                        "Min / Line": st.column_config.NumberColumn("Min / Line", format="%.2f"),
+                        "Lines / Hour": st.column_config.NumberColumn("Lines / Hour", format="%.1f"),
+                    },
+                )
+
+                chart_df = tech_summary.sort_values("lines_per_hour", ascending=True)
+                fig = px.bar(
+                    chart_df,
+                    x="lines_per_hour",
+                    y="Tech",
+                    orientation="h",
+                    color="coaching_signal",
+                    text=chart_df["lines_per_hour"].map(lambda value: f"{value:.1f}"),
+                    labels={"lines_per_hour": "Lines / Hour", "Tech": "", "coaching_signal": "Signal"},
+                    color_discrete_map={
+                        "Faster than baseline": "#22c55e",
+                        "Typical range": "#3b82f6",
+                        "Slower than baseline": "#ef4444",
+                    },
+                )
+                fig.update_traces(textposition="outside")
+                fig.update_layout(margin=dict(l=0, r=40, t=20, b=0), legend=dict(orientation="h", y=1.08))
+                st.plotly_chart(fig, width="stretch")
+
+                with st.expander("Review individual pull sessions", expanded=False):
+                    session_display = baseline_sessions.sort_values(["Date", "Drop", "user_name", "first_pull"]).copy()
+                    session_display["Date"] = pd.to_datetime(session_display["Date"]).dt.strftime("%m/%d/%Y")
+                    session_display["First Pull"] = session_display["first_pull"].apply(_format_clock)
+                    session_display["Last Pull"] = session_display["last_pull"].apply(_format_clock)
+                    session_display["Pull Span"] = session_display["span_minutes"].apply(_format_duration)
+                    session_display = session_display[
+                        [
+                            "Date",
+                            "Drop",
+                            "user_name",
+                            "pull_lines",
+                            "pull_qty",
+                            "device_count",
+                            "First Pull",
+                            "Last Pull",
+                            "Pull Span",
+                            "devices",
+                        ]
+                    ].rename(
+                        columns={
+                            "user_name": "Tech",
+                            "pull_lines": "Pull Lines",
+                            "pull_qty": "Pull Qty",
+                            "device_count": "Devices",
+                            "devices": "Device List",
+                        }
+                    )
+                    st.dataframe(
+                        session_display,
+                        hide_index=True,
+                        width="stretch",
+                        column_config={
+                            "Pull Qty": st.column_config.NumberColumn("Pull Qty", format="%.0f"),
+                        },
+                    )
 
     with detail_tab:
         st.markdown("### Device Breakdown")
