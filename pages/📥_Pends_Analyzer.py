@@ -595,6 +595,77 @@ def classify_boomerang_source(event_type):
     return "Other"
 
 
+def add_prior_pend_context(par_events, pend_history, reload_history):
+    if par_events.empty:
+        return par_events
+
+    enriched = par_events.copy()
+    for col in [
+        "prev_min", "prev_max", "delta_min", "delta_max", "last_loaded_qty",
+        "hours_since_last_load",
+    ]:
+        enriched[col] = np.nan
+    for col in ["prev_pend_dt", "last_loaded_dt"]:
+        enriched[col] = pd.NaT
+    for col in ["prev_pend_user", "last_loaded_user", "last_loaded_event_type"]:
+        enriched[col] = ""
+
+    pend_work = pend_history.copy() if not pend_history.empty else pd.DataFrame()
+    if not pend_work.empty:
+        pend_work = pend_work[
+            pend_work["min_qty"].notna() | pend_work["max_qty"].notna()
+        ].drop_duplicates(
+            subset=["dt", "user_name", "device", "med_id", "min_qty", "max_qty", "is_standard"],
+            keep="first",
+        )
+        pend_work = pend_work.sort_values("dt")
+
+    reload_work = reload_history.copy() if not reload_history.empty else pd.DataFrame()
+    if not reload_work.empty:
+        reload_work = reload_work.drop_duplicates(
+            subset=["dt", "user_name", "device", "med_id", "event_type", "qty"],
+            keep="first",
+        ).sort_values("dt")
+
+    for idx, row in enriched.iterrows():
+        med_id = row["med_id"]
+        device = row["device"]
+        event_dt = row["dt"]
+
+        if not pend_work.empty and pd.notna(event_dt):
+            prior_pends = pend_work[
+                pend_work["med_id"].eq(med_id) &
+                pend_work["device"].eq(device) &
+                pend_work["dt"].lt(event_dt)
+            ]
+            if not prior_pends.empty:
+                prior = prior_pends.iloc[-1]
+                enriched.at[idx, "prev_min"] = prior.get("min_qty", np.nan)
+                enriched.at[idx, "prev_max"] = prior.get("max_qty", np.nan)
+                enriched.at[idx, "prev_pend_dt"] = prior.get("dt", pd.NaT)
+                enriched.at[idx, "prev_pend_user"] = str(prior.get("user_name") or "")
+
+        if not reload_work.empty and pd.notna(event_dt):
+            prior_loads = reload_work[
+                reload_work["med_id"].eq(med_id) &
+                reload_work["device"].eq(device) &
+                reload_work["dt"].lt(event_dt)
+            ]
+            if not prior_loads.empty:
+                prior_load = prior_loads.iloc[-1]
+                enriched.at[idx, "last_loaded_dt"] = prior_load.get("dt", pd.NaT)
+                enriched.at[idx, "last_loaded_user"] = str(prior_load.get("user_name") or "")
+                enriched.at[idx, "last_loaded_event_type"] = str(prior_load.get("event_type") or "")
+                enriched.at[idx, "last_loaded_qty"] = prior_load.get("qty", np.nan)
+
+    enriched["delta_min"] = enriched["min_qty"] - enriched["prev_min"]
+    enriched["delta_max"] = enriched["max_qty"] - enriched["prev_max"]
+    enriched["hours_since_last_load"] = (
+        enriched["dt"] - enriched["last_loaded_dt"]
+    ).dt.total_seconds().div(3600)
+    return enriched
+
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📋 Par Audit",
     "👤 By User",
@@ -1488,13 +1559,19 @@ with tab7:
         if par_events.empty:
             st.info("No par change events found in this window.")
         else:
-            par_events = par_events.sort_values(["med_id", "device", "dt"])
-
-            # Compute deltas per med+device series
-            par_events["prev_min"] = par_events.groupby(["med_id", "device"])["min_qty"].shift(1)
-            par_events["prev_max"] = par_events.groupby(["med_id", "device"])["max_qty"].shift(1)
-            par_events["delta_min"] = par_events["min_qty"] - par_events["prev_min"]
-            par_events["delta_max"] = par_events["max_qty"] - par_events["prev_max"]
+            par_events = (
+                par_events
+                .drop_duplicates(
+                    subset=[
+                        "dt", "user_name", "device", "med_id", "location",
+                        "action_type", "min_qty", "max_qty", "is_standard",
+                    ],
+                    keep="first",
+                )
+                .sort_values(["med_id", "device", "dt"])
+                .copy()
+            )
+            par_events = add_prior_pend_context(par_events, df_hist, df_reloads)
 
             # Summary metrics
             total_changes  = len(par_events)
@@ -1532,7 +1609,10 @@ with tab7:
             show_cols = [c for c in [
                 "dt", "user_name", "device", "med_id", "location",
                 "action_type", "min_qty", "max_qty",
-                "prev_min", "prev_max", "delta_min", "delta_max", "is_standard"
+                "prev_min", "prev_max", "delta_min", "delta_max",
+                "prev_pend_dt", "prev_pend_user",
+                "last_loaded_dt", "hours_since_last_load", "last_loaded_qty",
+                "last_loaded_user", "last_loaded_event_type", "is_standard"
             ] if c in view.columns]
 
             st.dataframe(
@@ -1547,6 +1627,13 @@ with tab7:
                     "prev_max":    st.column_config.NumberColumn("Prev Max",     format="%.0f"),
                     "delta_min":   st.column_config.NumberColumn("Δ Min",        format="%+.0f"),
                     "delta_max":   st.column_config.NumberColumn("Δ Max",        format="%+.0f"),
+                    "prev_pend_dt": st.column_config.DatetimeColumn("Prev Par Time", format="MM/DD/YY HH:mm"),
+                    "prev_pend_user": st.column_config.TextColumn("Prev Par User"),
+                    "last_loaded_dt": st.column_config.DatetimeColumn("Last Loaded", format="MM/DD/YY HH:mm"),
+                    "hours_since_last_load": st.column_config.NumberColumn("Hours Since Load", format="%.1f"),
+                    "last_loaded_qty": st.column_config.NumberColumn("Last Load Qty", format="%.0f"),
+                    "last_loaded_user": st.column_config.TextColumn("Last Load User"),
+                    "last_loaded_event_type": st.column_config.TextColumn("Last Load Event"),
                     "is_standard": st.column_config.CheckboxColumn("Standard"),
                 }
             )
