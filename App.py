@@ -1665,6 +1665,98 @@ def summarize_zero_verify_events(zero_events):
 
 
 @st.cache_data(ttl=300)
+def load_zero_verify_refill_gaps(start_date, end_date, lookback_days=60):
+    lookback_start = start_date - timedelta(days=lookback_days)
+    sql = text("""
+        SELECT
+            z.pk,
+            z.dt,
+            z.user_name,
+            z.device,
+            z.med_id,
+            z.med_desc,
+            z.event_type,
+            z.qty,
+            z.beginning_qty,
+            z.ending_qty,
+            z.discrepancy_qty,
+            r.dt AS prior_refill_dt,
+            r.user_name AS prior_refill_user,
+            r.event_type AS prior_refill_event_type,
+            r.qty AS prior_refill_qty,
+            EXTRACT(EPOCH FROM (z.dt - r.dt)) / 3600.0 AS hours_since_refill
+        FROM events z
+        LEFT JOIN LATERAL (
+            SELECT dt, user_name, event_type, qty
+            FROM events r
+            WHERE r.dt::date BETWEEN :lookback_start AND :end_date
+              AND r.dt < z.dt
+              AND COALESCE(r.device, '') = COALESCE(z.device, '')
+              AND COALESCE(r.med_id, '') = COALESCE(z.med_id, '')
+              AND r.event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
+              AND r.event_type NOT ILIKE '%cancel%'
+              AND r.event_type NOT ILIKE '%unload%'
+              AND r.event_type NOT ILIKE '%empty%'
+            ORDER BY r.dt DESC
+            LIMIT 1
+        ) r ON TRUE
+        WHERE z.dt::date BETWEEN :start_date AND :end_date
+          AND z.event_type ILIKE '%verify%'
+          AND COALESCE(z.qty, 0) = 0
+        ORDER BY z.dt DESC
+    """)
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={
+                    "lookback_start": str(lookback_start),
+                    "start_date": str(start_date),
+                    "end_date": str(end_date),
+                },
+            )
+        if df.empty:
+            return df
+        for col in ["dt", "prior_refill_dt"]:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+        for col in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty", "prior_refill_qty", "hours_since_refill"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        for col in ["user_name", "device", "med_id", "med_desc", "event_type", "prior_refill_user", "prior_refill_event_type"]:
+            if col in df.columns:
+                df[col] = df[col].fillna("").astype(str).str.strip()
+        return df
+    except Exception as exc:
+        st.warning(f"Could not load zero-verify refill gaps: {exc}")
+        return pd.DataFrame()
+
+
+def summarize_zero_verify_refill_gaps(zero_gap_events):
+    if zero_gap_events.empty:
+        return pd.DataFrame()
+
+    summary = (
+        zero_gap_events
+        .sort_values("dt")
+        .groupby(["device", "med_id", "med_desc"], dropna=False)
+        .agg(
+            zero_verifies=("pk", "count"),
+            first_seen=("dt", "min"),
+            last_seen=("dt", "max"),
+            avg_hours_since_refill=("hours_since_refill", "mean"),
+            median_hours_since_refill=("hours_since_refill", "median"),
+            last_prior_refill=("prior_refill_dt", "max"),
+            verify_users=("user_name", lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v)}))),
+            prior_refill_users=("prior_refill_user", lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v)}))),
+        )
+        .reset_index()
+        .sort_values(["last_seen", "zero_verifies"], ascending=[False, False])
+    )
+    return summary
+
+
+@st.cache_data(ttl=300)
 def load_iv_room_data(start_date, end_date):
     query = """
         SELECT
@@ -2975,8 +3067,9 @@ if _is_main:
             ]
             # Everything except verify (for total tx count)
             real_tx  = ev[~ev["_etype"].str.contains("verify", na=False)]
-            zero_verify_events = get_zero_verify_events(df_events)
-            zero_verify_summary = summarize_zero_verify_events(zero_verify_events)
+            zero_verify_events = load_zero_verify_refill_gaps(start_date, end_date)
+            zero_verify_summary = summarize_zero_verify_refill_gaps(zero_verify_events)
+            avg_zero_refill_gap = zero_verify_events["hours_since_refill"].dropna().mean() if not zero_verify_events.empty else np.nan
 
             session_stats = ev.groupby("session_id").agg(total_time=("machine_time_sec", "sum"))
             avg_time      = session_stats["total_time"].mean()
@@ -2993,11 +3086,15 @@ if _is_main:
 
             if not zero_verify_events.empty:
                 st.markdown("### Zero Verify Watch")
-                z1, z2, z3, z4 = st.columns(4)
+                z1, z2, z3, z4, z5 = st.columns(5)
                 z1.metric("Zero Verify Events", f"{len(zero_verify_events):,}")
                 z2.metric("Med/Device Pairs", f"{len(zero_verify_summary):,}")
                 z3.metric("Meds Hit Zero", f"{zero_verify_events['med_id'].nunique():,}")
                 z4.metric("Devices With Zero", f"{zero_verify_events['device'].nunique():,}")
+                z5.metric(
+                    "Avg Refill → Zero",
+                    f"{avg_zero_refill_gap:.1f}h" if pd.notna(avg_zero_refill_gap) else "-",
+                )
 
                 with st.expander("Review meds verified as zero", expanded=False):
                     st.dataframe(
@@ -3011,7 +3108,30 @@ if _is_main:
                             "zero_verifies": st.column_config.NumberColumn("Zero Verifies", format="%d"),
                             "first_seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
                             "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
+                            "avg_hours_since_refill": st.column_config.NumberColumn("Avg Hours Since Refill", format="%.1f"),
+                            "median_hours_since_refill": st.column_config.NumberColumn("Median Hours Since Refill", format="%.1f"),
+                            "last_prior_refill": st.column_config.DatetimeColumn("Last Prior Refill", format="MM/DD/YY HH:mm"),
                             "verify_users": st.column_config.TextColumn("Verify Users"),
+                            "prior_refill_users": st.column_config.TextColumn("Prior Refill Users"),
+                        },
+                    )
+                with st.expander("Review each zero verify gap", expanded=False):
+                    detail_cols = [
+                        "dt", "user_name", "device", "med_id", "med_desc", "qty",
+                        "prior_refill_dt", "prior_refill_user", "prior_refill_event_type",
+                        "prior_refill_qty", "hours_since_refill",
+                    ]
+                    st.dataframe(
+                        zero_verify_events[[col for col in detail_cols if col in zero_verify_events.columns]],
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "dt": st.column_config.DatetimeColumn("Zero Verify Time", format="MM/DD/YY HH:mm"),
+                            "user_name": st.column_config.TextColumn("Verify User"),
+                            "prior_refill_dt": st.column_config.DatetimeColumn("Prior Refill Time", format="MM/DD/YY HH:mm"),
+                            "prior_refill_user": st.column_config.TextColumn("Prior Refill User"),
+                            "prior_refill_qty": st.column_config.NumberColumn("Prior Refill Qty", format="%.0f"),
+                            "hours_since_refill": st.column_config.NumberColumn("Hours Since Refill", format="%.1f"),
                         },
                     )
             else:
@@ -3267,12 +3387,14 @@ if _is_main:
     elif selected_page == "🛡️ Compliance":
         if not df_events.empty:
             disc_df = df_events[df_events['discrepancy_qty'] != 0].copy()
-            zero_verify_events = get_zero_verify_events(df_events)
-            zero_verify_summary = summarize_zero_verify_events(zero_verify_events)
-            c1, c2, c3, c4 = st.columns(4)
+            zero_verify_events = load_zero_verify_refill_gaps(start_date, end_date)
+            zero_verify_summary = summarize_zero_verify_refill_gaps(zero_verify_events)
+            avg_zero_refill_gap = zero_verify_events["hours_since_refill"].dropna().mean() if not zero_verify_events.empty else np.nan
+            c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Count Errors", len(disc_df))
             c3.metric("Zero Verify Events", len(zero_verify_events))
             c4.metric("Devices With Zero", zero_verify_events["device"].nunique() if not zero_verify_events.empty else 0)
+            c5.metric("Avg Refill → Zero", f"{avg_zero_refill_gap:.1f}h" if pd.notna(avg_zero_refill_gap) else "-")
             if not disc_df.empty:
                 disc_df['abs_variance'] = disc_df['discrepancy_qty'].abs() * disc_df['cost_per_unit']
                 total_loss = disc_df['abs_variance'].sum()
@@ -3295,7 +3417,11 @@ if _is_main:
                         "zero_verifies": st.column_config.NumberColumn("Zero Verifies", format="%d"),
                         "first_seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
                         "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
+                        "avg_hours_since_refill": st.column_config.NumberColumn("Avg Hours Since Refill", format="%.1f"),
+                        "median_hours_since_refill": st.column_config.NumberColumn("Median Hours Since Refill", format="%.1f"),
+                        "last_prior_refill": st.column_config.DatetimeColumn("Last Prior Refill", format="MM/DD/YY HH:mm"),
                         "verify_users": st.column_config.TextColumn("Verify Users"),
+                        "prior_refill_users": st.column_config.TextColumn("Prior Refill Users"),
                     },
                 )
 
