@@ -1545,7 +1545,7 @@ def load_data(start_date, end_date):
     queries = {
         "events": """
             SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, 
-                   e.discrepancy_qty, e.discrepancy_reason, c.cost_per_unit, e.pk 
+                   e.beginning_qty, e.ending_qty, e.discrepancy_qty, e.discrepancy_reason, c.cost_per_unit, e.pk 
             FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
             WHERE e.dt::date BETWEEN %s AND %s
         """,
@@ -1599,6 +1599,9 @@ def load_data(start_date, end_date):
         # Numeric stability
         df["cost_per_unit"] = df["cost_per_unit"].fillna(0).astype('float32')
         df["qty"] = df["qty"].fillna(0).astype('float32')
+        for qty_col in ["beginning_qty", "ending_qty", "discrepancy_qty"]:
+            if qty_col in df.columns:
+                df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce").fillna(0).astype("float32")
 
     
         df = df[~df['med_desc'].astype(str).str.contains(r'Drw|Pkt|Cubic', regex=True, case=False, na=False)]
@@ -1616,6 +1619,49 @@ def load_data(start_date, end_date):
         results["pharm"] = results["pharm"][~results["pharm"]['destination'].astype(str).str.contains('BATCH PICK', case=False, na=False)]
 
     return df, results["config"], results["pharm"], results["schedule"], results["attendance"]
+
+
+def get_zero_verify_events(df_events):
+    if df_events.empty or not {"event_type", "qty"}.issubset(df_events.columns):
+        return pd.DataFrame()
+
+    zero_events = df_events.copy()
+    zero_events["_etype"] = zero_events["event_type"].astype(str).str.lower().str.strip()
+    zero_events["_qty"] = pd.to_numeric(zero_events["qty"], errors="coerce")
+    zero_events = zero_events[
+        zero_events["_etype"].str.contains("verify", na=False) &
+        zero_events["_qty"].eq(0)
+    ].copy()
+
+    if zero_events.empty:
+        return zero_events
+
+    available_cols = [
+        "dt", "user_name", "device", "med_id", "med_desc", "event_type",
+        "qty", "beginning_qty", "ending_qty", "discrepancy_qty", "discrepancy_reason", "pk",
+    ]
+    available_cols = [col for col in available_cols if col in zero_events.columns]
+    return zero_events.sort_values("dt", ascending=False)[available_cols]
+
+
+def summarize_zero_verify_events(zero_events):
+    if zero_events.empty:
+        return pd.DataFrame()
+
+    summary = (
+        zero_events
+        .sort_values("dt")
+        .groupby(["device", "med_id", "med_desc"], dropna=False)
+        .agg(
+            zero_verifies=("pk", "count"),
+            first_seen=("dt", "min"),
+            last_seen=("dt", "max"),
+            verify_users=("user_name", lambda s: ", ".join(sorted({str(v) for v in s.dropna()}))),
+        )
+        .reset_index()
+        .sort_values(["last_seen", "zero_verifies"], ascending=[False, False])
+    )
+    return summary
 
 
 @st.cache_data(ttl=300)
@@ -2388,11 +2434,16 @@ def render_sidebar():
     init_db()
     apply_global_styles()
     n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
+    today = date.today()
+    min_selectable_date = min(min_db, today)
+    max_selectable_date = max(max_db, today)
 
     if 'start_date' not in st.session_state:
-        st.session_state.start_date = max_db - timedelta(days=14)
+        st.session_state.start_date = today
     if 'end_date' not in st.session_state:
-        st.session_state.end_date = max_db
+        st.session_state.end_date = today
+    if 'rxtrack_sidebar_filter_mode' not in st.session_state:
+        st.session_state.rxtrack_sidebar_filter_mode = "Day"
 
     with st.sidebar:
         st.markdown("""
@@ -2419,8 +2470,8 @@ def render_sidebar():
         if filter_mode == "Range":
             date_range = st.slider(
                 "Select Range:",
-                min_value=min_db,
-                max_value=max_db,
+                min_value=min_selectable_date,
+                max_value=max_selectable_date,
                 value=(st.session_state.start_date, st.session_state.end_date),
                 format="MM/DD/YY"
             )
@@ -2430,8 +2481,8 @@ def render_sidebar():
             week_start = st.date_input(
                 "Select Week Start:",
                 value=st.session_state.start_date,
-                min_value=min_db,
-                max_value=max_db,
+                min_value=min_selectable_date,
+                max_value=max_selectable_date,
             )
             st.session_state.start_date = week_start
             st.session_state.end_date = week_start + timedelta(days=6)
@@ -2440,8 +2491,8 @@ def render_sidebar():
             single_day = st.date_input(
                 "Select Day:",
                 value=st.session_state.start_date,
-                min_value=min_db,
-                max_value=max_db,
+                min_value=min_selectable_date,
+                max_value=max_selectable_date,
             )
             st.session_state.start_date = single_day
             st.session_state.end_date = single_day
@@ -2924,6 +2975,8 @@ if _is_main:
             ]
             # Everything except verify (for total tx count)
             real_tx  = ev[~ev["_etype"].str.contains("verify", na=False)]
+            zero_verify_events = get_zero_verify_events(df_events)
+            zero_verify_summary = summarize_zero_verify_events(zero_verify_events)
 
             session_stats = ev.groupby("session_id").agg(total_time=("machine_time_sec", "sum"))
             avg_time      = session_stats["total_time"].mean()
@@ -2938,11 +2991,47 @@ if _is_main:
             m6.metric("Avg Session",        seconds_to_mmss(avg_time))
             m7.metric("Discrepancies",      int(df_events["discrepancy_qty"].ne(0).sum()))
 
+            if not zero_verify_events.empty:
+                st.markdown("### Zero Verify Watch")
+                z1, z2, z3, z4 = st.columns(4)
+                z1.metric("Zero Verify Events", f"{len(zero_verify_events):,}")
+                z2.metric("Med/Device Pairs", f"{len(zero_verify_summary):,}")
+                z3.metric("Meds Hit Zero", f"{zero_verify_events['med_id'].nunique():,}")
+                z4.metric("Devices With Zero", f"{zero_verify_events['device'].nunique():,}")
+
+                with st.expander("Review meds verified as zero", expanded=False):
+                    st.dataframe(
+                        zero_verify_summary,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "device": st.column_config.TextColumn("Device"),
+                            "med_id": st.column_config.TextColumn("Med ID"),
+                            "med_desc": st.column_config.TextColumn("Medication"),
+                            "zero_verifies": st.column_config.NumberColumn("Zero Verifies", format="%d"),
+                            "first_seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
+                            "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
+                            "verify_users": st.column_config.TextColumn("Verify Users"),
+                        },
+                    )
+            else:
+                st.caption("Zero Verify Watch: no Verify Inventory transactions with quantity 0 in this window.")
+
             st.divider()
 
             # ── Proactive Alerts Panel ────────────────────────────────────────
             with st.expander("🔔 Proactive Alerts", expanded=True):
                 alerts = []
+
+                if not zero_verify_events.empty:
+                    alerts.append((
+                        "Zero",
+                        (
+                            f"**{len(zero_verify_summary)} med/device pair(s) verified at quantity 0** "
+                            f"across {zero_verify_events['device'].nunique()} device(s)."
+                        ),
+                        "warning",
+                    ))
 
                 # Stockout risk: meds with ending_qty == 0 in the window
                 if "ending_qty" in df_events.columns and "med_desc" in df_events.columns:
@@ -3178,8 +3267,12 @@ if _is_main:
     elif selected_page == "🛡️ Compliance":
         if not df_events.empty:
             disc_df = df_events[df_events['discrepancy_qty'] != 0].copy()
-            c1, c2 = st.columns(2)
+            zero_verify_events = get_zero_verify_events(df_events)
+            zero_verify_summary = summarize_zero_verify_events(zero_verify_events)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Count Errors", len(disc_df))
+            c3.metric("Zero Verify Events", len(zero_verify_events))
+            c4.metric("Devices With Zero", zero_verify_events["device"].nunique() if not zero_verify_events.empty else 0)
             if not disc_df.empty:
                 disc_df['abs_variance'] = disc_df['discrepancy_qty'].abs() * disc_df['cost_per_unit']
                 total_loss = disc_df['abs_variance'].sum()
@@ -3187,6 +3280,24 @@ if _is_main:
                 st.dataframe(disc_df[['dt', 'user_name', 'device', 'med_desc', 'discrepancy_qty', 'discrepancy_reason', 'cost_per_unit', 'abs_variance']], use_container_width=True, column_config={"abs_variance": st.column_config.NumberColumn("Risk Value", format="$%.2f")})
             else:
                 st.success("✅ Zero discrepancies found!")
+
+            if not zero_verify_events.empty:
+                st.subheader("Meds Verified As Zero")
+                st.caption("Verify Inventory rows where the counted quantity was entered as 0.")
+                st.dataframe(
+                    zero_verify_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "device": st.column_config.TextColumn("Device"),
+                        "med_id": st.column_config.TextColumn("Med ID"),
+                        "med_desc": st.column_config.TextColumn("Medication"),
+                        "zero_verifies": st.column_config.NumberColumn("Zero Verifies", format="%d"),
+                        "first_seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
+                        "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
+                        "verify_users": st.column_config.TextColumn("Verify Users"),
+                    },
+                )
 
     # 6. LOAD/UNLOAD
     elif selected_page == "🚚 Load/Unload":
