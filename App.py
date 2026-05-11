@@ -1668,6 +1668,39 @@ def summarize_zero_verify_events(zero_events):
 def load_zero_verify_refill_gaps(start_date, end_date, lookback_days=60):
     lookback_start = start_date - timedelta(days=lookback_days)
     sql = text("""
+        WITH zero_verifies AS (
+            SELECT
+                pk,
+                dt::timestamp AS dt,
+                user_name,
+                device,
+                med_id,
+                med_desc,
+                event_type,
+                qty,
+                beginning_qty,
+                ending_qty,
+                discrepancy_qty
+            FROM events
+            WHERE dt::date BETWEEN :start_date AND :end_date
+              AND event_type ILIKE '%verify%'
+              AND COALESCE(qty, 0) = 0
+        ),
+        refill_events AS (
+            SELECT
+                dt::timestamp AS dt,
+                user_name,
+                device,
+                med_id,
+                event_type,
+                qty
+            FROM events
+            WHERE dt::date BETWEEN :lookback_start AND :end_date
+              AND event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
+              AND event_type NOT ILIKE '%cancel%'
+              AND event_type NOT ILIKE '%unload%'
+              AND event_type NOT ILIKE '%empty%'
+        )
         SELECT
             z.pk,
             z.dt,
@@ -1685,24 +1718,16 @@ def load_zero_verify_refill_gaps(start_date, end_date, lookback_days=60):
             r.event_type AS prior_refill_event_type,
             r.qty AS prior_refill_qty,
             EXTRACT(EPOCH FROM (z.dt - r.dt)) / 3600.0 AS hours_since_refill
-        FROM events z
+        FROM zero_verifies z
         LEFT JOIN LATERAL (
             SELECT dt, user_name, event_type, qty
-            FROM events r
-            WHERE r.dt::date BETWEEN :lookback_start AND :end_date
-              AND r.dt < z.dt
+            FROM refill_events r
+            WHERE r.dt < z.dt
               AND COALESCE(r.device, '') = COALESCE(z.device, '')
               AND COALESCE(r.med_id, '') = COALESCE(z.med_id, '')
-              AND r.event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
-              AND r.event_type NOT ILIKE '%cancel%'
-              AND r.event_type NOT ILIKE '%unload%'
-              AND r.event_type NOT ILIKE '%empty%'
             ORDER BY r.dt DESC
             LIMIT 1
         ) r ON TRUE
-        WHERE z.dt::date BETWEEN :start_date AND :end_date
-          AND z.event_type ILIKE '%verify%'
-          AND COALESCE(z.qty, 0) = 0
         ORDER BY z.dt DESC
     """)
     try:
