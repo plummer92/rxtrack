@@ -1927,7 +1927,7 @@ def load_overnight_cartfill_orders(start_date, end_date):
                 ready_for_dispense_dt - INTERVAL '4 hours' AS required_start_dt,
                 EXTRACT(EPOCH FROM (ready_for_dispense_dt - prepared_dt)) / 3600.0 AS prep_lead_hours,
                 NULL::float AS hold_hours,
-                (COALESCE(cartfill_area, '') = 'IV Room' OR UPPER(COALESCE(pharmacy, '')) LIKE '%CLEANROOM%') AS is_sjs_cleanroom
+                (COALESCE(cartfill_area, '') = 'IV Room' OR UPPER(COALESCE(pharmacy, '')) LIKE '%%CLEANROOM%%') AS is_sjs_cleanroom
             FROM wcc_cartfill_stats
             WHERE ready_for_dispense_dt::date BETWEEN %s AND %s
         ) cartfill_orders
