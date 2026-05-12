@@ -377,20 +377,46 @@ with tab1:
     # ----------------------------
     # Filters
     # ----------------------------
-    c1, c2, c3 = st.columns(3)
+    c0, c1, c2, c3 = st.columns([1.2, 1.4, 1, 1.4])
 
-    all_users = sorted(sessions['User'].dropna().unique())
+    available_session_dates = sorted(sessions["Start"].dt.date.dropna().unique())
+    if available_session_dates:
+        default_session_date = end_date if end_date in available_session_dates else available_session_dates[-1]
+        if st.session_state.get("session_view_date") not in available_session_dates:
+            st.session_state.session_view_date = default_session_date
+        selected_session_date = c0.selectbox(
+            "Session Date",
+            options=available_session_dates,
+            index=available_session_dates.index(st.session_state.session_view_date),
+            key="session_view_date",
+            format_func=lambda value: value.strftime("%m/%d/%Y (%A)"),
+        )
+        sessions_for_day = sessions[sessions["Start"].dt.date == selected_session_date].copy()
+    else:
+        selected_session_date = None
+        sessions_for_day = sessions.copy()
+        c0.info("No session dates found.")
+
+    all_users = sorted(sessions_for_day['User'].dropna().unique())
+    if "u_sess_uni" in st.session_state:
+        st.session_state.u_sess_uni = [user for user in st.session_state.u_sess_uni if user in all_users]
     sel_u = c1.multiselect("Filter User", all_users, key="u_sess_uni")
 
     min_dur = c2.number_input("Min Duration (sec)", 0, 3600, 0)
 
+    all_sources = sorted(sessions_for_day['Source'].dropna().unique())
+    if "session_view_sources" in st.session_state:
+        st.session_state.session_view_sources = [
+            source for source in st.session_state.session_view_sources if source in all_sources
+        ]
     sel_source = c3.multiselect(
         "Filter Source",
-        sorted(sessions['Source'].dropna().unique()),
-        default=sorted(sessions['Source'].dropna().unique())
+        all_sources,
+        default=all_sources,
+        key="session_view_sources",
     )
 
-    view = sessions.copy()
+    view = sessions_for_day.copy()
 
     if sel_u:
         view = view[view['User'].isin(sel_u)]
