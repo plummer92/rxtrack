@@ -139,15 +139,7 @@
           controls = null;
         }
         setStatus("Starting camera...");
-        const constraints = {
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            advanced: [{ focusMode: "continuous" }],
-          },
-        };
-        controls = await reader.decodeFromConstraints(constraints, video, (result, error) => {
+        controls = await startWithBestAvailableCamera((result, error) => {
           if (result) {
             submitCode(result.getText(), result.getBarcodeFormat?.());
           }
@@ -157,6 +149,45 @@
       } catch (err) {
         setStatus(`Camera unavailable: ${err?.message || err}`);
       }
+    }
+
+    async function startWithBestAvailableCamera(callback) {
+      const attempts = [
+        {
+          label: "rear camera with focus",
+          run: () => reader.decodeFromConstraints({
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              advanced: [{ focusMode: "continuous" }],
+            },
+          }, video, callback),
+        },
+        {
+          label: "rear camera",
+          run: () => reader.decodeFromConstraints({
+            video: {
+              facingMode: { ideal: "environment" },
+            },
+          }, video, callback),
+        },
+        {
+          label: "default camera",
+          run: () => reader.decodeFromVideoDevice(undefined, video, callback),
+        },
+      ];
+
+      let lastError = null;
+      for (const attempt of attempts) {
+        try {
+          setStatus(`Starting ${attempt.label}...`);
+          return await attempt.run();
+        } catch (err) {
+          lastError = err;
+        }
+      }
+      throw lastError || new Error("No camera start method worked.");
     }
 
     async function improveCameraTrack() {

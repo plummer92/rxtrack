@@ -977,6 +977,7 @@ st.markdown("##### Live Barcode Scanner")
 st.caption(
     "Use live scan first on older phones. It keeps the camera active so autofocus has time to settle; use the photo box below if live scan is unavailable."
 )
+st.caption("Android tip: use Chrome, allow camera permission when prompted, and open the app over HTTPS.")
 live_scan_value = barcode_scanner(default="", key="mobile_live_barcode_scanner")
 if live_scan_value and live_scan_value != st.session_state.get("mobile_barcode_input"):
     st.session_state["mobile_barcode_input"] = live_scan_value
