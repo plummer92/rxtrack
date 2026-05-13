@@ -2,16 +2,16 @@ import hashlib
 import re
 from datetime import date
 from io import BytesIO
-from pathlib import Path
 from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 from sqlalchemy import text
 from PIL import Image
+
+from components.barcode_scanner import barcode_scanner
 
 try:
     import zxingcpp
@@ -24,8 +24,6 @@ import App
 st.set_page_config(page_title="Mobile BUD Scanner", page_icon="📱", layout="wide")
 
 engine = App.engine
-BARCODE_SCANNER_DIR = Path(__file__).resolve().parents[1] / "components" / "barcode_scanner"
-barcode_scanner = components.declare_component("barcode_scanner", path=str(BARCODE_SCANNER_DIR))
 
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()
