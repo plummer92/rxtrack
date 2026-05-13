@@ -31,7 +31,7 @@ else:
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Mobile BUD Scanner",
-        "Use the iPhone camera or enter a barcode, match it to an RxTrack med, and save the active BUD review.",
+        "Use a mobile camera or enter a barcode, match it to an RxTrack med, and save the active BUD review.",
         kicker="Inventory QC",
     )
 else:
@@ -972,11 +972,11 @@ else:
                     st.rerun()
 
 st.caption(
-    "On iPhone, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
+    "On mobile, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
 )
 st.caption(PHOTO_RETENTION_NOTE)
 camera_photo = st.camera_input(
-    "iPhone camera barcode photo",
+    "Mobile camera barcode photo",
     key=f"mobile_camera_photo_{st.session_state.get('mobile_camera_reset_count', 0)}",
 )
 decoded_values = decode_barcode_photo(camera_photo)

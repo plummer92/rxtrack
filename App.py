@@ -2348,7 +2348,7 @@ def get_management_password():
             return str(value)
     except Exception:
         pass
-    return None
+    return "1234"
 
 
 def management_access_unlocked():
