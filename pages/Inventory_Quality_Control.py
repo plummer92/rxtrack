@@ -160,6 +160,37 @@ def ensure_packaging_table():
         """))
         conn.execute(text("ALTER TABLE inventory_qc_actions ADD COLUMN IF NOT EXISTS replacement_expire_date DATE"))
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS mobile_bud_project_portfolio (
+                id SERIAL PRIMARY KEY,
+                project_key TEXT UNIQUE,
+                med_id TEXT,
+                med_desc TEXT,
+                isa_name TEXT,
+                location TEXT,
+                barcode_text TEXT,
+                action_type TEXT,
+                project_status TEXT DEFAULT 'Logged',
+                quantity_checked FLOAT,
+                project_value FLOAT,
+                action_by TEXT,
+                action_dt TIMESTAMP DEFAULT NOW(),
+                follow_up_dt DATE,
+                note TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS inventory_audit (
+                pk TEXT PRIMARY KEY,
+                med_id TEXT,
+                med_desc TEXT,
+                med_class TEXT,
+                unit_cost FLOAT,
+                qty_on_hand FLOAT,
+                min_lvl FLOAT,
+                max_lvl FLOAT
+            )
+        """))
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS pyxis_savings_projects (
                 id SERIAL PRIMARY KEY,
                 project_key TEXT UNIQUE,
@@ -364,6 +395,104 @@ def load_pyxis_savings_projects():
             note
         FROM pyxis_savings_projects
         ORDER BY identified_dt DESC
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
+def load_no_inventory_buyer_review():
+    sql = text("""
+        WITH no_inventory AS (
+            SELECT
+                project_key,
+                UPPER(TRIM(med_id)) AS med_id,
+                med_desc,
+                isa_name,
+                location,
+                action_by,
+                action_dt,
+                follow_up_dt,
+                note
+            FROM mobile_bud_project_portfolio
+            WHERE action_type = 'No inventory on hand'
+        ),
+        detailed AS (
+            SELECT
+                UPPER(TRIM(med_id)) AS med_id,
+                station,
+                pocket_location,
+                SUM(COALESCE(current_count, 0)) AS detailed_current_count
+            FROM inventory_detailed
+            WHERE COALESCE(TRIM(med_id), '') <> ''
+              AND COALESCE(station, '') NOT ILIKE 'CAR%%'
+            GROUP BY UPPER(TRIM(med_id)), station, pocket_location
+        ),
+        device_config AS (
+            SELECT
+                UPPER(TRIM(med_id)) AS med_id,
+                device,
+                zone,
+                pocket_location,
+                status,
+                brand_name,
+                med_class,
+                current_quantity,
+                min_qty,
+                max_qty,
+                outdate_tracking,
+                loaded_as_fraction,
+                backordered,
+                standard_stock,
+                active_orders,
+                days_unused,
+                snapshot_dt
+            FROM device_inventory
+            WHERE COALESCE(TRIM(med_id), '') <> ''
+        )
+        SELECT
+            n.med_id,
+            n.med_desc,
+            n.isa_name,
+            n.location,
+            n.action_by AS checked_by,
+            n.action_dt AS checked_dt,
+            n.follow_up_dt,
+            n.note,
+            COALESCE(dc.device, d.station) AS configured_device,
+            COALESCE(dc.pocket_location, d.pocket_location) AS configured_pocket,
+            dc.zone,
+            dc.status AS pocket_status,
+            dc.brand_name,
+            dc.med_class,
+            COALESCE(dc.current_quantity, d.detailed_current_count, 0) AS current_quantity,
+            dc.min_qty,
+            dc.max_qty,
+            dc.standard_stock,
+            dc.active_orders,
+            dc.backordered,
+            dc.outdate_tracking,
+            dc.loaded_as_fraction,
+            dc.days_unused,
+            dc.snapshot_dt,
+            CASE
+                WHEN COALESCE(dc.min_qty, 0) = 0 THEN 'Min is zero - will not reorder from min/max logic'
+                WHEN dc.min_qty IS NULL THEN 'No min configured in latest Device Inventory'
+                WHEN COALESCE(dc.max_qty, 0) = 0 THEN 'Max is zero'
+                WHEN dc.med_id IS NULL AND d.med_id IS NULL THEN 'No matching pocket configuration found'
+                WHEN COALESCE(dc.current_quantity, d.detailed_current_count, 0) = 0 THEN 'Configured pocket is empty'
+                ELSE 'Review pocket configuration'
+            END AS buyer_review_reason
+        FROM no_inventory n
+        LEFT JOIN detailed d
+          ON n.med_id = d.med_id
+         AND UPPER(TRIM(COALESCE(d.station, ''))) = UPPER(TRIM(COALESCE(n.isa_name, '')))
+         AND UPPER(TRIM(COALESCE(d.pocket_location, ''))) = UPPER(TRIM(COALESCE(n.location, '')))
+        LEFT JOIN device_config dc
+          ON n.med_id = dc.med_id
+         AND UPPER(TRIM(COALESCE(dc.device, ''))) = UPPER(TRIM(COALESCE(n.isa_name, '')))
+         AND UPPER(TRIM(COALESCE(dc.pocket_location, ''))) = UPPER(TRIM(COALESCE(n.location, '')))
+        ORDER BY n.action_dt DESC, n.isa_name, n.location, n.med_desc
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn)
@@ -594,6 +723,24 @@ def load_med_costs():
 
 
 @st.cache_data(ttl=60)
+def load_inventory_audit():
+    sql = text("""
+        SELECT
+            UPPER(TRIM(med_id)) AS med_id,
+            med_desc,
+            med_class,
+            unit_cost,
+            qty_on_hand,
+            min_lvl,
+            max_lvl
+        FROM inventory_audit
+        WHERE COALESCE(TRIM(med_id), '') <> ''
+    """)
+    with engine.connect() as conn:
+        return pd.read_sql(sql, conn)
+
+
+@st.cache_data(ttl=60)
 def load_packaging_history():
     sql = text("""
         SELECT
@@ -761,6 +908,19 @@ def prep_med_costs(df):
     return out.drop_duplicates("med_id", keep="last")
 
 
+def prep_inventory_audit(df):
+    if df.empty:
+        return pd.DataFrame(columns=["med_id", "med_desc", "med_class", "unit_cost", "qty_on_hand", "inventory_value"])
+    out = df.copy()
+    out["med_id"] = out["med_id"].fillna("").astype(str).str.strip().str.upper()
+    out["med_desc"] = out["med_desc"].fillna("").astype(str).str.strip()
+    out["med_class"] = out["med_class"].fillna("").astype(str).str.strip()
+    for col in ["unit_cost", "qty_on_hand"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    out["inventory_value"] = out["unit_cost"] * out["qty_on_hand"]
+    return out
+
+
 def prep_pyxis_savings_projects(df):
     if df.empty:
         return df
@@ -901,6 +1061,91 @@ def build_pyxis_overstock_savings(device_inventory, deduction_history, med_costs
         ["estimated_excess_value", "excess_quantity", "days_unused"],
         ascending=[False, False, False],
     )
+
+
+def build_inventory_turns(deduction_history, pyxis_inventory, inventory_audit, med_costs, start_date, end_date):
+    detail_columns = [
+        "inventory_source", "med_id", "med_desc", "on_hand_qty", "inventory_value",
+        "issue_qty", "issue_value", "annualized_issue_value", "inventory_turns",
+        "cost_per_unit",
+    ]
+    if deduction_history.empty:
+        usage = pd.DataFrame(columns=["med_id", "issue_qty", "last_issue_dt"])
+    else:
+        usage = deduction_history.copy()
+        usage["deducted_dt"] = pd.to_datetime(usage["deducted_dt"], errors="coerce")
+        usage = usage[
+            usage["deducted_dt"].dt.date.between(start_date, end_date)
+        ].copy()
+        usage["med_id"] = usage["med_id"].fillna("").astype(str).str.strip().str.upper()
+        usage["qty"] = pd.to_numeric(usage["qty"], errors="coerce").fillna(0).abs()
+        usage = usage.groupby("med_id", dropna=False).agg(
+            issue_qty=("qty", "sum"),
+            last_issue_dt=("deducted_dt", "max"),
+        ).reset_index()
+
+    cost_lookup = med_costs.copy() if not med_costs.empty else pd.DataFrame(columns=["med_id", "cost_per_unit"])
+    cost_lookup["med_id"] = cost_lookup["med_id"].fillna("").astype(str).str.strip().str.upper()
+    cost_lookup["cost_per_unit"] = pd.to_numeric(cost_lookup["cost_per_unit"], errors="coerce").fillna(0)
+
+    sources = []
+    if not pyxis_inventory.empty:
+        pyxis = pyxis_inventory.copy()
+        pyxis["med_id"] = pyxis["med_id"].fillna("").astype(str).str.strip().str.upper()
+        pyxis["current_count"] = pd.to_numeric(pyxis["current_count"], errors="coerce").fillna(0)
+        pyxis["unit_cost"] = pd.to_numeric(pyxis["unit_cost"], errors="coerce").fillna(0)
+        pyxis_source = pyxis.groupby("med_id", dropna=False).agg(
+            med_desc=("med_desc", "first"),
+            on_hand_qty=("current_count", "sum"),
+            inventory_value=("inventory_value", "sum"),
+            unit_cost=("unit_cost", "max"),
+        ).reset_index()
+        pyxis_source["inventory_source"] = "Pyxis detailed inventory"
+        sources.append(pyxis_source)
+
+    if not inventory_audit.empty:
+        audit = inventory_audit.copy()
+        audit_source = audit.groupby("med_id", dropna=False).agg(
+            med_desc=("med_desc", "first"),
+            on_hand_qty=("qty_on_hand", "sum"),
+            inventory_value=("inventory_value", "sum"),
+            unit_cost=("unit_cost", "max"),
+        ).reset_index()
+        audit_source["inventory_source"] = "Inventory audit"
+        sources.append(audit_source)
+
+    if not sources:
+        return pd.DataFrame(), pd.DataFrame(columns=detail_columns)
+
+    days = max((pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1, 1)
+    annualization_factor = 365 / days
+    details = []
+    for source in sources:
+        detail = source.merge(usage, on="med_id", how="left").merge(cost_lookup, on="med_id", how="left")
+        detail["issue_qty"] = pd.to_numeric(detail["issue_qty"], errors="coerce").fillna(0)
+        detail["cost_per_unit"] = pd.to_numeric(detail["cost_per_unit"], errors="coerce").fillna(0)
+        detail["cost_per_unit"] = detail["cost_per_unit"].where(detail["cost_per_unit"].gt(0), detail["unit_cost"])
+        detail["issue_value"] = detail["issue_qty"] * detail["cost_per_unit"]
+        detail["annualized_issue_value"] = detail["issue_value"] * annualization_factor
+        detail["inventory_value"] = pd.to_numeric(detail["inventory_value"], errors="coerce").fillna(0)
+        detail["inventory_turns"] = detail["annualized_issue_value"] / detail["inventory_value"].replace({0: pd.NA})
+        details.append(detail[detail_columns])
+
+    detail_df = pd.concat(details, ignore_index=True)
+    summary = (
+        detail_df.groupby("inventory_source", dropna=False)
+        .agg(
+            meds=("med_id", "nunique"),
+            on_hand_qty=("on_hand_qty", "sum"),
+            inventory_value=("inventory_value", "sum"),
+            issue_qty=("issue_qty", "sum"),
+            issue_value=("issue_value", "sum"),
+            annualized_issue_value=("annualized_issue_value", "sum"),
+        )
+        .reset_index()
+    )
+    summary["inventory_turns"] = summary["annualized_issue_value"] / summary["inventory_value"].replace({0: pd.NA})
+    return summary, detail_df.sort_values(["inventory_source", "inventory_turns"], ascending=[True, False])
 
 
 def build_packaging_summary(packaging):
@@ -1209,6 +1454,7 @@ receiving = prep_receiving(load_receiving_history())
 stock_add_history = prep_stock_add_history(load_stock_add_history())
 deduction_history = prep_deduction_history(load_deduction_history())
 qc_actions = load_inventory_qc_actions()
+no_inventory_buyer_review = load_no_inventory_buyer_review()
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
 pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
@@ -1217,11 +1463,20 @@ device_inventory = prep_device_inventory(load_device_inventory())
 device_inventory_snapshot_dates = load_device_inventory_snapshot_dates()
 device_inventory_daily_delta = load_device_inventory_daily_delta()
 med_costs = prep_med_costs(load_med_costs())
+inventory_audit = prep_inventory_audit(load_inventory_audit())
 pyxis_savings_projects = prep_pyxis_savings_projects(load_pyxis_savings_projects())
 receiving_summary = build_receiving_summary(receiving)
 stock_add_summary = build_stock_add_summary(stock_add_history)
 deduction_summary = build_deduction_summary(deduction_history)
 pyxis_overstock_savings = build_pyxis_overstock_savings(device_inventory, deduction_history, med_costs)
+inventory_turns_summary, inventory_turns_detail = build_inventory_turns(
+    deduction_history,
+    pyxis_inventory,
+    inventory_audit,
+    med_costs,
+    start_date,
+    end_date,
+)
 pyxis_exposure_summary = build_pyxis_exposure_summary(pyxis_inventory)
 packaging_summary = build_packaging_summary(packaging)
 manual_bud_summary = build_manual_bud_summary(qc_actions)
@@ -1251,9 +1506,11 @@ for col in ["active_bud_review_dt", "reviewed_active_bud_date"]:
     isa_lifecycle[col] = pd.to_datetime(isa_lifecycle[col], errors="coerce")
 isa_lifecycle["active_bud_reviewed"] = isa_lifecycle["active_bud_review_dt"].notna()
 
-tab_lifecycle, tab_unload, tab_savings = st.tabs([
+tab_lifecycle, tab_unload, tab_buyer_review, tab_turns, tab_savings = st.tabs([
     "ISA Receiving Lifecycle",
     "Pyxis 28-Day Unload",
+    "Buyer No-Inventory Review",
+    "Inventory Turns",
     "Pyxis Overstock Savings",
 ])
 
@@ -2063,6 +2320,168 @@ with tab_unload:
             file_name="pyxis_28_day_unload_review.csv",
             mime="text/csv",
         )
+
+
+with tab_buyer_review:
+    st.subheader("Buyer No-Inventory Pocket Review")
+    st.caption(
+        "Compiles Mobile BUD Scanner transactions marked `No inventory on hand` so purchasing can review pockets "
+        "that may be configured with min/max values that will not replenish."
+    )
+
+    if no_inventory_buyer_review.empty:
+        st.info("No no-inventory-on-hand transactions have been logged yet from Mobile BUD Scanner.")
+    else:
+        buyer_review = no_inventory_buyer_review.copy()
+        for col in ["checked_dt", "follow_up_dt", "snapshot_dt"]:
+            if col in buyer_review.columns:
+                buyer_review[col] = pd.to_datetime(buyer_review[col], errors="coerce")
+        for col in ["current_quantity", "min_qty", "max_qty", "days_unused"]:
+            if col in buyer_review.columns:
+                buyer_review[col] = pd.to_numeric(buyer_review[col], errors="coerce")
+
+        review_reasons = sorted(buyer_review["buyer_review_reason"].dropna().astype(str).unique())
+        selected_reasons = st.multiselect("Review reason", review_reasons, default=review_reasons)
+        buyer_search = st.text_input("Buyer review search")
+
+        buyer_view = buyer_review.copy()
+        if selected_reasons:
+            buyer_view = buyer_view[buyer_view["buyer_review_reason"].isin(selected_reasons)]
+        if buyer_search:
+            search_mask = (
+                buyer_view["med_id"].fillna("").astype(str).str.contains(buyer_search, case=False, na=False)
+                | buyer_view["med_desc"].fillna("").astype(str).str.contains(buyer_search, case=False, na=False)
+                | buyer_view["isa_name"].fillna("").astype(str).str.contains(buyer_search, case=False, na=False)
+                | buyer_view["location"].fillna("").astype(str).str.contains(buyer_search, case=False, na=False)
+            )
+            buyer_view = buyer_view[search_mask]
+
+        zero_min_count = int(pd.to_numeric(buyer_view["min_qty"], errors="coerce").fillna(0).eq(0).sum())
+        missing_config_count = int(
+            buyer_view["buyer_review_reason"]
+            .fillna("")
+            .astype(str)
+            .str.contains("No matching pocket configuration", case=False, na=False)
+            .sum()
+        )
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Review Rows", f"{len(buyer_view):,}")
+        b2.metric("Min Zero / Missing", f"{zero_min_count:,}")
+        b3.metric("No Config Match", f"{missing_config_count:,}")
+        b4.metric("Unique Meds", f"{buyer_view['med_id'].nunique():,}")
+
+        buyer_cols = [
+            "buyer_review_reason",
+            "med_id",
+            "med_desc",
+            "isa_name",
+            "location",
+            "configured_device",
+            "configured_pocket",
+            "current_quantity",
+            "min_qty",
+            "max_qty",
+            "standard_stock",
+            "active_orders",
+            "backordered",
+            "days_unused",
+            "checked_by",
+            "checked_dt",
+            "note",
+        ]
+        buyer_cols = [col for col in buyer_cols if col in buyer_view.columns]
+        st.dataframe(
+            buyer_view[buyer_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "buyer_review_reason": "Buyer Review Reason",
+                "current_quantity": st.column_config.NumberColumn("Current Qty", format="%.0f"),
+                "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
+                "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
+                "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
+                "checked_dt": st.column_config.DatetimeColumn("Checked", format="MM/DD/YYYY HH:mm"),
+            },
+        )
+        st.download_button(
+            "Download buyer no-inventory review CSV",
+            data=buyer_view[buyer_cols].to_csv(index=False).encode("utf-8"),
+            file_name="buyer_no_inventory_pocket_review.csv",
+            mime="text/csv",
+        )
+
+
+with tab_turns:
+    st.subheader("Pharmacy Inventory Turns")
+    st.caption(
+        "Turns are calculated as annualized issue value divided by current on-hand inventory value. "
+        "Issue value uses Pharmacy Workflow pull/dispense/deduct rows in the selected analysis window."
+    )
+
+    if inventory_turns_summary.empty:
+        st.warning("Inventory turns need Pharmacy Workflow deduction rows plus either Detailed Inventory or Inventory Audit rows.")
+    else:
+        period_days = max((pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1, 1)
+        st.caption(f"Analysis window: {start_date:%m/%d/%Y} through {end_date:%m/%d/%Y} ({period_days} day{'s' if period_days != 1 else ''})")
+
+        primary_turns = inventory_turns_summary.sort_values("inventory_value", ascending=False).iloc[0]
+        t1, t2, t3, t4 = st.columns(4)
+        t1.metric("Primary Turns", f"{primary_turns['inventory_turns']:.2f}x" if pd.notna(primary_turns["inventory_turns"]) else "N/A")
+        t2.metric("Inventory Value", f"${primary_turns['inventory_value']:,.0f}")
+        t3.metric("Annualized Issue Value", f"${primary_turns['annualized_issue_value']:,.0f}")
+        t4.metric("Issue Value In Window", f"${primary_turns['issue_value']:,.0f}")
+
+        st.markdown("##### Turns by Inventory Source")
+        st.dataframe(
+            inventory_turns_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "inventory_source": "Inventory Source",
+                "on_hand_qty": st.column_config.NumberColumn("On Hand Qty", format="%.0f"),
+                "inventory_value": st.column_config.NumberColumn("Inventory Value", format="$%.2f"),
+                "issue_qty": st.column_config.NumberColumn("Issue Qty", format="%.0f"),
+                "issue_value": st.column_config.NumberColumn("Issue Value", format="$%.2f"),
+                "annualized_issue_value": st.column_config.NumberColumn("Annualized Issue Value", format="$%.2f"),
+                "inventory_turns": st.column_config.NumberColumn("Turns", format="%.2f"),
+            },
+        )
+
+        source_options = sorted(inventory_turns_detail["inventory_source"].dropna().unique())
+        selected_turn_sources = st.multiselect("Inventory source", source_options, default=source_options)
+        turns_search = st.text_input("Turns med search")
+        turns_view = inventory_turns_detail.copy()
+        if selected_turn_sources:
+            turns_view = turns_view[turns_view["inventory_source"].isin(selected_turn_sources)]
+        if turns_search:
+            turns_view = turns_view[
+                turns_view["med_id"].fillna("").astype(str).str.contains(turns_search, case=False, na=False)
+                | turns_view["med_desc"].fillna("").astype(str).str.contains(turns_search, case=False, na=False)
+            ]
+
+        st.markdown("##### Medication-Level Turns")
+        st.dataframe(
+            turns_view,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "inventory_source": "Inventory Source",
+                "on_hand_qty": st.column_config.NumberColumn("On Hand Qty", format="%.0f"),
+                "inventory_value": st.column_config.NumberColumn("Inventory Value", format="$%.2f"),
+                "issue_qty": st.column_config.NumberColumn("Issue Qty", format="%.0f"),
+                "issue_value": st.column_config.NumberColumn("Issue Value", format="$%.2f"),
+                "annualized_issue_value": st.column_config.NumberColumn("Annualized Issue Value", format="$%.2f"),
+                "inventory_turns": st.column_config.NumberColumn("Turns", format="%.2f"),
+                "cost_per_unit": st.column_config.NumberColumn("Unit Cost", format="$%.2f"),
+            },
+        )
+        st.download_button(
+            "Download inventory turns CSV",
+            data=turns_view.to_csv(index=False).encode("utf-8"),
+            file_name="pharmacy_inventory_turns.csv",
+            mime="text/csv",
+        )
+
 
 with tab_savings:
     st.subheader("Pyxis Overstock Savings")

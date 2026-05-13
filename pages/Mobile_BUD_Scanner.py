@@ -346,7 +346,6 @@ def save_mobile_bud_project(row, action_type, action_by, note, barcode_value="",
             "note": note or "",
         })
     load_mobile_bud_projects.clear()
-    load_no_inventory_buyer_review.clear()
 
 
 @st.cache_data(ttl=60)
@@ -368,104 +367,6 @@ def load_mobile_bud_projects():
             note
         FROM mobile_bud_project_portfolio
         ORDER BY action_dt DESC
-    """)
-    with engine.connect() as conn:
-        return pd.read_sql(sql, conn)
-
-
-@st.cache_data(ttl=60)
-def load_no_inventory_buyer_review():
-    sql = text("""
-        WITH no_inventory AS (
-            SELECT
-                project_key,
-                UPPER(TRIM(med_id)) AS med_id,
-                med_desc,
-                isa_name,
-                location,
-                action_by,
-                action_dt,
-                follow_up_dt,
-                note
-            FROM mobile_bud_project_portfolio
-            WHERE action_type = 'No inventory on hand'
-        ),
-        detailed AS (
-            SELECT
-                UPPER(TRIM(med_id)) AS med_id,
-                station,
-                pocket_location,
-                SUM(COALESCE(current_count, 0)) AS detailed_current_count
-            FROM inventory_detailed
-            WHERE COALESCE(TRIM(med_id), '') <> ''
-              AND COALESCE(station, '') NOT ILIKE 'CAR%%'
-            GROUP BY UPPER(TRIM(med_id)), station, pocket_location
-        ),
-        device_config AS (
-            SELECT
-                UPPER(TRIM(med_id)) AS med_id,
-                device,
-                zone,
-                pocket_location,
-                status,
-                brand_name,
-                med_class,
-                current_quantity,
-                min_qty,
-                max_qty,
-                outdate_tracking,
-                loaded_as_fraction,
-                backordered,
-                standard_stock,
-                active_orders,
-                days_unused,
-                snapshot_dt
-            FROM device_inventory
-            WHERE COALESCE(TRIM(med_id), '') <> ''
-        )
-        SELECT
-            n.med_id,
-            n.med_desc,
-            n.isa_name,
-            n.location,
-            n.action_by AS checked_by,
-            n.action_dt AS checked_dt,
-            n.follow_up_dt,
-            n.note,
-            COALESCE(dc.device, d.station) AS configured_device,
-            COALESCE(dc.pocket_location, d.pocket_location) AS configured_pocket,
-            dc.zone,
-            dc.status AS pocket_status,
-            dc.brand_name,
-            dc.med_class,
-            COALESCE(dc.current_quantity, d.detailed_current_count, 0) AS current_quantity,
-            dc.min_qty,
-            dc.max_qty,
-            dc.standard_stock,
-            dc.active_orders,
-            dc.backordered,
-            dc.outdate_tracking,
-            dc.loaded_as_fraction,
-            dc.days_unused,
-            dc.snapshot_dt,
-            CASE
-                WHEN COALESCE(dc.min_qty, 0) = 0 THEN 'Min is zero - will not reorder from min/max logic'
-                WHEN dc.min_qty IS NULL THEN 'No min configured in latest Device Inventory'
-                WHEN COALESCE(dc.max_qty, 0) = 0 THEN 'Max is zero'
-                WHEN dc.med_id IS NULL AND d.med_id IS NULL THEN 'No matching pocket configuration found'
-                WHEN COALESCE(dc.current_quantity, d.detailed_current_count, 0) = 0 THEN 'Configured pocket is empty'
-                ELSE 'Review pocket configuration'
-            END AS buyer_review_reason
-        FROM no_inventory n
-        LEFT JOIN detailed d
-          ON n.med_id = d.med_id
-         AND UPPER(TRIM(COALESCE(d.station, ''))) = UPPER(TRIM(COALESCE(n.isa_name, '')))
-         AND UPPER(TRIM(COALESCE(d.pocket_location, ''))) = UPPER(TRIM(COALESCE(n.location, '')))
-        LEFT JOIN device_config dc
-          ON n.med_id = dc.med_id
-         AND UPPER(TRIM(COALESCE(dc.device, ''))) = UPPER(TRIM(COALESCE(n.isa_name, '')))
-         AND UPPER(TRIM(COALESCE(dc.pocket_location, ''))) = UPPER(TRIM(COALESCE(n.location, '')))
-        ORDER BY n.action_dt DESC, n.isa_name, n.location, n.med_desc
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn)
@@ -969,7 +870,6 @@ catalog = load_scan_catalog()
 barcode_crosswalk = load_barcode_crosswalk()
 scan_queue = load_mobile_scan_queue()
 mobile_bud_projects = load_mobile_bud_projects()
-no_inventory_buyer_review = load_no_inventory_buyer_review()
 current_queue_item = None
 
 st.markdown("##### Priority Scan Queue")
@@ -1297,70 +1197,6 @@ else:
     p1.metric("Logged Actions", f"{len(portfolio):,}")
     p2.metric("Expired Removed", f"{int(portfolio['action_type'].eq('Expired product removed').sum()):,}")
     p3.metric("No Inventory Found", f"{int(portfolio['action_type'].eq('No inventory on hand').sum()):,}")
-
-    st.markdown("##### Buyer No-Inventory Pocket Review")
-    if no_inventory_buyer_review.empty:
-        st.info("No no-inventory-on-hand transactions have been logged yet.")
-    else:
-        buyer_review = no_inventory_buyer_review.copy()
-        for col in ["checked_dt", "follow_up_dt", "snapshot_dt"]:
-            if col in buyer_review.columns:
-                buyer_review[col] = pd.to_datetime(buyer_review[col], errors="coerce")
-        for col in ["current_quantity", "min_qty", "max_qty", "days_unused"]:
-            if col in buyer_review.columns:
-                buyer_review[col] = pd.to_numeric(buyer_review[col], errors="coerce")
-        zero_min_count = int(pd.to_numeric(buyer_review["min_qty"], errors="coerce").fillna(0).eq(0).sum())
-        missing_config_count = int(
-            buyer_review["buyer_review_reason"]
-            .fillna("")
-            .astype(str)
-            .str.contains("No matching pocket configuration", case=False, na=False)
-            .sum()
-        )
-        b1, b2, b3 = st.columns(3)
-        b1.metric("Buyer Review Rows", f"{len(buyer_review):,}")
-        b2.metric("Min Zero / Missing", f"{zero_min_count:,}")
-        b3.metric("No Config Match", f"{missing_config_count:,}")
-
-        buyer_cols = [
-            "buyer_review_reason",
-            "med_id",
-            "med_desc",
-            "isa_name",
-            "location",
-            "configured_device",
-            "configured_pocket",
-            "current_quantity",
-            "min_qty",
-            "max_qty",
-            "standard_stock",
-            "active_orders",
-            "backordered",
-            "days_unused",
-            "checked_by",
-            "checked_dt",
-            "note",
-        ]
-        buyer_cols = [col for col in buyer_cols if col in buyer_review.columns]
-        st.dataframe(
-            buyer_review[buyer_cols],
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "buyer_review_reason": "Buyer Review Reason",
-                "current_quantity": st.column_config.NumberColumn("Current Qty", format="%.0f"),
-                "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
-                "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
-                "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
-                "checked_dt": st.column_config.DatetimeColumn("Checked", format="MM/DD/YYYY HH:mm"),
-            },
-        )
-        st.download_button(
-            "Download buyer no-inventory review CSV",
-            data=buyer_review[buyer_cols].to_csv(index=False).encode("utf-8"),
-            file_name="buyer_no_inventory_pocket_review.csv",
-            mime="text/csv",
-        )
 
     portfolio_cols = [
         "action_type",
