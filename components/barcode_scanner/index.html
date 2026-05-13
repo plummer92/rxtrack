@@ -27,7 +27,7 @@
     }
     .actions {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 10px;
     }
     button {
@@ -66,6 +66,7 @@
     <video id="preview" muted playsinline></video>
     <div class="actions">
       <button id="start">Start scan</button>
+      <button id="torch" class="secondary">Torch</button>
       <button id="stop" class="secondary">Stop</button>
     </div>
     <div id="status" class="status">Ready</div>
@@ -98,12 +99,14 @@
     };
     const video = document.getElementById("preview");
     const startButton = document.getElementById("start");
+    const torchButton = document.getElementById("torch");
     const stopButton = document.getElementById("stop");
     const statusEl = document.getElementById("status");
     const codeEl = document.getElementById("code");
     let controls = null;
     let reader = null;
     let lastValue = "";
+    let torchOn = false;
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -136,14 +139,66 @@
           controls = null;
         }
         setStatus("Starting camera...");
-        controls = await reader.decodeFromVideoDevice(undefined, video, (result, error) => {
+        const constraints = {
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            advanced: [{ focusMode: "continuous" }],
+          },
+        };
+        controls = await reader.decodeFromConstraints(constraints, video, (result, error) => {
           if (result) {
             submitCode(result.getText(), result.getBarcodeFormat?.());
           }
         });
+        await improveCameraTrack();
         setStatus("Scanning");
       } catch (err) {
         setStatus(`Camera unavailable: ${err?.message || err}`);
+      }
+    }
+
+    async function improveCameraTrack() {
+      const stream = video.srcObject;
+      const track = stream?.getVideoTracks?.()[0];
+      if (!track || !track.getCapabilities) return;
+      const capabilities = track.getCapabilities();
+      const constraints = {};
+      if (capabilities.focusMode?.includes?.("continuous")) {
+        constraints.focusMode = "continuous";
+      }
+      if (capabilities.exposureMode?.includes?.("continuous")) {
+        constraints.exposureMode = "continuous";
+      }
+      if (capabilities.whiteBalanceMode?.includes?.("continuous")) {
+        constraints.whiteBalanceMode = "continuous";
+      }
+      if (Object.keys(constraints).length) {
+        try {
+          await track.applyConstraints({ advanced: [constraints] });
+        } catch (err) {
+          // Some mobile browsers report capabilities they cannot actually apply.
+        }
+      }
+      torchButton.disabled = !capabilities.torch;
+    }
+
+    async function toggleTorch() {
+      const stream = video.srcObject;
+      const track = stream?.getVideoTracks?.()[0];
+      const capabilities = track?.getCapabilities?.();
+      if (!track || !capabilities?.torch) {
+        setStatus("Torch is not available on this device/browser.");
+        return;
+      }
+      torchOn = !torchOn;
+      try {
+        await track.applyConstraints({ advanced: [{ torch: torchOn }] });
+        torchButton.textContent = torchOn ? "Torch off" : "Torch";
+        setStatus(torchOn ? "Torch on" : "Torch off");
+      } catch (err) {
+        setStatus(`Torch unavailable: ${err?.message || err}`);
       }
     }
 
@@ -152,6 +207,8 @@
         controls.stop();
         controls = null;
       }
+      torchOn = false;
+      torchButton.textContent = "Torch";
       if (video.srcObject) {
         video.srcObject.getTracks().forEach((track) => track.stop());
         video.srcObject = null;
@@ -160,6 +217,7 @@
     }
 
     startButton.addEventListener("click", startScan);
+    torchButton.addEventListener("click", toggleTorch);
     stopButton.addEventListener("click", stopScan);
 
     if (Streamlit) {

@@ -2361,13 +2361,6 @@ def render_management_login(page_name="Management"):
         return True
 
     st.warning(f"{page_name} is password protected.")
-    if not password:
-        st.error(
-            "Management password is not configured. Add `RXTRACK_MANAGEMENT_PASSWORD` "
-            "or set `management.password` in Streamlit secrets."
-        )
-        return False
-
     with st.form(f"management_login_{page_name.replace(' ', '_').lower()}"):
         entered = st.text_input("Management password", type="password")
         submitted = st.form_submit_button("Unlock")

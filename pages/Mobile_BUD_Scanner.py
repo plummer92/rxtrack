@@ -2,12 +2,14 @@ import hashlib
 import re
 from datetime import date
 from io import BytesIO
+from pathlib import Path
 from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from sqlalchemy import text
 from PIL import Image
 
@@ -22,6 +24,8 @@ import App
 st.set_page_config(page_title="Mobile BUD Scanner", page_icon="📱", layout="wide")
 
 engine = App.engine
+BARCODE_SCANNER_DIR = Path(__file__).resolve().parents[1] / "components" / "barcode_scanner"
+barcode_scanner = components.declare_component("barcode_scanner", path=str(BARCODE_SCANNER_DIR))
 
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()
@@ -971,8 +975,18 @@ else:
                     st.success("Marked no inventory on hand and removed this item from the queue.")
                     st.rerun()
 
+st.markdown("##### Live Barcode Scanner")
 st.caption(
-    "On mobile, tap the camera box, take a clear close-up photo of the barcode, then confirm the decoded value below."
+    "Use live scan first on older phones. It keeps the camera active so autofocus has time to settle; use the photo box below if live scan is unavailable."
+)
+live_scan_value = barcode_scanner(default="", key="mobile_live_barcode_scanner")
+if live_scan_value and live_scan_value != st.session_state.get("mobile_barcode_input"):
+    st.session_state["mobile_barcode_input"] = live_scan_value
+    st.success(f"Scanned barcode: {live_scan_value}")
+
+st.markdown("##### Camera Photo Fallback")
+st.caption(
+    "Tap the camera box, hold the phone steady 6-10 inches from the barcode, and take a clear close-up photo."
 )
 st.caption(PHOTO_RETENTION_NOTE)
 camera_photo = st.camera_input(
