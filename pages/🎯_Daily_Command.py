@@ -14,6 +14,8 @@ if hasattr(App, "render_sidebar_chrome"):
 else:
     App.render_sidebar()
 
+App.require_management_access("Daily Command")
+
 engine = App.engine
 
 if hasattr(App, "render_page_intro"):

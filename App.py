@@ -19,6 +19,7 @@ import io
 import warnings
 import json
 import time
+import hmac
 from openpyxl import load_workbook
 
 from sqlalchemy import text
@@ -261,6 +262,18 @@ def init_db():
             active BOOLEAN DEFAULT TRUE,
             notes TEXT,
             created_at TIMESTAMP DEFAULT NOW()
+        );""",
+        """CREATE TABLE IF NOT EXISTS management_coaching_notes (
+            id SERIAL PRIMARY KEY,
+            staff_name TEXT NOT NULL,
+            topic TEXT,
+            coaching_date DATE,
+            follow_up_date DATE,
+            status TEXT DEFAULT 'Open',
+            summary TEXT,
+            next_steps TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
         );""",
         """CREATE TABLE IF NOT EXISTS shift_audit_profiles (
             profile_name TEXT PRIMARY KEY,
@@ -2311,6 +2324,82 @@ def apply_global_styles():
     """, unsafe_allow_html=True)
 
 
+def get_management_password():
+    """Return the configured management password without exposing it in the UI."""
+    env_password = os.environ.get("RXTRACK_MANAGEMENT_PASSWORD")
+    if env_password:
+        return str(env_password)
+
+    secret_paths = [
+        ("management", "password"),
+        ("rxtrack", "management_password"),
+    ]
+    for section, key in secret_paths:
+        try:
+            value = st.secrets.get(section, {}).get(key)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+
+    try:
+        value = st.secrets.get("management_password")
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    return None
+
+
+def management_access_unlocked():
+    return bool(st.session_state.get("_rxtrack_management_unlocked", False))
+
+
+def render_management_login(page_name="Management"):
+    password = get_management_password()
+    if management_access_unlocked():
+        return True
+
+    st.warning(f"{page_name} is password protected.")
+    if not password:
+        st.error(
+            "Management password is not configured. Add `RXTRACK_MANAGEMENT_PASSWORD` "
+            "or set `management.password` in Streamlit secrets."
+        )
+        return False
+
+    with st.form(f"management_login_{page_name.replace(' ', '_').lower()}"):
+        entered = st.text_input("Management password", type="password")
+        submitted = st.form_submit_button("Unlock")
+    if submitted:
+        if hmac.compare_digest(entered or "", password):
+            st.session_state["_rxtrack_management_unlocked"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
+def require_management_access(page_name="Management"):
+    if not render_management_login(page_name):
+        st.stop()
+
+
+def render_management_logout():
+    if management_access_unlocked():
+        if st.button("Lock Management", key="rxtrack_management_logout"):
+            st.session_state["_rxtrack_management_unlocked"] = False
+            st.rerun()
+
+
+def render_management_sidebar_gate():
+    if management_access_unlocked():
+        st.caption("Management unlocked")
+        return
+    with st.expander("Management", expanded=False):
+        render_management_login("Management")
+
+
 def render_page_links():
     def safe_page_link(path, label, icon):
         if path == "App.py" or os.path.exists(path):
@@ -2332,15 +2421,18 @@ def render_page_links():
     safe_page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin & Cassettes", icon="🗑️")
     safe_page_link("pages/Inventory_Quality_Control.py", label="Inventory Quality Control", icon="📦")
     safe_page_link("pages/Mobile_BUD_Scanner.py", label="Mobile BUD Scanner", icon="📱")
-    safe_page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
-
     st.markdown('<div class="rx-nav-label">Performance</div>', unsafe_allow_html=True)
-    safe_page_link("pages/1_⏰_Tardies.py", label="Tardies", icon="⏰")
     safe_page_link("pages/2_🔍_Session_Explorer.py", label="Session Explorer", icon="🔍")
     safe_page_link("pages/📈_Shift_Audit_Monitor.py", label="Shift Audit Monitor", icon="📈")
     safe_page_link("pages/📊_Workforce_Intelligence.py", label="Workforce Intelligence", icon="📊")
     safe_page_link("pages/📥_Pends_Analyzer.py", label="Pends Analyzer", icon="📥")
     safe_page_link("pages/🚨_discrepancy_deep_dive.py", label="Discrepancy Deep Dive", icon="🚨")
+
+    if management_access_unlocked():
+        st.markdown('<div class="rx-nav-label">Management</div>', unsafe_allow_html=True)
+        safe_page_link("pages/🎯_Daily_Command.py", label="Daily Command", icon="🎯")
+        safe_page_link("pages/1_⏰_Tardies.py", label="Tardies", icon="⏰")
+        safe_page_link("pages/Management_Coaching.py", label="Coaching", icon="📝")
 
     st.markdown('<div class="rx-nav-label">Tools</div>', unsafe_allow_html=True)
     safe_page_link("pages/📊_Cycle_Count_Integrity.py", label="Cycle Count Integrity", icon="📊")
@@ -2363,6 +2455,8 @@ def render_sidebar_chrome():
         """, unsafe_allow_html=True)
         render_page_links()
         st.divider()
+        render_management_sidebar_gate()
+        render_management_logout()
         render_demo_mode_toggle()
         render_ui_debug_toggle()
 
@@ -2572,6 +2666,8 @@ def render_sidebar():
         render_page_links()
 
         st.divider()
+        render_management_sidebar_gate()
+        render_management_logout()
         render_demo_mode_toggle()
         render_ui_debug_toggle()
         st.markdown("### Analysis Window")

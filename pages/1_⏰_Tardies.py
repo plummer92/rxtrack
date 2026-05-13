@@ -17,6 +17,8 @@ parse_shift_start = App.parse_shift_start
 load_admin_users = App.load_admin_users
 
 render_sidebar()
+App.require_management_access("Tardies")
+
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Tardiness & Attendance Analytics",
