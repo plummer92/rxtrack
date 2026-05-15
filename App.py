@@ -3,7 +3,7 @@
 # Architecture: Quad-Table Strategy + Attendance + Pricing
 # Updates:
 #   1. Fixed Sidebar Indentation & Duplicate Logic.
-#   2. Implemented Day/Week/Range Date Filters.
+#   2. Implemented Day/Week/Month/Range Date Filters.
 ###############################################################
 
 import streamlit as st
@@ -2667,7 +2667,7 @@ def render_sidebar():
 
         filter_mode = st.radio(
             "Filter Mode",
-            ["Range", "Week", "Day"],
+            ["Range", "Month", "Week", "Day"],
             horizontal=True,
             label_visibility="collapsed",
             key="rxtrack_sidebar_filter_mode",
@@ -2682,6 +2682,18 @@ def render_sidebar():
                 format="MM/DD/YY"
             )
             st.session_state.start_date, st.session_state.end_date = date_range
+
+        elif filter_mode == "Month":
+            selected_month = st.date_input(
+                "Select Month:",
+                value=st.session_state.start_date,
+                min_value=min_selectable_date,
+                max_value=max_selectable_date,
+            )
+            month_start = selected_month.replace(day=1)
+            next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+            st.session_state.start_date = month_start
+            st.session_state.end_date = next_month - timedelta(days=1)
 
         elif filter_mode == "Week":
             week_start = st.date_input(
