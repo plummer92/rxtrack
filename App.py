@@ -2058,6 +2058,8 @@ def clear_app_upload_caches():
         load_overnight_cartfill_orders,
         get_cartfill_available_range,
         load_overnight_cartfill_context,
+        get_stats_range,
+        get_present_dates,
     ]
     for loader in cached_loaders:
         clear_func = getattr(loader, "clear", None)
@@ -2065,6 +2067,7 @@ def clear_app_upload_caches():
             clear_func()
 
 
+@st.cache_data(ttl=300)
 def get_stats_range():
     base_dates = [
         "SELECT dt::date as d FROM events WHERE dt IS NOT NULL",
@@ -2094,13 +2097,20 @@ def get_stats_range():
         return 0, 0, 0, 0, date.today(), date.today()
     return 0, 0, 0, 0, date.today(), date.today()
 
+@st.cache_data(ttl=300)
 def get_present_dates(min_dt, max_dt):
+    if not min_dt or not max_dt:
+        return set()
     sql = """
-        SELECT DISTINCT dt::date FROM events WHERE dt IS NOT NULL
-        UNION
-        SELECT DISTINCT dt::date FROM pharmacy_orders WHERE dt IS NOT NULL
+        SELECT DISTINCT d
+        FROM (
+            SELECT dt::date AS d FROM events WHERE dt IS NOT NULL
+            UNION
+            SELECT dt::date AS d FROM pharmacy_orders WHERE dt IS NOT NULL
+        ) present
+        WHERE d BETWEEN %(start)s AND %(end)s
     """
-    df = run_query(sql)
+    df = run_query(sql, params={"start": min_dt, "end": max_dt})
     if not df.empty:
         col_name = df.columns[0]
         df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
@@ -2725,10 +2735,10 @@ def render_sidebar():
             c3.metric("Sched. Shifts", f"{n_sched:,}")
             c4.metric("Time Punches", f"{n_att:,}")
 
-            present_dates = get_present_dates(min_db, max_db)
             if min_db and max_db and min_db <= max_db:
                 delta = (max_db - min_db).days
                 cal_start = max_db - timedelta(days=90) if delta > 90 else min_db
+                present_dates = get_present_dates(cal_start, max_db)
                 cal_html = '<div class="cal-grid">'
                 curr = cal_start
                 while curr <= max_db:
