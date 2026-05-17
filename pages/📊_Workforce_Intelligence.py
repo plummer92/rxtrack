@@ -20,6 +20,7 @@ seconds_to_mmss = App.seconds_to_mmss
 render_sidebar = App.render_sidebar
 
 render_sidebar()
+App.require_management_access("Workforce Intelligence")
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Workforce Intelligence Scorecard",

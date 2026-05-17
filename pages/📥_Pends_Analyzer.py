@@ -30,6 +30,7 @@ engine = App.engine
 render_sidebar = App.render_sidebar
 
 start_date, end_date = render_sidebar()
+App.require_management_access("Pends Analyzer")
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(

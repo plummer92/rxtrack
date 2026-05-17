@@ -53,6 +53,7 @@ st.set_page_config(
 engine = App.engine
 render_sidebar = App.render_sidebar
 start_date, end_date = render_sidebar()
+App.require_management_access("Verify Count Audit")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:

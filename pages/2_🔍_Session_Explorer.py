@@ -227,6 +227,7 @@ def load_current_pocket_locations(device, med_id):
         return pd.DataFrame()
 
 start_date, end_date = render_sidebar()
+App.require_management_access("Session Explorer")
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Unified Session Explorer",

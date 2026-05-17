@@ -70,6 +70,7 @@ def flag_profile_days(df_profile):
 
 
 start_date, end_date = render_sidebar()
+App.require_management_access("Shift Audit Monitor")
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Shift Audit Monitor",
