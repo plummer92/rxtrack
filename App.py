@@ -2069,25 +2069,52 @@ def clear_app_upload_caches():
 
 @st.cache_data(ttl=300)
 def get_stats_range():
-    base_dates = [
-        "SELECT dt::date as d FROM events WHERE dt IS NOT NULL",
-        "SELECT dt::date as d FROM pharmacy_orders WHERE dt IS NOT NULL",
-        "SELECT dt as d FROM staff_schedule WHERE dt IS NOT NULL",
-        "SELECT dt_date as d FROM attendance_punches WHERE dt_date IS NOT NULL",
-    ]
     try:
         with db_cursor() as (conn, cur):
-            sql = f"""
-                WITH all_dates AS (
-                    {' UNION ALL '.join(base_dates)}
+            sql = """
+                WITH
+                event_stats AS (
+                    SELECT COUNT(*) AS row_count, MIN(dt::date) AS min_dt, MAX(dt::date) AS max_dt
+                    FROM events
+                ),
+                pharmacy_stats AS (
+                    SELECT COUNT(*) AS row_count, MIN(dt::date) AS min_dt, MAX(dt::date) AS max_dt
+                    FROM pharmacy_orders
+                ),
+                schedule_stats AS (
+                    SELECT COUNT(*) AS row_count, MIN(dt) AS min_dt, MAX(dt) AS max_dt
+                    FROM staff_schedule
+                ),
+                attendance_stats AS (
+                    SELECT COUNT(*) AS row_count, MIN(dt_date) AS min_dt, MAX(dt_date) AS max_dt
+                    FROM attendance_punches
                 )
                 SELECT
-                    (SELECT COUNT(*) FROM events),
-                    (SELECT COUNT(*) FROM pharmacy_orders),
-                    (SELECT COUNT(*) FROM staff_schedule),
-                    (SELECT COUNT(*) FROM attendance_punches),
-                    MIN(d), MAX(d)
-                FROM all_dates
+                    event_stats.row_count,
+                    pharmacy_stats.row_count,
+                    schedule_stats.row_count,
+                    attendance_stats.row_count,
+                    (
+                        SELECT MIN(d)
+                        FROM (VALUES
+                            (event_stats.min_dt),
+                            (pharmacy_stats.min_dt),
+                            (schedule_stats.min_dt),
+                            (attendance_stats.min_dt)
+                        ) AS dates(d)
+                        WHERE d IS NOT NULL
+                    ) AS min_dt,
+                    (
+                        SELECT MAX(d)
+                        FROM (VALUES
+                            (event_stats.max_dt),
+                            (pharmacy_stats.max_dt),
+                            (schedule_stats.max_dt),
+                            (attendance_stats.max_dt)
+                        ) AS dates(d)
+                        WHERE d IS NOT NULL
+                    ) AS max_dt
+                FROM event_stats, pharmacy_stats, schedule_stats, attendance_stats
             """
             cur.execute(sql)
             row = cur.fetchone()
