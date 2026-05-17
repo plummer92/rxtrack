@@ -8,6 +8,7 @@ import App
 
 
 st.set_page_config(page_title="Inventory Quality Control", page_icon="📦", layout="wide")
+App.apply_global_styles()
 
 engine = App.engine
 start_date, end_date = App.render_sidebar()

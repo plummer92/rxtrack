@@ -541,6 +541,7 @@ def build_role_task_breakdown(role_name, role_df, assumptions_df, allocation_df,
 
 
 st.set_page_config(page_title="RxTrack Ops Simulator", page_icon="⚖️", layout="wide")
+App.apply_global_styles()
 
 load_data = App.load_data
 render_sidebar = App.render_sidebar

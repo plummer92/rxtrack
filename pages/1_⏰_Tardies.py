@@ -10,6 +10,7 @@ _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: Non
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
 st.set_page_config(page_title="Tardy Analytics", page_icon="⏰", layout="wide")
+App.apply_global_styles()
 render_sidebar = App.render_sidebar
 load_data = App.load_data
 normalize_name = App.normalize_name

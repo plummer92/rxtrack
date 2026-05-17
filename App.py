@@ -2757,6 +2757,7 @@ if _is_main:
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    apply_global_styles()
 
     # Suppress DB/Pandas warnings
     warnings.filterwarnings("ignore", category=UserWarning, module="pandas")

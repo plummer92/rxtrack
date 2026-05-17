@@ -15,6 +15,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 st.set_page_config(page_title="Workforce Intelligence", layout="wide")
+App.apply_global_styles()
 load_data = App.load_data
 seconds_to_mmss = App.seconds_to_mmss
 render_sidebar = App.render_sidebar

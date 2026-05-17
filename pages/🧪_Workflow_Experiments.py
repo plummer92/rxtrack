@@ -298,6 +298,7 @@ def summarize_group(df, group_col, metrics):
 
 
 st.set_page_config(page_title="Workflow Experiments", page_icon="🧪", layout="wide")
+App.apply_global_styles()
 
 load_admin_users = App.load_admin_users
 load_data = App.load_data

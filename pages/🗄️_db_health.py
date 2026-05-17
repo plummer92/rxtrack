@@ -12,6 +12,7 @@ st.set_page_config(
     page_icon="🗄️",
     layout="wide"
 )
+App.apply_global_styles()
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()
 else:

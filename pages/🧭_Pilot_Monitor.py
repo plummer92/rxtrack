@@ -228,6 +228,7 @@ def metric_delta(current, baseline, suffix=""):
 
 
 st.set_page_config(page_title="Pilot Monitor", page_icon="🧭", layout="wide")
+App.apply_global_styles()
 
 load_data = App.load_data
 render_sidebar = App.render_sidebar

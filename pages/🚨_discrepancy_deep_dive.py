@@ -49,6 +49,7 @@ st.set_page_config(
     page_icon="🚨",
     layout="wide",
 )
+App.apply_global_styles()
 
 engine = App.engine
 render_sidebar = App.render_sidebar

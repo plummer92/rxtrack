@@ -10,6 +10,7 @@ from rxtrack_shared import add_return_compare_qty, group_return_compare_qty
 
 
 st.set_page_config(page_title="Projects Portfolio", page_icon="📁", layout="wide")
+App.apply_global_styles()
 
 if hasattr(App, "render_sidebar_chrome"):
     App.render_sidebar_chrome()

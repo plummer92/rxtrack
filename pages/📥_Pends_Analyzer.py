@@ -21,6 +21,7 @@ st.set_page_config(
     page_icon="📥",
     layout="wide"
 )
+App.apply_global_styles()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR

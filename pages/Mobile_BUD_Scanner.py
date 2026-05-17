@@ -22,6 +22,7 @@ import App
 
 
 st.set_page_config(page_title="Mobile BUD Scanner", page_icon="📱", layout="wide")
+App.apply_global_styles()
 
 engine = App.engine
 

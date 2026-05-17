@@ -9,6 +9,7 @@ _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
 
 st.set_page_config(page_title="Cartfill Optimizer", page_icon="🌙", layout="wide")
+App.apply_global_styles()
 
 render_sidebar = App.render_sidebar
 load_orders = App.load_overnight_cartfill_orders

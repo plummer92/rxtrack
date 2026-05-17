@@ -86,6 +86,7 @@ def collapse_iv_display_rows(df):
 
 
 st.set_page_config(page_title="IV Room", page_icon="💉", layout="wide")
+App.apply_global_styles()
 
 render_sidebar = App.render_sidebar
 load_iv_room_data = App.load_iv_room_data

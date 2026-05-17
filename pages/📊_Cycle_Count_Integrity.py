@@ -21,6 +21,7 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 st.set_page_config(page_title="Cycle Count Integrity", page_icon="??", layout="wide")
+App.apply_global_styles()
 
 load_data = App.load_data
 engine = App.engine

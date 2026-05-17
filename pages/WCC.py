@@ -10,6 +10,7 @@ def to_csv_bytes(df):
 
 
 st.set_page_config(page_title="WCC", page_icon="🍼", layout="wide")
+App.apply_global_styles()
 
 start_date, end_date = App.render_sidebar()
 

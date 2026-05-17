@@ -4,6 +4,7 @@ import plotly.express as px
 import App
 
 st.set_page_config(page_title="Shift Audit Monitor", page_icon="📈", layout="wide")
+App.apply_global_styles()
 
 render_sidebar = App.render_sidebar
 seconds_to_mmss = App.seconds_to_mmss

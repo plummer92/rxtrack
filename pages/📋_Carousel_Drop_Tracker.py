@@ -12,6 +12,7 @@ _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: Non
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
 st.set_page_config(page_title="Carousel Drop Tracker", page_icon="ðŸ“‹", layout="wide")
+App.apply_global_styles()
 if hasattr(App, "render_sidebar"):
     start_date, end_date = App.render_sidebar()
 else:
