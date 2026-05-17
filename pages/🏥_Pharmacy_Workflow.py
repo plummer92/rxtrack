@@ -11,8 +11,47 @@ st.set_page_config(page_title="Pharmacy Workflow", page_icon="🏥", layout="wid
 App.apply_global_styles()
 seconds_to_mmss = App.seconds_to_mmss
 render_sidebar = App.render_sidebar
-load_pharmacy_workflow_orders = App.load_pharmacy_workflow_orders
-load_pyxis_workflow_events = App.load_pyxis_workflow_events
+
+
+@st.cache_data(ttl=300)
+def _load_pharmacy_workflow_orders_fallback(start_date, end_date):
+    sql = """
+        SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+        FROM pharmacy_orders
+        WHERE dt::date BETWEEN %s AND %s
+    """
+    df = App.run_query(sql, params=(start_date, end_date))
+    if df.empty:
+        return df
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    for col in ["priority", "med_id", "med_desc", "destination", "user_name"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+    return df[~df["destination"].str.contains("BATCH PICK", case=False, na=False)].copy()
+
+
+@st.cache_data(ttl=300)
+def _load_pyxis_workflow_events_fallback(start_date, end_date):
+    sql = """
+        SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty,
+               e.discrepancy_qty, e.discrepancy_reason, e.ending_qty, c.cost_per_unit
+        FROM events e
+        LEFT JOIN med_costs c ON e.med_id = c.med_id
+        WHERE e.dt::date BETWEEN %s AND %s
+    """
+    df = App.run_query(sql, params=(start_date, end_date))
+    if df.empty:
+        return df
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    for col in ["user_name", "device", "med_id", "med_desc", "event_type", "discrepancy_reason"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    for col in ["qty", "discrepancy_qty", "ending_qty", "cost_per_unit"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
+load_pharmacy_workflow_orders = getattr(App, "load_pharmacy_workflow_orders", _load_pharmacy_workflow_orders_fallback)
+load_pyxis_workflow_events = getattr(App, "load_pyxis_workflow_events", _load_pyxis_workflow_events_fallback)
 
 
 render_sidebar()
