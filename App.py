@@ -1634,6 +1634,43 @@ def load_data(start_date, end_date):
     return df, results["config"], results["pharm"], results["schedule"], results["attendance"]
 
 
+@st.cache_data(ttl=300)
+def load_pharmacy_workflow_orders(start_date, end_date):
+    sql = """
+        SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+        FROM pharmacy_orders
+        WHERE dt::date BETWEEN %s AND %s
+    """
+    df = run_query(sql, params=(start_date, end_date))
+    if df.empty:
+        return df
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    for col in ["priority", "med_id", "med_desc", "destination", "user_name"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+    return df[~df["destination"].str.contains("BATCH PICK", case=False, na=False)].copy()
+
+
+@st.cache_data(ttl=300)
+def load_pyxis_workflow_events(start_date, end_date):
+    sql = """
+        SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty,
+               e.discrepancy_qty, e.discrepancy_reason, e.ending_qty, c.cost_per_unit
+        FROM events e
+        LEFT JOIN med_costs c ON e.med_id = c.med_id
+        WHERE e.dt::date BETWEEN %s AND %s
+    """
+    df = run_query(sql, params=(start_date, end_date))
+    if df.empty:
+        return df
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    for col in ["user_name", "device", "med_id", "med_desc", "event_type", "discrepancy_reason"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    for col in ["qty", "discrepancy_qty", "ending_qty", "cost_per_unit"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+
 def get_zero_verify_events(df_events):
     if df_events.empty or not {"event_type", "qty"}.issubset(df_events.columns):
         return pd.DataFrame()
@@ -2052,6 +2089,8 @@ def clear_app_upload_caches():
         load_day_pharmacy_for_shift_audit,
         load_shift_audit_results,
         load_data,
+        load_pharmacy_workflow_orders,
+        load_pyxis_workflow_events,
         load_iv_room_data,
         load_wcc_compounding_stats,
         load_wcc_cartfill_stats,

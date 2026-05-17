@@ -9,9 +9,11 @@ _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
 st.set_page_config(page_title="Pharmacy Workflow", page_icon="🏥", layout="wide")
 App.apply_global_styles()
-load_data = App.load_data
 seconds_to_mmss = App.seconds_to_mmss
 render_sidebar = App.render_sidebar
+load_pharmacy_workflow_orders = App.load_pharmacy_workflow_orders
+load_pyxis_workflow_events = App.load_pyxis_workflow_events
+
 
 render_sidebar()
 
@@ -32,9 +34,9 @@ else:
 if 'start_date' not in st.session_state:
     st.info("👈 Please select a date range on the **Overview** page first.")
 else:
-    # 1. Load data
+    # 1. Load the light pharmacy-order dataset first. Pyxis events load only for advanced sections.
     with st.spinner("Loading pharmacy data..."):
-        df_events, _, df_pharm, _, _ = load_data(
+        df_pharm = load_pharmacy_workflow_orders(
             st.session_state.start_date,
             st.session_state.end_date
         )
@@ -87,6 +89,73 @@ else:
                                  x='count', y='med_desc', orientation='h', title="Top 10 Problem Meds",
                                  labels={'count': 'Stockout Count', 'med_desc': 'Medication'}, color='count')
                 st.plotly_chart(fig_med, use_container_width=True)
+
+        # --- IV ROOM FAST-MOVER CANDIDATES ---
+        st.divider()
+        st.subheader("💉 IV Room Fast-Mover Candidates")
+        st.caption("Find high-volume IV Room orders that may be worth moving from carousel picking into a ready shelf workflow.")
+
+        iv_mask = (
+            view_pharm["destination"].str.contains(r"\bIV\b|IV Room|Cleanroom|Clean Room", case=False, na=False)
+            | view_pharm["priority"].str.contains(r"\bIV\b|Cleanroom|Clean Room", case=False, na=False)
+        )
+        iv_orders = view_pharm[iv_mask].copy()
+        if iv_orders.empty:
+            st.info("No IV Room or cleanroom pharmacy orders found in the selected window.")
+        else:
+            iv_orders["date"] = iv_orders["dt"].dt.date
+            iv_orders["hour"] = iv_orders["dt"].dt.hour
+            peak_hours = (
+                iv_orders.groupby(["med_id", "hour"]).size().reset_index(name="hour_orders")
+                .sort_values(["med_id", "hour_orders"], ascending=[True, False])
+                .drop_duplicates("med_id")
+                .rename(columns={"hour": "Peak Hour"})
+            )
+            fast_movers = (
+                iv_orders.groupby(["med_id", "med_desc"], dropna=False)
+                .agg(
+                    Orders=("pk", "count"),
+                    Total_Qty=("qty", "sum"),
+                    Active_Days=("date", "nunique"),
+                    Destinations=("destination", lambda s: ", ".join(sorted(set(s.dropna().astype(str)))[:3])),
+                )
+                .reset_index()
+                .merge(peak_hours[["med_id", "Peak Hour"]], on="med_id", how="left")
+            )
+            fast_movers["Avg Orders / Day"] = (fast_movers["Orders"] / fast_movers["Active_Days"].clip(lower=1)).round(2)
+            fast_movers["Est. Minutes Saved"] = fast_movers["Orders"] * 4
+            fast_movers["Suggested Action"] = np.select(
+                [
+                    (fast_movers["Orders"] >= 10) | (fast_movers["Avg Orders / Day"] >= 2),
+                    (fast_movers["Orders"] >= 4) | (fast_movers["Active_Days"] >= 3),
+                ],
+                ["Fast-mover shelf candidate", "Watch"],
+                default="Keep carousel",
+            )
+            fast_movers = fast_movers.sort_values(["Est. Minutes Saved", "Orders"], ascending=False)
+
+            fm1, fm2, fm3 = st.columns(3)
+            fm1.metric("IV Room Orders", f"{len(iv_orders):,}")
+            fm2.metric("Candidate Meds", f"{int((fast_movers['Suggested Action'] == 'Fast-mover shelf candidate').sum()):,}")
+            fm3.metric("Estimated Pick Time Saved", f"{int(fast_movers['Est. Minutes Saved'].sum()):,} min")
+
+            st.dataframe(
+                fast_movers[
+                    [
+                        "med_desc", "med_id", "Orders", "Total_Qty", "Active_Days",
+                        "Avg Orders / Day", "Peak Hour", "Destinations",
+                        "Est. Minutes Saved", "Suggested Action",
+                    ]
+                ].head(25),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "med_desc": "Medication",
+                    "med_id": "Med ID",
+                    "Total_Qty": st.column_config.NumberColumn("Total Qty", format="%.0f"),
+                    "Peak Hour": st.column_config.NumberColumn("Peak Hour", format="%d:00"),
+                },
+            )
 
         # --- CAROUSEL TRANSACTION ANALYZER ---
         st.divider()
@@ -143,6 +212,25 @@ else:
                     )
             else:
                 st.info(f"No carousel records found for code: {selected_carousel_code}")
+
+        # --- RAW DATA VIEW ---
+        with st.expander("📄 View Detailed Workflow Log"):
+            st.dataframe(view_pharm, use_container_width=True)
+
+        load_advanced_pyxis = st.toggle(
+            "Load Pyxis drill-down, par recommendations, and lifecycle analysis",
+            value=False,
+            help="Keeps the page fast by loading Pyxis events only when these deeper sections are needed.",
+        )
+        if not load_advanced_pyxis:
+            st.info("Advanced Pyxis analysis is available on demand. Turn it on above when you need drill-downs, par suggestions, or lifecycle timing.")
+            st.stop()
+
+        with st.spinner("Loading Pyxis events for advanced analysis..."):
+            df_events = load_pyxis_workflow_events(
+                st.session_state.start_date,
+                st.session_state.end_date
+            )
 
         # --- PYXIS TRANSACTION DEEP-DIVE ---
         st.divider()
@@ -234,10 +322,6 @@ else:
             )
         else:
             st.success("✅ No Stockouts found! Par levels appear optimized for this period.")
-
-        # --- RAW DATA VIEW ---
-        with st.expander("📄 View Detailed Workflow Log"):
-            st.dataframe(view_pharm, use_container_width=True)
 
         # --- PLACE AT THE VERY END OF THE FILE ---
         st.divider()
