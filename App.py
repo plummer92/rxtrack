@@ -2917,7 +2917,23 @@ if _is_main:
             "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
-        uploaded = st.file_uploader(f"Upload {u_type}", type=upload_types)
+        uploaded_files = st.file_uploader(f"Upload {u_type}", type=upload_types, accept_multiple_files=True)
+        uploaded = uploaded_files[0] if uploaded_files else None
+        uploaded_names = ", ".join(file.name for file in uploaded_files) if uploaded_files else ""
+
+        def read_uploaded_tabular(file):
+            file.seek(0)
+            if file.name.endswith('.xlsx'):
+                return pd.read_excel(file)
+            try:
+                return pd.read_csv(file, low_memory=False)
+            except UnicodeDecodeError:
+                file.seek(0)
+                return pd.read_csv(file, encoding='latin1', low_memory=False)
+
+        def read_uploaded_batch(files):
+            frames = [read_uploaded_tabular(file) for file in files]
+            return pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
         device_inventory_snapshot_date = date.today()
         update_current_device_inventory = True
         if u_type == "Device Inventory List":
@@ -2931,21 +2947,16 @@ if _is_main:
                 value=device_inventory_snapshot_date == date.today(),
                 help="Leave this unchecked when backfilling older files. The file will still be saved to daily history.",
             )
-        if uploaded and st.button(f"Process {u_type}"):
+        process_label = f"Process {len(uploaded_files)} {u_type} file{'s' if len(uploaded_files) != 1 else ''}" if uploaded_files else f"Process {u_type}"
+        if uploaded_files and st.button(process_label):
             try:
                 upload_started = time.perf_counter()
                 processed_count = 0
                 # 1. Load raw file
                 if u_type in {"Days Since Last Cycle Count Report", "Packaging Report"}:
                     raw = None
-                elif uploaded.name.endswith('.xlsx'):
-                    raw = pd.read_excel(uploaded)
                 else:
-                    try:
-                        raw = pd.read_csv(uploaded, low_memory=False)
-                    except UnicodeDecodeError:
-                        uploaded.seek(0)
-                        raw = pd.read_csv(uploaded, encoding='latin1', low_memory=False)
+                    raw = read_uploaded_batch(uploaded_files)
 
                 # 2. Route to correct SQL Table
                 clean = None 
@@ -2983,7 +2994,16 @@ if _is_main:
                     execute_statement(sql_costs, clean.to_dict("records"), batch=True, table_name="Cost Updates")
 
                 elif u_type == "Staff Schedule":
-                    clean = clean_schedule_data(raw, uploaded if uploaded.name.endswith('.xlsx') else None)
+                    if len(uploaded_files) > 1:
+                        clean = pd.concat(
+                            [
+                                clean_schedule_data(read_uploaded_tabular(file), file if file.name.endswith('.xlsx') else None)
+                                for file in uploaded_files
+                            ],
+                            ignore_index=True,
+                        )
+                    else:
+                        clean = clean_schedule_data(raw, uploaded if uploaded.name.endswith('.xlsx') else None)
                     sql = """INSERT INTO staff_schedule (pk, dt, day_name, staff_name, shift_type, 
                              assignment_type, raw_entry, note, schedule_status, cell_fill_color)
                              VALUES (%(pk)s, %(dt)s, %(day_name)s,
@@ -2993,7 +3013,7 @@ if _is_main:
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Schedule")
 
                 elif u_type == "Attendance Tracking":
-                    clean = clean_attendance_file(uploaded)
+                    clean = pd.concat([clean_attendance_file(file) for file in uploaded_files], ignore_index=True)
                     sql = """INSERT INTO attendance_punches (pk, raw_name, dt_date, start_dt, end_dt) 
                              VALUES (%(pk)s, %(raw_name)s, %(dt_date)s, %(start_dt)s, %(end_dt)s) 
                              ON CONFLICT (pk) DO NOTHING;"""
@@ -3075,7 +3095,7 @@ if _is_main:
                         execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Device Inventory")
 
                 elif u_type == "Days Since Last Cycle Count Report":
-                    clean = clean_cycle_count_status_report(uploaded)
+                    clean = pd.concat([clean_cycle_count_status_report(file) for file in uploaded_files], ignore_index=True)
                     sql = """INSERT INTO cycle_count_status
                              (pk, snapshot_date, source_filename, isa_name, med_id, med_desc, location,
                               cycle_count_interval, last_cycle_count, days_since_last_count, days_over_due)
@@ -3093,7 +3113,7 @@ if _is_main:
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cycle Count Status")
 
                 elif u_type == "Packaging Report":
-                    clean = clean_packaging_report(uploaded)
+                    clean = pd.concat([clean_packaging_report(file) for file in uploaded_files], ignore_index=True)
                     sql = """INSERT INTO packaged_meds
                              (pk, dispense_dt, reception_num, med_id, med_desc, dose_form, qty_per_pack, qoh,
                               manufacturer, ndc, mfg_lot_number, mfg_expire_date, device_id,
@@ -3136,7 +3156,7 @@ if _is_main:
                     processed_count = len(clean)
 
                 elif u_type == "WCC Compounding Stats":
-                    clean = clean_wcc_compounding_stats(raw, uploaded.name)
+                    clean = clean_wcc_compounding_stats(raw, uploaded_names)
                     sql = """INSERT INTO wcc_compounding_stats
                              (pk, component_name, component_id, order_name, administration_dt, barcode_status, source_file)
                              VALUES (%(pk)s, %(component_name)s, %(component_id)s, %(order_name)s,
@@ -3153,7 +3173,7 @@ if _is_main:
                     processed_count = len(clean)
 
                 elif u_type in {"Cartfill Stats (All Areas)", "WCC Cartfill Stats"}:
-                    clean = clean_wcc_cartfill_stats(raw, uploaded.name)
+                    clean = clean_wcc_cartfill_stats(raw, uploaded_names)
                     sql = """INSERT INTO wcc_cartfill_stats
                              (pk, report_start_date, report_end_date, order_medication, med_id,
                               ready_for_dispense_dt, admin_given_dt, prepared_dt, prep_or_dispense_user,
@@ -3180,10 +3200,19 @@ if _is_main:
                     processed_count = len(clean)
 
                 elif u_type == "IV Overnight Cartfill Model":
-                    workbook = clean_overnight_cartfill_workbook(uploaded)
-                    orders = workbook.get("orders", pd.DataFrame())
-                    windows = workbook.get("windows", pd.DataFrame())
-                    staffing = workbook.get("staffing", pd.DataFrame())
+                    workbooks = [clean_overnight_cartfill_workbook(file) for file in uploaded_files]
+                    orders = pd.concat(
+                        [workbook.get("orders", pd.DataFrame()) for workbook in workbooks],
+                        ignore_index=True,
+                    )
+                    windows = pd.concat(
+                        [workbook.get("windows", pd.DataFrame()) for workbook in workbooks],
+                        ignore_index=True,
+                    )
+                    staffing = pd.concat(
+                        [workbook.get("staffing", pd.DataFrame()) for workbook in workbooks],
+                        ignore_index=True,
+                    )
 
                     if not orders.empty:
                         sql_orders = """INSERT INTO overnight_iv_cartfill_orders
@@ -3224,7 +3253,11 @@ if _is_main:
                 if clean is not None:
                     clear_app_upload_caches()
                     elapsed = time.perf_counter() - upload_started
-                    st.success(f"Successfully uploaded {processed_count or len(clean)} records in {elapsed:.1f} seconds.")
+                    st.success(
+                        f"Successfully uploaded {processed_count or len(clean)} records "
+                        f"from {len(uploaded_files)} file{'s' if len(uploaded_files) != 1 else ''} "
+                        f"in {elapsed:.1f} seconds."
+                    )
                 else:
                     st.warning("File type logic not yet implemented for this selection.")
 
