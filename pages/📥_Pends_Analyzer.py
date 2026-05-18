@@ -586,6 +586,166 @@ def build_reload_pairs(unload_df, reload_df, max_days):
     return working
 
 
+def build_unload_gap_periods(pend_history, unload_history, drug_lookup, devices, period_days=84):
+    if pend_history.empty or not devices:
+        return pd.DataFrame(), pd.DataFrame()
+
+    device_set = set(devices)
+    pend_work = pend_history[pend_history["device"].isin(device_set)].copy()
+    if pend_work.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    pend_work["dt"] = pd.to_datetime(pend_work["dt"], errors="coerce")
+    pend_work = pend_work.dropna(subset=["dt", "med_id", "device"])
+    pend_work = pend_work.sort_values(["device", "med_id", "dt"])
+
+    med_device_base = (
+        pend_work
+        .groupby(["device", "med_id"], as_index=False)
+        .agg(
+            first_seen_dt=("dt", "min"),
+            last_config_dt=("dt", "max"),
+            latest_min=("min_qty", "last"),
+            latest_max=("max_qty", "last"),
+            made_standard=("is_standard", lambda x: (x == True).any()),
+            config_events=("pk", "count"),
+        )
+    )
+
+    if not drug_lookup.empty:
+        med_device_base = med_device_base.merge(
+            drug_lookup[["med_id", "display_name", "drug_name", "trade_name", "carousel_location"]],
+            on="med_id",
+            how="left",
+        )
+    else:
+        for col in ["display_name", "drug_name", "trade_name", "carousel_location"]:
+            med_device_base[col] = None
+    med_device_base["display_name"] = med_device_base["display_name"].fillna(med_device_base["med_id"])
+
+    unload_work = unload_history.copy() if not unload_history.empty else pd.DataFrame()
+    if not unload_work.empty:
+        unload_work["dt"] = pd.to_datetime(unload_work["dt"], errors="coerce")
+        unload_work = unload_work[
+            unload_work["device"].isin(device_set) &
+            unload_work["dt"].notna() &
+            unload_work["med_id"].notna()
+        ].copy()
+    else:
+        unload_work = pd.DataFrame(columns=["device", "med_id", "dt", "qty"])
+
+    min_dt = min(
+        pend_work["dt"].min(),
+        unload_work["dt"].min() if not unload_work.empty else pend_work["dt"].min(),
+    ).normalize()
+    max_dt = max(
+        pend_work["dt"].max(),
+        unload_work["dt"].max() if not unload_work.empty else pend_work["dt"].max(),
+    ).normalize()
+
+    if pd.isna(min_dt) or pd.isna(max_dt):
+        return pd.DataFrame(), pd.DataFrame()
+
+    period_delta = pd.Timedelta(days=int(period_days))
+    period_rows = []
+    detail_rows = []
+    period_start = min_dt
+    period_number = 1
+
+    while period_start <= max_dt:
+        period_end = min(period_start + period_delta - pd.Timedelta(seconds=1), max_dt + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        active_pairs = med_device_base[med_device_base["first_seen_dt"].le(period_end)].copy()
+
+        if active_pairs.empty:
+            period_start = period_start + period_delta
+            period_number += 1
+            continue
+
+        unloads_in_period = unload_work[
+            unload_work["dt"].between(period_start, period_end, inclusive="both")
+        ].copy()
+        unloaded_keys = set(zip(unloads_in_period["device"], unloads_in_period["med_id"]))
+        no_unload = active_pairs[
+            ~active_pairs.apply(lambda row: (row["device"], row["med_id"]) in unloaded_keys, axis=1)
+        ].copy()
+
+        prior_unloads = unload_work[unload_work["dt"].lt(period_start)].copy()
+        latest_prior = (
+            prior_unloads
+            .sort_values("dt")
+            .groupby(["device", "med_id"], as_index=False)
+            .agg(last_unload_before_period=("dt", "last"))
+            if not prior_unloads.empty
+            else pd.DataFrame(columns=["device", "med_id", "last_unload_before_period"])
+        )
+        period_unload_summary = (
+            unloads_in_period
+            .groupby("device", as_index=False)
+            .agg(
+                unloaded_meds=("med_id", "nunique"),
+                unload_txns=("med_id", "count"),
+                unload_qty=("qty", "sum"),
+            )
+            if not unloads_in_period.empty
+            else pd.DataFrame(columns=["device", "unloaded_meds", "unload_txns", "unload_qty"])
+        )
+
+        active_summary = (
+            active_pairs.groupby("device", as_index=False)
+            .agg(active_meds=("med_id", "nunique"))
+        )
+        no_unload_summary = (
+            no_unload.groupby("device", as_index=False)
+            .agg(meds_not_unloaded=("med_id", "nunique"))
+        )
+        summary = (
+            active_summary
+            .merge(no_unload_summary, on="device", how="left")
+            .merge(period_unload_summary, on="device", how="left")
+        )
+        for col in ["meds_not_unloaded", "unloaded_meds", "unload_txns", "unload_qty"]:
+            summary[col] = summary[col].fillna(0)
+        summary["not_unloaded_pct"] = np.where(
+            summary["active_meds"].gt(0),
+            summary["meds_not_unloaded"] / summary["active_meds"] * 100,
+            0,
+        )
+
+        for _, row in summary.iterrows():
+            period_rows.append({
+                "period_number": period_number,
+                "period_start": period_start,
+                "period_end": period_end,
+                "device": row["device"],
+                "active_meds": int(row["active_meds"]),
+                "meds_not_unloaded": int(row["meds_not_unloaded"]),
+                "unloaded_meds": int(row["unloaded_meds"]),
+                "unload_txns": int(row["unload_txns"]),
+                "unload_qty": float(row["unload_qty"] or 0),
+                "not_unloaded_pct": float(row["not_unloaded_pct"] or 0),
+            })
+
+        no_unload = no_unload.merge(latest_prior, on=["device", "med_id"], how="left")
+        no_unload["period_number"] = period_number
+        no_unload["period_start"] = period_start
+        no_unload["period_end"] = period_end
+        no_unload["days_since_last_unload_at_period_end"] = (
+            period_end - no_unload["last_unload_before_period"]
+        ).dt.total_seconds().div(86400)
+        no_unload.loc[no_unload["last_unload_before_period"].isna(), "days_since_last_unload_at_period_end"] = np.nan
+        no_unload["days_since_first_seen_at_period_end"] = (
+            period_end - no_unload["first_seen_dt"]
+        ).dt.total_seconds().div(86400)
+        detail_rows.append(no_unload)
+
+        period_start = period_start + period_delta
+        period_number += 1
+
+    period_df = pd.DataFrame(period_rows)
+    detail_df = pd.concat(detail_rows, ignore_index=True) if detail_rows else pd.DataFrame()
+    return period_df, detail_df
+
+
 def classify_boomerang_source(event_type):
     text = str(event_type).lower()
     if "empty" in text or "return bin" in text:
@@ -697,7 +857,8 @@ def add_prior_pend_context(par_events, pend_history, reload_history, unload_hist
     return enriched
 
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab8, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "84-Day No Unload",
     "📋 Par Audit",
     "👤 By User",
     "🖥️ By Device",
@@ -710,6 +871,189 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — PAR AUDIT
 # ─────────────────────────────────────────────────────────────────────────────
+
+with tab8:
+    st.subheader("84-Day No-Unload Review")
+    st.caption(
+        "Counts active med + machine pairs that did not have an unload during each 84-day period, "
+        "starting from the beginning of the uploaded pends/unload history."
+    )
+
+    if df_hist.empty:
+        st.info("No all-time pends/config history is available yet.")
+    else:
+        all_history_devices = sorted(df_hist["device"].dropna().astype(str).unique().tolist())
+        default_floor_pattern = r"(?i)(5th|fifth|5\s*floor|floor\s*5|\b5\s*[a-z]\b|6th|sixth|6\s*floor|floor\s*6|\b6\s*[a-z]\b)"
+
+        c1, c2 = st.columns([1.2, 2])
+        floor_pattern = c1.text_input(
+            "5th / 6th floor machine name filter",
+            value=default_floor_pattern,
+            key="pends_84_day_floor_pattern",
+            help="Regex search against the machine/device name. Adjust this if your machines use a different naming pattern.",
+        )
+        period_days = c1.number_input(
+            "Period length",
+            min_value=7,
+            max_value=365,
+            value=84,
+            step=7,
+            key="pends_84_day_period_length",
+        )
+
+        try:
+            default_devices = [
+                device for device in all_history_devices
+                if pd.Series([device]).str.contains(floor_pattern, regex=True, na=False).iloc[0]
+            ]
+            pattern_error = None
+        except Exception as exc:
+            default_devices = []
+            pattern_error = str(exc)
+
+        if pattern_error:
+            c2.warning(f"Machine filter pattern is not valid: {pattern_error}")
+
+        selected_84_devices = c2.multiselect(
+            "Machines to include",
+            all_history_devices,
+            default=default_devices,
+            key="pends_84_day_devices",
+            help="If the default filter misses a 5th or 6th floor machine, select it here.",
+        )
+
+        if not selected_84_devices:
+            st.warning("Select at least one 5th or 6th floor machine to build the 84-day review.")
+        else:
+            period_summary, period_detail = build_unload_gap_periods(
+                df_hist,
+                df_unloads,
+                df_drugs,
+                selected_84_devices,
+                period_days=int(period_days),
+            )
+
+            if period_summary.empty:
+                st.info("No med + machine history was found for the selected machines.")
+            else:
+                latest_period = int(period_summary["period_number"].max())
+                latest_summary = period_summary[period_summary["period_number"].eq(latest_period)].copy()
+                total_active = int(latest_summary["active_meds"].sum())
+                total_not_unloaded = int(latest_summary["meds_not_unloaded"].sum())
+                current_pct = (total_not_unloaded / total_active * 100) if total_active else 0
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Machines", f"{len(selected_84_devices):,}")
+                m2.metric("Current Active Med+Machine Pairs", f"{total_active:,}")
+                m3.metric(f"No Unload in Latest {int(period_days)}d", f"{total_not_unloaded:,}")
+                m4.metric("Latest No-Unload %", f"{current_pct:.1f}%")
+
+                chart_df = period_summary.copy()
+                chart_df["period_label"] = (
+                    chart_df["period_start"].dt.strftime("%m/%d/%y") + " - " +
+                    chart_df["period_end"].dt.strftime("%m/%d/%y")
+                )
+                fig = px.line(
+                    chart_df,
+                    x="period_label",
+                    y="meds_not_unloaded",
+                    color="device",
+                    markers=True,
+                    title=f"Med + Machine Pairs With No Unload per {int(period_days)}-Day Period",
+                    labels={
+                        "period_label": "Period",
+                        "meds_not_unloaded": "Meds Not Unloaded",
+                        "device": "Machine",
+                    },
+                    hover_data=["active_meds", "unloaded_meds", "unload_txns", "not_unloaded_pct"],
+                )
+                fig.update_layout(xaxis_tickangle=-35, legend_title_text="Machine")
+                st.plotly_chart(fig, width="stretch")
+
+                st.divider()
+                st.subheader("Machine Summary by Period")
+                summary_sorted = period_summary.sort_values(
+                    ["period_number", "meds_not_unloaded"],
+                    ascending=[False, False],
+                )
+                summary_event = st.dataframe(
+                    summary_sorted,
+                    width="stretch",
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    column_config={
+                        "period_number": st.column_config.NumberColumn("Period", format="%d"),
+                        "period_start": st.column_config.DatetimeColumn("Period Start", format="MM/DD/YY"),
+                        "period_end": st.column_config.DatetimeColumn("Period End", format="MM/DD/YY"),
+                        "device": st.column_config.TextColumn("Machine"),
+                        "active_meds": st.column_config.NumberColumn("Active Meds", format="%d"),
+                        "meds_not_unloaded": st.column_config.NumberColumn("Meds Not Unloaded", format="%d"),
+                        "unloaded_meds": st.column_config.NumberColumn("Meds Unloaded", format="%d"),
+                        "unload_txns": st.column_config.NumberColumn("Unload Txns", format="%d"),
+                        "unload_qty": st.column_config.NumberColumn("Unload Qty", format="%.0f"),
+                        "not_unloaded_pct": st.column_config.NumberColumn("No-Unload %", format="%.1f%%"),
+                    },
+                )
+
+                selected_period = latest_period
+                selected_device = None
+                if len(summary_event.selection.rows) > 0:
+                    selected_row = summary_sorted.iloc[summary_event.selection.rows[0]]
+                    selected_period = int(selected_row["period_number"])
+                    selected_device = selected_row["device"]
+
+                detail_view = period_detail[period_detail["period_number"].eq(selected_period)].copy()
+                if selected_device:
+                    detail_view = detail_view[detail_view["device"].eq(selected_device)]
+
+                st.divider()
+                detail_title = f"No-Unload Medication Detail: Period {selected_period}"
+                if selected_device:
+                    detail_title += f" - {selected_device}"
+                st.subheader(detail_title)
+
+                if detail_view.empty:
+                    st.success("Every active med had at least one unload in this period for the selected machine.")
+                else:
+                    detail_cols = [
+                        "period_start", "period_end", "device", "display_name", "med_id",
+                        "first_seen_dt", "last_config_dt", "latest_min", "latest_max",
+                        "made_standard", "last_unload_before_period",
+                        "days_since_last_unload_at_period_end",
+                        "days_since_first_seen_at_period_end",
+                        "carousel_location",
+                    ]
+                    export_df = detail_view[[c for c in detail_cols if c in detail_view.columns]].copy()
+                    st.dataframe(
+                        export_df.sort_values(["device", "display_name"]),
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "period_start": st.column_config.DatetimeColumn("Period Start", format="MM/DD/YY"),
+                            "period_end": st.column_config.DatetimeColumn("Period End", format="MM/DD/YY"),
+                            "device": st.column_config.TextColumn("Machine"),
+                            "display_name": st.column_config.TextColumn("Medication"),
+                            "med_id": st.column_config.TextColumn("Med ID"),
+                            "first_seen_dt": st.column_config.DatetimeColumn("First Seen on Machine", format="MM/DD/YY"),
+                            "last_config_dt": st.column_config.DatetimeColumn("Last Config Event", format="MM/DD/YY"),
+                            "latest_min": st.column_config.NumberColumn("Latest Min", format="%.0f"),
+                            "latest_max": st.column_config.NumberColumn("Latest Max", format="%.0f"),
+                            "made_standard": st.column_config.CheckboxColumn("Standard Stock"),
+                            "last_unload_before_period": st.column_config.DatetimeColumn("Last Unload Before Period", format="MM/DD/YY"),
+                            "days_since_last_unload_at_period_end": st.column_config.NumberColumn("Days Since Last Unload", format="%.0f"),
+                            "days_since_first_seen_at_period_end": st.column_config.NumberColumn("Days Since First Seen", format="%.0f"),
+                            "carousel_location": st.column_config.TextColumn("Carousel Location"),
+                        },
+                    )
+
+                    st.download_button(
+                        "Download selected period detail CSV",
+                        data=export_df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"pends_84_day_no_unload_period_{selected_period}.csv",
+                        mime="text/csv",
+                    )
+
 
 with tab1:
     st.subheader("Par Level Audit")
