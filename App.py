@@ -2918,8 +2918,64 @@ if _is_main:
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded_files = st.file_uploader(f"Upload {u_type}", type=upload_types, accept_multiple_files=True)
-        uploaded = uploaded_files[0] if uploaded_files else None
-        uploaded_names = ", ".join(file.name for file in uploaded_files) if uploaded_files else ""
+
+        class LocalReportFile:
+            def __init__(self, path):
+                self.path = path
+                self.name = os.path.basename(path)
+                self._handle = open(path, "rb")
+
+            def read(self, *args, **kwargs):
+                return self._handle.read(*args, **kwargs)
+
+            def readline(self, *args, **kwargs):
+                return self._handle.readline(*args, **kwargs)
+
+            def seek(self, *args, **kwargs):
+                return self._handle.seek(*args, **kwargs)
+
+            def close(self):
+                return self._handle.close()
+
+        report_folder = st.text_input(
+            "Optional report folder scan",
+            value=r"\\ILXFSCIFS01.il.hshsad.org\PyxisES$\Reports\JMWolfe",
+            help="Scans this server-side folder for files matching the selected file type. This only works if the machine running RxTrack can access the path.",
+        )
+        folder_filename_filter = st.text_input(
+            "Folder filename contains",
+            value="",
+            help="Optional. Use this when the folder contains several report types, for example `Workflow` or `Transaction`.",
+        )
+
+        def list_report_folder_files(folder_path, name_filter=""):
+            if not os.path.isdir(folder_path):
+                raise FileNotFoundError(f"RxTrack cannot access this folder from the running server: {folder_path}")
+            allowed_exts = {".csv", ".xlsx", ".xls", ".txt"}
+            name_filter = str(name_filter or "").strip().lower()
+            paths = []
+            for name in os.listdir(folder_path):
+                path = os.path.join(folder_path, name)
+                if name_filter and name_filter not in name.lower():
+                    continue
+                if os.path.isfile(path) and os.path.splitext(name)[1].lower() in allowed_exts:
+                    paths.append(path)
+            return sorted(paths, key=lambda path: os.path.getmtime(path))
+
+        folder_scan_clicked = st.button(f"Scan folder and process {u_type}")
+        files_to_process = []
+        folder_file_handles = []
+        if folder_scan_clicked:
+            try:
+                folder_paths = list_report_folder_files(report_folder, folder_filename_filter)
+                if folder_paths:
+                    folder_file_handles = [LocalReportFile(path) for path in folder_paths]
+                    files_to_process = folder_file_handles
+                    st.info(f"Found {len(files_to_process)} report file{'s' if len(files_to_process) != 1 else ''} in the folder.")
+                else:
+                    st.warning("No CSV/XLSX/TXT files were found in that folder.")
+            except Exception as folder_error:
+                st.error(str(folder_error))
 
         def read_uploaded_tabular(file):
             file.seek(0)
@@ -2949,6 +3005,12 @@ if _is_main:
             )
         process_label = f"Process {len(uploaded_files)} {u_type} file{'s' if len(uploaded_files) != 1 else ''}" if uploaded_files else f"Process {u_type}"
         if uploaded_files and st.button(process_label):
+            files_to_process = list(uploaded_files)
+
+        if files_to_process:
+            uploaded_files = files_to_process
+            uploaded = uploaded_files[0]
+            uploaded_names = ", ".join(file.name for file in uploaded_files)
             try:
                 upload_started = time.perf_counter()
                 processed_count = 0
@@ -3263,6 +3325,9 @@ if _is_main:
 
             except Exception as e:
                 st.error(f"Processing Error: {e}")
+            finally:
+                for file in folder_file_handles:
+                    file.close()
 
 
     # --- EXECUTE DATA LOADER ---
