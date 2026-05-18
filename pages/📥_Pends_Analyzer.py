@@ -151,10 +151,17 @@ with st.spinner("Loading pends data..."):
     df_drugs = load_drug_names()
     df_device_inventory_standard = load_current_device_inventory_standard()
 
+required_pend_columns = [
+    "pk", "dt", "user_name", "device", "med_id", "location",
+    "action_type", "activity_category", "min_qty", "max_qty", "is_standard", "date",
+]
+for col in required_pend_columns:
+    if col not in df_raw.columns:
+        df_raw[col] = pd.Series(dtype="object")
+
 if df_raw.empty:
     st.warning("No pend activity found for the selected date range.")
     st.info("Upload a Device Activity Log (Pends) via the main upload page to populate this view.")
-    st.stop()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 2 — JOIN DRUG NAMES
@@ -170,6 +177,8 @@ else:
 
 df["display_name"] = df["display_name"].fillna(df["med_id"])
 df["drug_name"]    = df["drug_name"].fillna(df["med_id"])
+df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+df = df.sort_values("dt").reset_index(drop=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LAYER 3 — SIDEBAR FILTERS
@@ -198,10 +207,11 @@ with st.sidebar:
         key="pends_device_filter"
     )
     standard_filter = st.radio(
-        "Standard Stock",
+        "Config standard flag",
         ["All", "Standard Only", "Non-Standard Only"],
         index=0,
-        key="pends_standard_filter"
+        key="pends_standard_filter",
+        help="This comes from pends/config events. Current machine standard stock is shown from Device Inventory where available.",
     )
 
 filtered = df.copy()
@@ -232,8 +242,8 @@ m1.metric("Total Pend Events",  total_pends)
 m2.metric("Unique Medications", unique_meds)
 m3.metric("Users",              unique_users)
 m4.metric("Devices",            unique_devices)
-m5.metric("Made Standard",      standard_ct)
-m6.metric("Non-Standard",       nonstd_ct)
+m5.metric("Config Standard Events", standard_ct)
+m6.metric("Config Non-Standard Events", nonstd_ct)
 
 st.divider()
 
@@ -258,6 +268,7 @@ def load_all_pends_history():
         df_hist["dt"]     = pd.to_datetime(df_hist["dt"], errors="coerce")
         df_hist["med_id"] = df_hist["med_id"].astype(str).str.strip().str.upper()
         df_hist["device"] = df_hist["device"].fillna("Unknown").astype(str).str.strip()
+        df_hist = df_hist.sort_values("dt").reset_index(drop=True)
         return df_hist
     except Exception as e:
         st.warning(f"[load_all_pends_history] {e}")
@@ -715,9 +726,9 @@ def build_unload_gap_periods(pend_history, unload_history, drug_lookup, current_
 
     while period_start <= max_dt:
         period_end = min(period_start + period_delta - pd.Timedelta(seconds=1), max_dt + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-        active_pairs = med_device_base[med_device_base["first_seen_dt"].le(period_end)].copy()
+        configured_pairs = med_device_base[med_device_base["first_seen_dt"].le(period_end)].copy()
 
-        if active_pairs.empty:
+        if configured_pairs.empty:
             period_start = period_start + period_delta
             period_number += 1
             continue
@@ -726,8 +737,8 @@ def build_unload_gap_periods(pend_history, unload_history, drug_lookup, current_
             unload_work["dt"].between(period_start, period_end, inclusive="both")
         ].copy()
         unloaded_keys = set(zip(unloads_in_period["device"], unloads_in_period["med_id"]))
-        no_unload = active_pairs[
-            ~active_pairs.apply(lambda row: (row["device"], row["med_id"]) in unloaded_keys, axis=1)
+        no_unload = configured_pairs[
+            ~configured_pairs.apply(lambda row: (row["device"], row["med_id"]) in unloaded_keys, axis=1)
         ].copy()
 
         prior_unloads = unload_work[unload_work["dt"].lt(period_start)].copy()
@@ -751,24 +762,24 @@ def build_unload_gap_periods(pend_history, unload_history, drug_lookup, current_
             else pd.DataFrame(columns=["device", "unloaded_meds", "unload_txns", "unload_qty"])
         )
 
-        active_summary = (
-            active_pairs.groupby("device", as_index=False)
-            .agg(active_meds=("med_id", "nunique"))
+        configured_summary = (
+            configured_pairs.groupby("device", as_index=False)
+            .agg(configured_meds=("med_id", "nunique"))
         )
         no_unload_summary = (
             no_unload.groupby("device", as_index=False)
             .agg(meds_not_unloaded=("med_id", "nunique"))
         )
         summary = (
-            active_summary
+            configured_summary
             .merge(no_unload_summary, on="device", how="left")
             .merge(period_unload_summary, on="device", how="left")
         )
         for col in ["meds_not_unloaded", "unloaded_meds", "unload_txns", "unload_qty"]:
             summary[col] = summary[col].fillna(0)
         summary["not_unloaded_pct"] = np.where(
-            summary["active_meds"].gt(0),
-            summary["meds_not_unloaded"] / summary["active_meds"] * 100,
+            summary["configured_meds"].gt(0),
+            summary["meds_not_unloaded"] / summary["configured_meds"] * 100,
             0,
         )
 
@@ -778,7 +789,7 @@ def build_unload_gap_periods(pend_history, unload_history, drug_lookup, current_
                 "period_start": period_start,
                 "period_end": period_end,
                 "device": row["device"],
-                "active_meds": int(row["active_meds"]),
+                "configured_meds": int(row["configured_meds"]),
                 "meds_not_unloaded": int(row["meds_not_unloaded"]),
                 "unloaded_meds": int(row["unloaded_meds"]),
                 "unload_txns": int(row["unload_txns"]),
@@ -988,9 +999,9 @@ with tab8:
             else:
                 latest_period = int(period_summary["period_number"].max())
                 latest_summary = period_summary[period_summary["period_number"].eq(latest_period)].copy()
-                total_active = int(latest_summary["active_meds"].sum())
+                total_configured = int(latest_summary["configured_meds"].sum())
                 total_not_unloaded = int(latest_summary["meds_not_unloaded"].sum())
-                current_pct = (total_not_unloaded / total_active * 100) if total_active else 0
+                current_pct = (total_not_unloaded / total_configured * 100) if total_configured else 0
                 latest_detail = period_detail[period_detail["period_number"].eq(latest_period)].copy()
                 current_standard_not_unloaded = (
                     int(latest_detail["current_standard_stock"].fillna(False).sum())
@@ -1005,7 +1016,7 @@ with tab8:
 
                 m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Machines", f"{len(selected_84_devices):,}")
-                m2.metric("Current Active Med+Machine Pairs", f"{total_active:,}")
+                m2.metric("Configured Med+Machine Pairs", f"{total_configured:,}")
                 m3.metric(f"No Unload in Latest {int(period_days)}d", f"{total_not_unloaded:,}")
                 m4.metric("Latest No-Unload %", f"{current_pct:.1f}%")
                 m5.metric("Current Standard Stock", f"{current_standard_not_unloaded:,}")
@@ -1031,7 +1042,7 @@ with tab8:
                         "meds_not_unloaded": "Meds Not Unloaded",
                         "device": "Machine",
                     },
-                    hover_data=["active_meds", "unloaded_meds", "unload_txns", "not_unloaded_pct"],
+                    hover_data=["configured_meds", "unloaded_meds", "unload_txns", "not_unloaded_pct"],
                 )
                 fig.update_layout(xaxis_tickangle=-35, legend_title_text="Machine")
                 st.plotly_chart(fig, width="stretch")
@@ -1053,7 +1064,7 @@ with tab8:
                         "period_start": st.column_config.DatetimeColumn("Period Start", format="MM/DD/YY"),
                         "period_end": st.column_config.DatetimeColumn("Period End", format="MM/DD/YY"),
                         "device": st.column_config.TextColumn("Machine"),
-                        "active_meds": st.column_config.NumberColumn("Active Meds", format="%d"),
+                        "configured_meds": st.column_config.NumberColumn("Configured Meds", format="%d"),
                         "meds_not_unloaded": st.column_config.NumberColumn("Meds Not Unloaded", format="%d"),
                         "unloaded_meds": st.column_config.NumberColumn("Meds Unloaded", format="%d"),
                         "unload_txns": st.column_config.NumberColumn("Unload Txns", format="%d"),
@@ -1165,8 +1176,8 @@ with tab1:
     par_audit["in_master"] = par_audit["carousel_location"].notna()
 
     sa, sb = st.columns(2)
-    sa.metric("Meds Made Standard Stock", int(par_audit["made_standard"].sum()))
-    sb.metric("Meds Kept Non-Standard",   int((par_audit["made_standard"] == False).sum()))
+    sa.metric("Meds Made Standard in Config", int(par_audit["made_standard"].sum()))
+    sb.metric("Meds Kept Non-Standard in Config", int((par_audit["made_standard"] == False).sum()))
 
     # Most pended meds chart
     top_pended = par_audit.head(25)
@@ -1178,10 +1189,10 @@ with tab1:
             color="made_standard",
             color_discrete_map={True: "#22c55e", False: "#f97316"},
             title="Most Frequently Pended Medications",
-            labels={"pend_count": "Pend Events", "display_name": "", "made_standard": "Standard Stock"}
+            labels={"pend_count": "Pend Events", "display_name": "", "made_standard": "Config Standard"}
         )
         fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=500)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     # Full audit table
     st.divider()
@@ -1194,7 +1205,7 @@ with tab1:
 
     st.dataframe(
         par_audit[display_cols],
-        use_container_width=True,
+        width="stretch",
         column_config={
             "display_name":      st.column_config.TextColumn("Medication"),
             "drug_name":         st.column_config.TextColumn("Generic Name"),
@@ -1202,9 +1213,9 @@ with tab1:
             "carousel_location": st.column_config.TextColumn("Carousel Location"),
             "is_controlled":     st.column_config.CheckboxColumn("Controlled"),
             "pend_count":        st.column_config.NumberColumn("# Pend Events", format="%d"),
-            "latest_min":        st.column_config.NumberColumn("Current Min",   format="%.0f"),
-            "latest_max":        st.column_config.NumberColumn("Current Max",   format="%.0f"),
-            "made_standard":     st.column_config.CheckboxColumn("Made Standard"),
+            "latest_min":        st.column_config.NumberColumn("Latest Config Min", format="%.0f"),
+            "latest_max":        st.column_config.NumberColumn("Latest Config Max", format="%.0f"),
+            "made_standard":     st.column_config.CheckboxColumn("Made Standard in Config"),
             "in_master":         st.column_config.CheckboxColumn("In Carousel Master"),
             "last_pend_dt":      st.column_config.DatetimeColumn("Last Pended",  format="MM/DD/YY HH:mm"),
             "first_pend_dt":     st.column_config.DatetimeColumn("First Pended", format="MM/DD/YY HH:mm"),
@@ -1225,12 +1236,12 @@ with tab1:
                 "med_id", "display_name", "pend_count", "latest_min", "latest_max",
                 "made_standard", "users", "last_pend_dt"
             ] if c in new_meds.columns]],
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "pend_count":    st.column_config.NumberColumn("# Pend Events", format="%d"),
                 "latest_min":    st.column_config.NumberColumn("Min",           format="%.0f"),
                 "latest_max":    st.column_config.NumberColumn("Max",           format="%.0f"),
-                "made_standard": st.column_config.CheckboxColumn("Made Standard"),
+                "made_standard": st.column_config.CheckboxColumn("Made Standard in Config"),
                 "last_pend_dt":  st.column_config.DatetimeColumn("Last Pended", format="MM/DD/YY HH:mm"),
             },
             hide_index=True
@@ -1261,22 +1272,22 @@ with tab2:
     fig_usr = px.bar(
         user_summary,
         x="user_name", y=["made_standard", "non_standard"],
-        title="Pend Events by User — Standard vs Non-Standard",
+        title="Pend Events by User - Config Standard vs Non-Standard",
         labels={"value": "Events", "user_name": "", "variable": ""},
         color_discrete_map={"made_standard": "#22c55e", "non_standard": "#f97316"},
         barmode="stack"
     )
-    st.plotly_chart(fig_usr, use_container_width=True)
+    st.plotly_chart(fig_usr, width="stretch")
 
     st.dataframe(
         user_summary,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "total_pends":    st.column_config.NumberColumn("Total Pends",   format="%d"),
             "unique_meds":    st.column_config.NumberColumn("Unique Meds",   format="%d"),
             "unique_devices": st.column_config.NumberColumn("Devices",       format="%d"),
-            "made_standard":  st.column_config.NumberColumn("Made Standard", format="%d"),
-            "non_standard":   st.column_config.NumberColumn("Non-Standard",  format="%d"),
+            "made_standard":  st.column_config.NumberColumn("Config Standard", format="%d"),
+            "non_standard":   st.column_config.NumberColumn("Config Non-Standard", format="%d"),
             "last_pend":      st.column_config.DatetimeColumn("Last Pend",   format="MM/DD/YY HH:mm"),
         },
         hide_index=True
@@ -1285,26 +1296,29 @@ with tab2:
     # Per-user drill-down
     st.divider()
     st.subheader("User Drill-Down")
-    sel_user = st.selectbox(
-        "Select user",
-        sorted(filtered["user_name"].dropna().unique()),
-        key="user_drilldown"
-    )
-    if sel_user:
+    user_options = sorted(filtered["user_name"].dropna().unique())
+    if not user_options:
+        st.info("No user drill-down rows match the current filters.")
+    else:
+        sel_user = st.selectbox(
+            "Select user",
+            user_options,
+            key="user_drilldown"
+        )
         user_detail = filtered[filtered["user_name"] == sel_user][[
             "dt", "display_name", "drug_name", "device",
             "action_type", "min_qty", "max_qty", "is_standard"
         ]].sort_values("dt", ascending=False)
         st.dataframe(
             user_detail,
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "dt":           st.column_config.DatetimeColumn("Date/Time", format="MM/DD/YY HH:mm"),
                 "display_name": st.column_config.TextColumn("Medication"),
                 "drug_name":    st.column_config.TextColumn("Generic"),
                 "min_qty":      st.column_config.NumberColumn("Min",        format="%.0f"),
                 "max_qty":      st.column_config.NumberColumn("Max",        format="%.0f"),
-                "is_standard":  st.column_config.CheckboxColumn("Standard"),
+                "is_standard":  st.column_config.CheckboxColumn("Config Standard"),
             },
             hide_index=True
         )
@@ -1334,22 +1348,22 @@ with tab3:
     fig_dev = px.bar(
         device_summary,
         x="device", y=["made_standard", "non_standard"],
-        title="Pend Events by Device — Standard vs Non-Standard",
+        title="Pend Events by Device - Config Standard vs Non-Standard",
         labels={"value": "Events", "device": "", "variable": ""},
         color_discrete_map={"made_standard": "#22c55e", "non_standard": "#f97316"},
         barmode="stack"
     )
-    st.plotly_chart(fig_dev, use_container_width=True)
+    st.plotly_chart(fig_dev, width="stretch")
 
     st.dataframe(
         device_summary,
-        use_container_width=True,
+        width="stretch",
         column_config={
             "total_pends":   st.column_config.NumberColumn("Total Pends",   format="%d"),
             "unique_meds":   st.column_config.NumberColumn("Unique Meds",   format="%d"),
             "unique_users":  st.column_config.NumberColumn("Users",         format="%d"),
-            "made_standard": st.column_config.NumberColumn("Made Standard", format="%d"),
-            "non_standard":  st.column_config.NumberColumn("Non-Standard",  format="%d"),
+            "made_standard": st.column_config.NumberColumn("Config Standard", format="%d"),
+            "non_standard":  st.column_config.NumberColumn("Config Non-Standard", format="%d"),
             "last_pend":     st.column_config.DatetimeColumn("Last Pend",   format="MM/DD/YY HH:mm"),
         },
         hide_index=True
@@ -1358,26 +1372,29 @@ with tab3:
     # Per-device drill-down
     st.divider()
     st.subheader("Device Drill-Down")
-    sel_device = st.selectbox(
-        "Select device",
-        sorted(filtered["device"].dropna().unique()),
-        key="device_drilldown"
-    )
-    if sel_device:
+    device_options = sorted(filtered["device"].dropna().unique())
+    if not device_options:
+        st.info("No device drill-down rows match the current filters.")
+    else:
+        sel_device = st.selectbox(
+            "Select device",
+            device_options,
+            key="device_drilldown"
+        )
         dev_detail = filtered[filtered["device"] == sel_device][[
             "dt", "display_name", "drug_name", "user_name",
             "action_type", "min_qty", "max_qty", "is_standard"
         ]].sort_values("dt", ascending=False)
         st.dataframe(
             dev_detail,
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "dt":           st.column_config.DatetimeColumn("Date/Time", format="MM/DD/YY HH:mm"),
                 "display_name": st.column_config.TextColumn("Medication"),
                 "drug_name":    st.column_config.TextColumn("Generic"),
                 "min_qty":      st.column_config.NumberColumn("Min",        format="%.0f"),
                 "max_qty":      st.column_config.NumberColumn("Max",        format="%.0f"),
-                "is_standard":  st.column_config.CheckboxColumn("Standard"),
+                "is_standard":  st.column_config.CheckboxColumn("Config Standard"),
             },
             hide_index=True
         )
@@ -1400,7 +1417,7 @@ with tab4:
 
     st.dataframe(
         filtered[display_cols].sort_values("dt", ascending=False),
-        use_container_width=True,
+        width="stretch",
         column_config={
             "dt":                st.column_config.DatetimeColumn("Date/Time",    format="MM/DD/YY HH:mm"),
             "display_name":      st.column_config.TextColumn("Medication"),
@@ -1410,7 +1427,7 @@ with tab4:
             "is_controlled":     st.column_config.CheckboxColumn("Controlled"),
             "min_qty":           st.column_config.NumberColumn("Min",            format="%.0f"),
             "max_qty":           st.column_config.NumberColumn("Max",            format="%.0f"),
-            "is_standard":       st.column_config.CheckboxColumn("Standard"),
+            "is_standard":       st.column_config.CheckboxColumn("Config Standard"),
         },
         hide_index=True
     )
@@ -1464,7 +1481,7 @@ with tab5:
                 labels={"count": "Flags", "flag_type": ""}
             )
             fig_flags.update_layout(showlegend=False)
-            st.plotly_chart(fig_flags, use_container_width=True)
+            st.plotly_chart(fig_flags, width="stretch")
 
         # Top flagged meds
         top_flagged = (
@@ -1489,7 +1506,7 @@ with tab5:
                 labels={"flag_count": "Flags", "display_name": ""}
             )
             fig_top.update_layout(yaxis={"categoryorder": "total ascending"}, height=450)
-            st.plotly_chart(fig_top, use_container_width=True)
+            st.plotly_chart(fig_top, width="stretch")
 
         # Filter by flag type
         st.divider()
@@ -1506,7 +1523,7 @@ with tab5:
                 "flag_type", "flag_detail", "dt", "user_name", "device",
                 "display_name", "min_qty", "max_qty", "is_standard"
             ] if c in outlier_view.columns]].sort_values("dt", ascending=False),
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "flag_type":   st.column_config.TextColumn("Flag"),
                 "flag_detail": st.column_config.TextColumn("Detail"),
@@ -1514,7 +1531,7 @@ with tab5:
                 "display_name":st.column_config.TextColumn("Medication"),
                 "min_qty":     st.column_config.NumberColumn("Min",          format="%.0f"),
                 "max_qty":     st.column_config.NumberColumn("Max",          format="%.0f"),
-                "is_standard": st.column_config.CheckboxColumn("Standard"),
+                "is_standard": st.column_config.CheckboxColumn("Config Standard"),
             },
             hide_index=True
         )
@@ -1569,7 +1586,7 @@ with tab6:
                 annotation_text=f"Median: {active_df['days_to_first_unload'].median():.0f}d",
                 annotation_position="top right"
             )
-            st.plotly_chart(fig_dist, use_container_width=True)
+            st.plotly_chart(fig_dist, width="stretch")
 
         col_a, col_b = st.columns(2)
 
@@ -1604,7 +1621,7 @@ with tab6:
                     text="Unloaded = Par Max", showarrow=False,
                     font=dict(color="#ef4444", size=11)
                 )
-                st.plotly_chart(fig_par, use_container_width=True)
+                st.plotly_chart(fig_par, width="stretch")
 
         # ── Never unloaded breakdown ──────────────────────────────────────────
         with col_b:
@@ -1620,11 +1637,11 @@ with tab6:
                     labels={
                         "pend_count":    "Times Pended",
                         "display_name":  "",
-                        "made_standard": "Made Standard"
+                        "made_standard": "Config Standard"
                     }
                 )
                 fig_never.update_layout(yaxis={"categoryorder": "total ascending"})
-                st.plotly_chart(fig_never, use_container_width=True)
+                st.plotly_chart(fig_never, width="stretch")
 
         st.divider()
 
@@ -1646,7 +1663,7 @@ with tab6:
 
         st.dataframe(
             lc_view[display_cols],
-            use_container_width=True,
+            width="stretch",
             column_config={
                 "status":               st.column_config.TextColumn("Status"),
                 "display_name":         st.column_config.TextColumn("Medication"),
@@ -1654,7 +1671,7 @@ with tab6:
                 "first_pend_dt":        st.column_config.DatetimeColumn("First Pended",      format="MM/DD/YY HH:mm"),
                 "last_min_qty":         st.column_config.NumberColumn("Min Par",             format="%.0f"),
                 "last_max_qty":         st.column_config.NumberColumn("Max Par",             format="%.0f"),
-                "made_standard":        st.column_config.CheckboxColumn("Standard Stock"),
+                "made_standard":        st.column_config.CheckboxColumn("Config Standard"),
                 "days_to_first_unload": st.column_config.NumberColumn("Days to First Use",   format="%d"),
                 "first_unload_dt":      st.column_config.DatetimeColumn("First Unloaded",    format="MM/DD/YY HH:mm"),
                 "last_unload_dt":       st.column_config.DatetimeColumn("Last Unloaded",     format="MM/DD/YY HH:mm"),
@@ -2072,7 +2089,7 @@ with tab7:
 
             st.dataframe(
                 view[show_cols].sort_values("dt", ascending=False),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "dt":          st.column_config.DatetimeColumn("Timestamp", format="MM/DD/YY HH:mm"),
@@ -2094,7 +2111,7 @@ with tab7:
                     "last_unloaded_qty": st.column_config.NumberColumn("Last Unload Qty", format="%.0f"),
                     "last_unloaded_user": st.column_config.TextColumn("Last Unload User"),
                     "last_unloaded_event_type": st.column_config.TextColumn("Last Unload Event"),
-                    "is_standard": st.column_config.CheckboxColumn("Standard"),
+                    "is_standard": st.column_config.CheckboxColumn("Config Standard"),
                 }
             )
 
