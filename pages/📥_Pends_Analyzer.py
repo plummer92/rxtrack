@@ -113,9 +113,43 @@ def load_drug_names():
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_current_device_inventory_standard():
+    """Latest Device Inventory List standard-stock flag by machine + med."""
+    try:
+        sql = text("""
+            SELECT device, med_id, standard_stock, current_quantity, min_qty, max_qty, days_unused
+            FROM device_inventory
+        """)
+        with engine.connect() as conn:
+            inv = pd.read_sql(sql, conn)
+        if inv.empty:
+            return inv
+        inv["device"] = inv["device"].fillna("Unknown").astype(str).str.strip()
+        inv["med_id"] = inv["med_id"].astype(str).str.strip().str.upper()
+        inv["standard_stock"] = inv["standard_stock"].fillna("").astype(str).str.strip().str.upper()
+        inv["is_current_standard_stock"] = inv["standard_stock"].eq("Y")
+        grouped = (
+            inv.groupby(["device", "med_id"], as_index=False)
+            .agg(
+                current_standard_stock=("is_current_standard_stock", "max"),
+                device_inventory_standard_stock=("standard_stock", lambda s: "Y" if (s == "Y").any() else "N"),
+                current_quantity=("current_quantity", "sum"),
+                device_inventory_min=("min_qty", "max"),
+                device_inventory_max=("max_qty", "max"),
+                days_unused=("days_unused", "max"),
+            )
+        )
+        return grouped
+    except Exception as e:
+        st.warning(f"[load_current_device_inventory_standard] {e}")
+        return pd.DataFrame()
+
+
 with st.spinner("Loading pends data..."):
     df_raw   = load_pends(start_date, end_date)
     df_drugs = load_drug_names()
+    df_device_inventory_standard = load_current_device_inventory_standard()
 
 if df_raw.empty:
     st.warning("No pend activity found for the selected date range.")
@@ -586,7 +620,7 @@ def build_reload_pairs(unload_df, reload_df, max_days):
     return working
 
 
-def build_unload_gap_periods(pend_history, unload_history, drug_lookup, devices, period_days=84):
+def build_unload_gap_periods(pend_history, unload_history, drug_lookup, current_inventory, devices, period_days=84):
     if pend_history.empty or not devices:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -607,7 +641,7 @@ def build_unload_gap_periods(pend_history, unload_history, drug_lookup, devices,
             last_config_dt=("dt", "max"),
             latest_min=("min_qty", "last"),
             latest_max=("max_qty", "last"),
-            made_standard=("is_standard", lambda x: (x == True).any()),
+            made_standard_from_config=("is_standard", lambda x: (x == True).any()),
             config_events=("pk", "count"),
         )
     )
@@ -622,6 +656,33 @@ def build_unload_gap_periods(pend_history, unload_history, drug_lookup, devices,
         for col in ["display_name", "drug_name", "trade_name", "carousel_location"]:
             med_device_base[col] = None
     med_device_base["display_name"] = med_device_base["display_name"].fillna(med_device_base["med_id"])
+
+    if current_inventory is not None and not current_inventory.empty:
+        med_device_base = med_device_base.merge(
+            current_inventory,
+            on=["device", "med_id"],
+            how="left",
+        )
+    else:
+        med_device_base["current_standard_stock"] = np.nan
+        med_device_base["device_inventory_standard_stock"] = ""
+        med_device_base["current_quantity"] = np.nan
+        med_device_base["device_inventory_min"] = np.nan
+        med_device_base["device_inventory_max"] = np.nan
+        med_device_base["days_unused"] = np.nan
+
+    med_device_base["current_standard_stock"] = med_device_base["current_standard_stock"].fillna(False).astype(bool)
+    med_device_base["standard_status"] = np.select(
+        [
+            med_device_base["current_standard_stock"],
+            med_device_base["made_standard_from_config"],
+        ],
+        [
+            "Standard in current Device Inventory",
+            "Made standard in pends/config history",
+        ],
+        default="Not standard/unknown",
+    )
 
     unload_work = unload_history.copy() if not unload_history.empty else pd.DataFrame()
     if not unload_work.empty:
@@ -888,6 +949,10 @@ with tab8:
         st.info("No all-time pends/config history is available yet.")
     else:
         all_history_devices = sorted(df_hist["device"].dropna().astype(str).unique().tolist())
+        if df_device_inventory_standard.empty:
+            st.warning(
+                "No current Device Inventory List rows are loaded, so current standard-stock flags cannot be verified here."
+            )
         c1, c2 = st.columns([1, 2.2])
         period_days = c1.number_input(
             "Period length",
@@ -913,6 +978,7 @@ with tab8:
                 df_hist,
                 df_unloads,
                 df_drugs,
+                df_device_inventory_standard,
                 selected_84_devices,
                 period_days=int(period_days),
             )
@@ -925,12 +991,28 @@ with tab8:
                 total_active = int(latest_summary["active_meds"].sum())
                 total_not_unloaded = int(latest_summary["meds_not_unloaded"].sum())
                 current_pct = (total_not_unloaded / total_active * 100) if total_active else 0
+                latest_detail = period_detail[period_detail["period_number"].eq(latest_period)].copy()
+                current_standard_not_unloaded = (
+                    int(latest_detail["current_standard_stock"].fillna(False).sum())
+                    if "current_standard_stock" in latest_detail.columns
+                    else 0
+                )
+                config_standard_not_unloaded = (
+                    int(latest_detail["made_standard_from_config"].fillna(False).sum())
+                    if "made_standard_from_config" in latest_detail.columns
+                    else 0
+                )
 
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
                 m1.metric("Machines", f"{len(selected_84_devices):,}")
                 m2.metric("Current Active Med+Machine Pairs", f"{total_active:,}")
                 m3.metric(f"No Unload in Latest {int(period_days)}d", f"{total_not_unloaded:,}")
                 m4.metric("Latest No-Unload %", f"{current_pct:.1f}%")
+                m5.metric("Current Standard Stock", f"{current_standard_not_unloaded:,}")
+                st.caption(
+                    f"`Current Standard Stock` comes from the latest Device Inventory List. "
+                    f"`Made standard in config` would count {config_standard_not_unloaded:,} rows in the latest period."
+                )
 
                 chart_df = period_summary.copy()
                 chart_df["period_label"] = (
@@ -1001,31 +1083,43 @@ with tab8:
                     st.success("Every active med had at least one unload in this period for the selected machine.")
                 else:
                     detail_cols = [
-                        "period_start", "period_end", "device", "display_name", "med_id",
-                        "first_seen_dt", "last_config_dt", "latest_min", "latest_max",
-                        "made_standard", "last_unload_before_period",
+                        "device", "display_name", "med_id", "standard_status",
+                        "current_standard_stock", "made_standard_from_config",
+                        "latest_min", "latest_max", "device_inventory_min", "device_inventory_max",
+                        "current_quantity", "days_unused",
+                        "last_unload_before_period",
                         "days_since_last_unload_at_period_end",
+                        "first_seen_dt",
                         "days_since_first_seen_at_period_end",
                         "carousel_location",
                     ]
                     export_df = detail_view[[c for c in detail_cols if c in detail_view.columns]].copy()
+                    for col in ["days_since_last_unload_at_period_end", "days_since_first_seen_at_period_end"]:
+                        if col in export_df.columns:
+                            export_df[col] = export_df[col].round(0)
+                    export_df = export_df[
+                        export_df["med_id"].notna() & export_df["med_id"].astype(str).str.strip().ne("")
+                    ]
                     st.dataframe(
                         export_df.sort_values(["device", "display_name"]),
                         width="stretch",
                         hide_index=True,
                         column_config={
-                            "period_start": st.column_config.DatetimeColumn("Period Start", format="MM/DD/YY"),
-                            "period_end": st.column_config.DatetimeColumn("Period End", format="MM/DD/YY"),
                             "device": st.column_config.TextColumn("Machine"),
                             "display_name": st.column_config.TextColumn("Medication"),
                             "med_id": st.column_config.TextColumn("Med ID"),
-                            "first_seen_dt": st.column_config.DatetimeColumn("First Seen on Machine", format="MM/DD/YY"),
-                            "last_config_dt": st.column_config.DatetimeColumn("Last Config Event", format="MM/DD/YY"),
-                            "latest_min": st.column_config.NumberColumn("Latest Min", format="%.0f"),
-                            "latest_max": st.column_config.NumberColumn("Latest Max", format="%.0f"),
-                            "made_standard": st.column_config.CheckboxColumn("Standard Stock"),
+                            "standard_status": st.column_config.TextColumn("Standard Source"),
+                            "current_standard_stock": st.column_config.CheckboxColumn("Current Standard"),
+                            "made_standard_from_config": st.column_config.CheckboxColumn("Config Made Standard"),
+                            "latest_min": st.column_config.NumberColumn("Config Min", format="%.0f"),
+                            "latest_max": st.column_config.NumberColumn("Config Max", format="%.0f"),
+                            "device_inventory_min": st.column_config.NumberColumn("Device Inv Min", format="%.0f"),
+                            "device_inventory_max": st.column_config.NumberColumn("Device Inv Max", format="%.0f"),
+                            "current_quantity": st.column_config.NumberColumn("Current Qty", format="%.0f"),
+                            "days_unused": st.column_config.NumberColumn("Device Inv Days Unused", format="%.0f"),
                             "last_unload_before_period": st.column_config.DatetimeColumn("Last Unload Before Period", format="MM/DD/YY"),
                             "days_since_last_unload_at_period_end": st.column_config.NumberColumn("Days Since Last Unload", format="%.0f"),
+                            "first_seen_dt": st.column_config.DatetimeColumn("First Seen on Machine", format="MM/DD/YY"),
                             "days_since_first_seen_at_period_end": st.column_config.NumberColumn("Days Since First Seen", format="%.0f"),
                             "carousel_location": st.column_config.TextColumn("Carousel Location"),
                         },
