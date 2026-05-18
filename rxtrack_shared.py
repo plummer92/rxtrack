@@ -242,10 +242,7 @@ def normalize_name(full_name):
             if len(parts) > 1 and len(parts[1]) > 0:
                 last_initial = parts[1][0]
 
-    for key, val in NAME_MAPPINGS.items():
-        if key in first_name:
-            first_name = val
-            break
+    first_name = NAME_MAPPINGS.get(first_name, first_name)
 
     if first_name in AMBIGUOUS_NAMES and last_initial:
         return f"{first_name} {last_initial}"
