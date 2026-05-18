@@ -1131,6 +1131,7 @@ def clean_packaging_report(file_obj):
 def clean_device_inventory(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
+    original_columns = list(df.columns)
 
     med_desc_col = "MedDescription.1" if "MedDescription.1" in df.columns else "MedDescription"
     colmap = {
@@ -1153,6 +1154,11 @@ def clean_device_inventory(df):
         "DaysUnused": "days_unused",
     }
     df = df.rename(columns=colmap)
+
+    # Pyxis Device Inventory exports put StandardStock in column V. Keep this
+    # fallback for files where the header is blank, shifted, or renamed.
+    if "standard_stock" not in df.columns and len(original_columns) >= 22:
+        df["standard_stock"] = df[original_columns[21]]
 
     required = list(colmap.values())
     for col in required:
