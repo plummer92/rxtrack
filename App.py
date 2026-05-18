@@ -2938,9 +2938,14 @@ if _is_main:
                 return self._handle.close()
 
         report_folder = st.text_input(
-            "Optional report folder scan",
+            "Optional report folder scan (UNC path)",
             value=r"\\ILXFSCIFS01.il.hshsad.org\PyxisES$\Reports\JMWolfe",
-            help="Scans this server-side folder for files matching the selected file type. This only works if the machine running RxTrack can access the path.",
+            help="Tries this hospital network path first. This only works if RxTrack is running locally on a work-network PC that can access the share.",
+        )
+        mapped_report_folder = st.text_input(
+            "Mapped drive path",
+            value=r"Z:\Reports\JMWolfe",
+            help="Optional fallback. If the UNC path fails, map the network share to a drive letter and enter that path here.",
         )
         folder_filename_filter = st.text_input(
             "Folder filename contains",
@@ -2948,13 +2953,28 @@ if _is_main:
             help="Optional. Use this when the folder contains several report types, for example `Workflow` or `Transaction`.",
         )
 
+        def folder_access_help_message(primary_path, fallback_path=None):
+            fallback_text = f"\n- Mapped drive fallback tried: `{fallback_path}`" if fallback_path else ""
+            return (
+                "RxTrack could not access the report folder from the machine running the app.\n\n"
+                f"- UNC path tried: `{primary_path}`"
+                f"{fallback_text}\n"
+                "- The app must be running locally on your hospital work PC or another machine inside the hospital network.\n"
+                "- Streamlit Cloud cannot access hospital network shares like `\\\\ILXFSCIFS01...`.\n"
+                "- If the UNC path fails locally, map the network folder to a drive letter such as `Z:` and use the mapped drive path."
+            )
+
         def list_report_folder_files(folder_path, name_filter=""):
             if not os.path.isdir(folder_path):
-                raise FileNotFoundError(f"RxTrack cannot access this folder from the running server: {folder_path}")
+                raise FileNotFoundError(f"Path does not exist or is not accessible: {folder_path}")
             allowed_exts = {".csv", ".xlsx", ".xls", ".txt"}
             name_filter = str(name_filter or "").strip().lower()
             paths = []
-            for name in os.listdir(folder_path):
+            try:
+                names = os.listdir(folder_path)
+            except Exception as list_error:
+                raise PermissionError(f"Path exists but RxTrack could not list files: {folder_path}. {list_error}") from list_error
+            for name in names:
                 path = os.path.join(folder_path, name)
                 if name_filter and name_filter not in name.lower():
                     continue
@@ -2962,18 +2982,71 @@ if _is_main:
                     paths.append(path)
             return sorted(paths, key=lambda path: os.path.getmtime(path))
 
+        def find_accessible_report_files(primary_path, fallback_path="", name_filter=""):
+            attempts = []
+            for label, path in [("UNC path", primary_path), ("Mapped drive path", fallback_path)]:
+                clean_path = str(path or "").strip()
+                if not clean_path:
+                    continue
+                try:
+                    return clean_path, list_report_folder_files(clean_path, name_filter), attempts
+                except Exception as path_error:
+                    attempts.append((label, clean_path, str(path_error)))
+            raise FileNotFoundError(folder_access_help_message(primary_path, fallback_path))
+
+        test_folder_clicked = st.button("Test folder access")
+        if test_folder_clicked:
+            try:
+                active_folder, folder_paths, attempts = find_accessible_report_files(
+                    report_folder,
+                    mapped_report_folder,
+                    folder_filename_filter,
+                )
+                st.success(f"Folder access works: `{active_folder}`")
+                if attempts:
+                    for label, path, error_text in attempts:
+                        st.warning(f"{label} failed for `{path}`. Fallback succeeded. Details: {error_text}")
+                if folder_paths:
+                    st.info(f"Found {len(folder_paths)} matching CSV/XLSX/TXT file{'s' if len(folder_paths) != 1 else ''}. Showing first 10.")
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "file_name": os.path.basename(path),
+                                    "modified": datetime.fromtimestamp(os.path.getmtime(path)),
+                                    "path": path,
+                                }
+                                for path in folder_paths[:10]
+                            ]
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                    )
+                else:
+                    st.warning("Folder is accessible, but no CSV/XLSX/TXT files matched the current filename filter.")
+            except Exception as folder_error:
+                st.error(str(folder_error))
+
         folder_scan_clicked = st.button(f"Scan folder and process {u_type}")
         files_to_process = []
         folder_file_handles = []
         if folder_scan_clicked:
             try:
-                folder_paths = list_report_folder_files(report_folder, folder_filename_filter)
+                active_folder, folder_paths, attempts = find_accessible_report_files(
+                    report_folder,
+                    mapped_report_folder,
+                    folder_filename_filter,
+                )
                 if folder_paths:
                     folder_file_handles = [LocalReportFile(path) for path in folder_paths]
                     files_to_process = folder_file_handles
+                    st.success(f"Using report folder: `{active_folder}`")
+                    if attempts:
+                        for label, path, error_text in attempts:
+                            st.warning(f"{label} failed for `{path}`. Fallback succeeded. Details: {error_text}")
                     st.info(f"Found {len(files_to_process)} report file{'s' if len(files_to_process) != 1 else ''} in the folder.")
                 else:
-                    st.warning("No CSV/XLSX/TXT files were found in that folder.")
+                    st.warning("Folder is accessible, but no CSV/XLSX/TXT files matched the current filename filter.")
             except Exception as folder_error:
                 st.error(str(folder_error))
 
