@@ -358,11 +358,81 @@ sessions = sessions.sort_values(['User', 'Start'])
 sessions['Next Start'] = sessions.groupby('User')['Start'].shift(-1)
 sessions['Walk Time'] = (sessions['Next Start'] - sessions['End']).dt.total_seconds()
 
+
+def build_movement_segments(user_sessions):
+    if user_sessions.empty:
+        return pd.DataFrame()
+
+    ordered = user_sessions.sort_values("Start").reset_index(drop=True).copy()
+    segments = []
+
+    for idx, row in ordered.iterrows():
+        source_type = str(row.get("Source Type") or row.get("Source") or "Work")
+        device = str(row.get("Device") or "Unknown")
+        duration_sec = max(float(row.get("Duration") or 0), 0)
+        plot_end = max(row["End"], row["Start"] + pd.Timedelta(seconds=duration_sec))
+        segment_type = "Pharmacy Work Time" if source_type == "Pharmacy" else "Machine Time"
+
+        segments.append({
+            "Step": len(segments) + 1,
+            "Segment": segment_type,
+            "Start": row["Start"],
+            "End": row["End"],
+            "Plot End": plot_end,
+            "Duration Sec": duration_sec,
+            "Duration": seconds_to_mmss(duration_sec),
+            "From": "",
+            "To": device,
+            "Stop": device,
+            "Display": device,
+            "Short Label": device,
+            "Lane": "Tech route",
+            "Session ID": row["session_id"],
+            "Source": row.get("Source"),
+            "Transactions": int(row.get("Tx Count") or 0),
+            "Primary Event": row.get("Primary Event"),
+            "Primary Med": row.get("Primary Med"),
+        })
+
+        walk_sec = row.get("Walk Time")
+        next_start = row.get("Next Start")
+        has_next = idx + 1 < len(ordered)
+        if has_next and pd.notna(next_start) and pd.notna(walk_sec) and 0 < float(walk_sec) < 7200:
+            next_device = str(ordered.iloc[idx + 1].get("Device") or "Unknown")
+            segments.append({
+                "Step": len(segments) + 1,
+                "Segment": "Walk Time",
+                "Start": row["End"],
+                "End": next_start,
+                "Plot End": next_start,
+                "Duration Sec": float(walk_sec),
+                "Duration": seconds_to_mmss(float(walk_sec)),
+                "From": device,
+                "To": next_device,
+                "Stop": f"{device} -> {next_device}",
+                "Display": f"{device} to {next_device}",
+                "Short Label": "Walk",
+                "Lane": "Tech route",
+                "Session ID": np.nan,
+                "Source": "",
+                "Transactions": 0,
+                "Primary Event": "",
+                "Primary Med": "",
+            })
+
+    return pd.DataFrame(segments)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs(["Session View", "Shift Timeline", "Shift Work Map", "Inventory Accuracy"])
+tab1, tab_visualizer, tab2, tab3, tab4 = st.tabs([
+    "Session View",
+    "Movement Visualizer",
+    "Shift Timeline",
+    "Shift Work Map",
+    "Inventory Accuracy",
+])
 
 WORK_TYPE_ORDER = [
     "Carousel / 0400 Pull",
@@ -526,6 +596,169 @@ with tab1:
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — SHIFT TIMELINE
 # ─────────────────────────────────────────────────────────────────────────────
+
+with tab_visualizer:
+    st.subheader("Tech Movement Visualizer")
+    st.caption(
+        "Follow one tech through each stop, with machine time and walking gaps shown in the order they happened."
+    )
+
+    v1, v2 = st.columns([1, 1.4])
+    movement_dates = sorted(sessions["Start"].dt.date.dropna().unique())
+
+    if not movement_dates:
+        st.info("No session dates are available for the selected range.")
+    else:
+        default_movement_date = end_date if end_date in movement_dates else movement_dates[-1]
+        if st.session_state.get("movement_visualizer_date") not in movement_dates:
+            st.session_state.movement_visualizer_date = default_movement_date
+
+        movement_date = v1.selectbox(
+            "Date",
+            options=movement_dates,
+            index=movement_dates.index(st.session_state.movement_visualizer_date),
+            key="movement_visualizer_date",
+            format_func=lambda value: value.strftime("%m/%d/%Y (%A)"),
+        )
+
+        movement_day_sessions = sessions[sessions["Start"].dt.date == movement_date].copy()
+        movement_users = sorted(movement_day_sessions["User"].dropna().unique())
+
+        if not movement_users:
+            st.info("No tech sessions were found for that date.")
+        else:
+            if st.session_state.get("movement_visualizer_user") not in movement_users:
+                st.session_state.movement_visualizer_user = movement_users[0]
+
+            movement_user = v2.selectbox(
+                "Technician",
+                options=movement_users,
+                index=movement_users.index(st.session_state.movement_visualizer_user),
+                key="movement_visualizer_user",
+            )
+
+            route_sessions = movement_day_sessions[movement_day_sessions["User"].eq(movement_user)].copy()
+            route_segments = build_movement_segments(route_sessions)
+
+            if route_segments.empty:
+                st.info("No movement segments were found for that technician.")
+            else:
+                work_mask = route_segments["Segment"].ne("Walk Time")
+                work_sec = route_segments.loc[work_mask, "Duration Sec"].sum()
+                walk_sec = route_segments.loc[~work_mask, "Duration Sec"].sum()
+                total_sec = work_sec + walk_sec
+                walk_pct = (walk_sec / total_sec * 100) if total_sec else 0
+                unique_stops = route_sessions["Device"].nunique()
+                longest_walk = route_segments.loc[
+                    route_segments["Segment"].eq("Walk Time"), "Duration Sec"
+                ].max()
+                if pd.isna(longest_walk):
+                    longest_walk = 0
+
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Stops", f"{len(route_sessions):,}")
+                m2.metric("Machines / Areas", f"{unique_stops:,}")
+                m3.metric("Machine Time", seconds_to_mmss(work_sec))
+                m4.metric("Walk Time", seconds_to_mmss(walk_sec))
+                m5.metric("Walk %", f"{walk_pct:.1f}%")
+
+                route_segments["Start Text"] = route_segments["Start"].dt.strftime("%H:%M:%S")
+                route_segments["End Text"] = route_segments["End"].dt.strftime("%H:%M:%S")
+
+                fig = px.timeline(
+                    route_segments,
+                    x_start="Start",
+                    x_end="Plot End",
+                    y="Lane",
+                    color="Segment",
+                    text="Short Label",
+                    hover_data={
+                        "Step": True,
+                        "Display": True,
+                        "Duration": True,
+                        "Start Text": True,
+                        "End Text": True,
+                        "Transactions": True,
+                        "Primary Event": True,
+                        "Primary Med": True,
+                        "Lane": False,
+                        "Start": False,
+                        "End": False,
+                        "Plot End": False,
+                        "Duration Sec": False,
+                    },
+                    color_discrete_map={
+                        "Machine Time": "#2563eb",
+                        "Pharmacy Work Time": "#0f766e",
+                        "Walk Time": "#f59e0b",
+                    },
+                    title=f"{movement_user} route on {movement_date.strftime('%m/%d/%Y')}",
+                )
+                fig.update_yaxes(visible=False)
+                fig.update_traces(textposition="inside", insidetextanchor="middle")
+                fig.update_layout(
+                    height=260,
+                    margin=dict(l=10, r=10, t=52, b=10),
+                    legend_title_text="",
+                    xaxis_title="Time",
+                    hoverlabel=dict(align="left"),
+                )
+                st.plotly_chart(fig, width="stretch")
+
+                st.caption(
+                    f"Longest single walk gap: {seconds_to_mmss(longest_walk)}. "
+                    "Walk time is the time between the end of one stop and the first transaction at the next stop."
+                )
+
+                display_segments = route_segments[[
+                    "Step",
+                    "Segment",
+                    "Start",
+                    "End",
+                    "Duration",
+                    "From",
+                    "To",
+                    "Transactions",
+                    "Primary Event",
+                    "Primary Med",
+                    "Session ID",
+                ]].copy()
+                display_segments["Session ID"] = display_segments["Session ID"].astype("Int64")
+
+                st.caption("Click a machine-time row to open the exact transactions documented for that stop.")
+                movement_event = st.dataframe(
+                    display_segments,
+                    width="stretch",
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    column_config={
+                        "Start": st.column_config.DatetimeColumn("Start", format="HH:mm:ss"),
+                        "End": st.column_config.DatetimeColumn("End", format="HH:mm:ss"),
+                    },
+                )
+
+                if len(movement_event.selection.rows) > 0:
+                    selected_segment = display_segments.iloc[movement_event.selection.rows[0]]
+                    selected_session_id = selected_segment["Session ID"]
+                    if pd.notna(selected_session_id):
+                        stop_details = combined[
+                            combined["session_id"].eq(int(selected_session_id))
+                        ].sort_values("dt")
+
+                        st.divider()
+                        st.subheader(f"Stop Documentation: {selected_segment['To']}")
+                        st.dataframe(
+                            stop_details[["dt", "source", "device", "event_type", "med_desc", "qty"]],
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "dt": st.column_config.DatetimeColumn("Time", format="HH:mm:ss")
+                            },
+                        )
+                    else:
+                        st.info("That row is walk time. Select a machine-time row to see transaction documentation.")
+
 
 with tab4:
     st.subheader("Inventory Accuracy by Delivery Run")
