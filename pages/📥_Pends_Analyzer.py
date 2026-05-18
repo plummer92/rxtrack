@@ -729,6 +729,11 @@ def build_unload_gap_periods(pend_history, unload_history, drug_lookup, devices,
         no_unload["period_number"] = period_number
         no_unload["period_start"] = period_start
         no_unload["period_end"] = period_end
+        no_unload["last_unload_before_period"] = pd.to_datetime(
+            no_unload["last_unload_before_period"],
+            errors="coerce",
+        )
+        no_unload["first_seen_dt"] = pd.to_datetime(no_unload["first_seen_dt"], errors="coerce")
         no_unload["days_since_last_unload_at_period_end"] = (
             period_end - no_unload["last_unload_before_period"]
         ).dt.total_seconds().div(86400)
@@ -883,15 +888,7 @@ with tab8:
         st.info("No all-time pends/config history is available yet.")
     else:
         all_history_devices = sorted(df_hist["device"].dropna().astype(str).unique().tolist())
-        default_floor_pattern = r"(?i)(5th|fifth|5\s*floor|floor\s*5|\b5\s*[a-z]\b|6th|sixth|6\s*floor|floor\s*6|\b6\s*[a-z]\b)"
-
-        c1, c2 = st.columns([1.2, 2])
-        floor_pattern = c1.text_input(
-            "5th / 6th floor machine name filter",
-            value=default_floor_pattern,
-            key="pends_84_day_floor_pattern",
-            help="Regex search against the machine/device name. Adjust this if your machines use a different naming pattern.",
-        )
+        c1, c2 = st.columns([1, 2.2])
         period_days = c1.number_input(
             "Period length",
             min_value=7,
@@ -901,29 +898,16 @@ with tab8:
             key="pends_84_day_period_length",
         )
 
-        try:
-            default_devices = [
-                device for device in all_history_devices
-                if pd.Series([device]).str.contains(floor_pattern, regex=True, na=False).iloc[0]
-            ]
-            pattern_error = None
-        except Exception as exc:
-            default_devices = []
-            pattern_error = str(exc)
-
-        if pattern_error:
-            c2.warning(f"Machine filter pattern is not valid: {pattern_error}")
-
         selected_84_devices = c2.multiselect(
             "Machines to include",
             all_history_devices,
-            default=default_devices,
+            default=[],
             key="pends_84_day_devices",
-            help="If the default filter misses a 5th or 6th floor machine, select it here.",
+            placeholder="Select the 5th and 6th floor machines to include",
         )
 
         if not selected_84_devices:
-            st.warning("Select at least one 5th or 6th floor machine to build the 84-day review.")
+            st.info("Select the machines you want included, then the 84-day review will build from all available history.")
         else:
             period_summary, period_detail = build_unload_gap_periods(
                 df_hist,
