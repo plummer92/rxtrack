@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import io
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 import App
 
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
@@ -15,6 +16,20 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
     return buf.getvalue()
+
+
+def read_sql_with_retry(sql, params=None, attempts=2):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            with engine.connect() as conn:
+                return pd.read_sql(sql, conn, params=params)
+        except OperationalError as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                break
+            engine.dispose()
+    raise last_error
 
 st.set_page_config(
     page_title="Pends Analyzer",
@@ -61,8 +76,7 @@ def load_pends(start, end):
             FROM config_events
             WHERE dt::date BETWEEN :start AND :end
         """)
-        with engine.connect() as conn:
-            df = pd.read_sql(sql, conn, params={"start": start, "end": end})
+        df = read_sql_with_retry(sql, params={"start": start, "end": end})
         df["dt"]          = pd.to_datetime(df["dt"], errors="coerce")
         df["user_name"]   = df["user_name"].fillna("Unknown").astype(str).str.strip()
         df["device"]      = df["device"].fillna("Unknown").astype(str).str.strip()
@@ -121,8 +135,7 @@ def load_current_device_inventory_standard():
             SELECT device, med_id, standard_stock, current_quantity, min_qty, max_qty, days_unused
             FROM device_inventory
         """)
-        with engine.connect() as conn:
-            inv = pd.read_sql(sql, conn)
+        inv = read_sql_with_retry(sql)
         if inv.empty:
             return inv
         inv["device"] = inv["device"].fillna("Unknown").astype(str).str.strip()
@@ -263,8 +276,7 @@ def load_all_pends_history():
     """Full all-time config_events — needed for historical baselines."""
     try:
         sql = text("SELECT pk, dt, user_name, device, med_id, min_qty, max_qty, is_standard FROM config_events")
-        with engine.connect() as conn:
-            df_hist = pd.read_sql(sql, conn)
+        df_hist = read_sql_with_retry(sql)
         df_hist["dt"]     = pd.to_datetime(df_hist["dt"], errors="coerce")
         df_hist["med_id"] = df_hist["med_id"].astype(str).str.strip().str.upper()
         df_hist["device"] = df_hist["device"].fillna("Unknown").astype(str).str.strip()
@@ -292,8 +304,7 @@ def load_all_unloads():
               AND e.event_type NOT ILIKE '%cancel%'
               AND e.event_type NOT ILIKE '%eject%'
         """)
-        with engine.connect() as conn:
-            df_ul = pd.read_sql(sql, conn)
+        df_ul = read_sql_with_retry(sql)
         df_ul["dt"]     = pd.to_datetime(df_ul["dt"], errors="coerce")
         df_ul["med_id"] = df_ul["med_id"].astype(str).str.strip().str.upper()
         df_ul["device"] = df_ul["device"].fillna("Unknown").astype(str).str.strip()
@@ -316,8 +327,7 @@ def load_all_reloads():
                OR event_type ILIKE '%replenish%'
                OR event_type ~* '(^|[^a-z])load([^a-z]|$)'
         """)
-        with engine.connect() as conn:
-            df_rl = pd.read_sql(sql, conn)
+        df_rl = read_sql_with_retry(sql)
         df_rl["dt"] = pd.to_datetime(df_rl["dt"], errors="coerce")
         df_rl["med_id"] = df_rl["med_id"].astype(str).str.strip().str.upper()
         df_rl["device"] = df_rl["device"].fillna("Unknown").astype(str).str.strip()
