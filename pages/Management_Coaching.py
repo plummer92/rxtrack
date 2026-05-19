@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pandas as pd
@@ -38,7 +39,7 @@ def load_coaching_notes():
             text(
                 """
                 SELECT id, staff_name, topic, coaching_date, follow_up_date,
-                       status, summary, next_steps, source_page, source_key, created_at, updated_at
+                       status, summary, next_steps, source_page, source_key, source_payload_json, created_at, updated_at
                 FROM management_coaching_notes
                 ORDER BY COALESCE(follow_up_date, coaching_date) DESC NULLS LAST, id DESC
                 """
@@ -207,6 +208,37 @@ with list_col:
             st.write(selected_note["summary"])
             if pd.notna(selected_note.get("next_steps")) and str(selected_note.get("next_steps")).strip():
                 st.caption(f"Next steps: {selected_note['next_steps']}")
+            payload_text = selected_note.get("source_payload_json")
+            if pd.notna(payload_text) and str(payload_text).strip():
+                try:
+                    evidence = pd.DataFrame(json.loads(payload_text))
+                except Exception:
+                    evidence = pd.DataFrame()
+                if not evidence.empty:
+                    st.markdown("**Strong Pattern Evidence**")
+                    chain_cols = [
+                        "Verify Time", "Pyxis", "Med ID", "Medication", "Prior Refill Time",
+                        "Prior Event", "Refill Entered", "Pull Qty", "Refill vs Pull",
+                        "Later Verify Off", "Verify User", "Inventory Events Since",
+                    ]
+                    visible_cols = [col for col in chain_cols if col in evidence.columns]
+                    st.dataframe(evidence[visible_cols], width="stretch", hide_index=True)
+
+                    chart_cols = ["Refill Entered", "Pull Qty", "Later Verify Off"]
+                    if all(col in evidence.columns for col in chart_cols):
+                        chart_df = evidence.copy()
+                        if "Verify Time" not in chart_df.columns:
+                            chart_df["Verify Time"] = ""
+                        if "Med ID" not in chart_df.columns:
+                            chart_df["Med ID"] = ""
+                        chart_df["Occurrence"] = (
+                            chart_df["Verify Time"].astype(str)
+                            + " | "
+                            + chart_df["Med ID"].astype(str)
+                        )
+                        chart_df = chart_df[["Occurrence"] + chart_cols].set_index("Occurrence")
+                        chart_df = chart_df.apply(pd.to_numeric, errors="coerce").fillna(0)
+                        st.bar_chart(chart_df)
 
             c1, c2, c3 = st.columns(3)
             if c1.button("Mark Open", key=f"open_{selected_id}"):

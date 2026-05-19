@@ -1,4 +1,5 @@
 ﻿import io
+import json
 from datetime import timedelta
 
 import numpy as np
@@ -229,7 +230,7 @@ def save_completed_rows(rows: pd.DataFrame, notes: str = "", manual_correction_b
     return result.rowcount or 0
 
 
-def save_strong_patterns_to_management(action_plan: pd.DataFrame, audit_start, audit_end) -> int:
+def save_strong_patterns_to_management(action_plan: pd.DataFrame, filtered_df: pd.DataFrame, audit_start, audit_end) -> int:
     if action_plan.empty:
         return 0
     strong_plan = action_plan[action_plan["strong"].fillna(0).astype(int) > 0].copy()
@@ -238,9 +239,9 @@ def save_strong_patterns_to_management(action_plan: pd.DataFrame, audit_start, a
 
     sql = text("""
         INSERT INTO management_coaching_notes
-            (staff_name, topic, coaching_date, follow_up_date, status, summary, next_steps, source_page, source_key)
+            (staff_name, topic, coaching_date, follow_up_date, status, summary, next_steps, source_page, source_key, source_payload_json)
         VALUES
-            (:staff_name, :topic, CURRENT_DATE, CURRENT_DATE, 'Open', :summary, :next_steps, :source_page, :source_key)
+            (:staff_name, :topic, CURRENT_DATE, CURRENT_DATE, 'Open', :summary, :next_steps, :source_page, :source_key, :source_payload_json)
         ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
             coaching_date = CURRENT_DATE,
             follow_up_date = CURRENT_DATE,
@@ -250,17 +251,49 @@ def save_strong_patterns_to_management(action_plan: pd.DataFrame, audit_start, a
             END,
             summary = EXCLUDED.summary,
             next_steps = EXCLUDED.next_steps,
+            source_payload_json = EXCLUDED.source_payload_json,
             updated_at = NOW()
     """)
     payload = []
     for _, row in strong_plan.iterrows():
         staff_name = str(row["prior_refill_user"]).strip()
         source_key = f"verify-count-audit-strong:{staff_name.lower()}"
+        strong_rows = filtered_df[
+            (filtered_df["prior_refill_by"].astype(str).str.strip() == staff_name) &
+            (filtered_df["evidence_status"] == "Strong refill-entry pattern")
+        ].sort_values("abs_discrepancy_qty", ascending=False)
+        evidence_rows = []
+        examples = []
+        for _, detail in strong_rows.iterrows():
+            verify_time = pd.to_datetime(detail.get("dt"), errors="coerce")
+            prior_time = pd.to_datetime(detail.get("prior_refill_dt"), errors="coerce")
+            verify_label = verify_time.strftime("%m/%d %H:%M") if pd.notna(verify_time) else "unknown time"
+            evidence_rows.append({
+                "Verify Time": verify_time.strftime("%m/%d/%y %H:%M") if pd.notna(verify_time) else "",
+                "Pyxis": str(detail.get("device") or ""),
+                "Med ID": str(detail.get("med_id") or ""),
+                "Medication": str(detail.get("med_desc") or ""),
+                "Verify User": str(detail.get("user_name") or ""),
+                "Prior Refill Time": prior_time.strftime("%m/%d/%y %H:%M") if pd.notna(prior_time) else "",
+                "Prior Event": str(detail.get("prior_refill_event_type") or ""),
+                "Refill Entered": db_value(detail.get("prior_refill_qty")),
+                "Pull Qty": db_value(detail.get("refill_date_pull_qty")),
+                "Refill vs Pull": db_value(detail.get("refill_qty_vs_pull")),
+                "Later Verify Off": db_value(detail.get("discrepancy_qty")),
+                "Inventory Events Since": db_value(detail.get("inventory_events_since_refill")),
+                "Why It Matched": str(detail.get("evidence_reason") or ""),
+            })
+            examples.append(
+                f"{detail['med_id']} at {detail['device']} on {verify_label}: "
+                f"refill entered {fmt_qty(detail['prior_refill_qty'])}, "
+                f"pull was {fmt_qty(detail['refill_date_pull_qty'])}, "
+                f"later verify was off {fmt_qty(detail['discrepancy_qty'])}."
+            )
         summary = (
             f"Verify Count Audit found {int(row['strong'])} strong refill-entry pattern(s) "
-            f"and {int(row['possible'])} possible pattern(s) for {staff_name} "
-            f"between {audit_start} and {audit_end}.\n\n"
-            f"Examples:\n{row.get('example_evidence') or 'Review Verify Count Audit drilldown for examples.'}"
+            f"for {staff_name} between {audit_start} and {audit_end}.\n\n"
+            f"Strong example{'s' if len(examples) != 1 else ''}:\n"
+            f"{chr(10).join(examples[:5]) if examples else 'Review Verify Count Audit drilldown for examples.'}"
         )
         next_steps = (
             "Coach on entering the actual refill/load quantity from the Pyxis pull, then document the conversation. "
@@ -273,6 +306,7 @@ def save_strong_patterns_to_management(action_plan: pd.DataFrame, audit_start, a
             "next_steps": next_steps,
             "source_page": "Verify Count Audit",
             "source_key": source_key,
+            "source_payload_json": json.dumps(evidence_rows, default=str),
         })
 
     with engine.begin() as conn:
@@ -1236,7 +1270,7 @@ else:
                 f"Add {strong_action_count} strong pattern item(s) to Management Coaching",
                 key="verify_audit_send_strong_to_management",
             ):
-                saved_count = save_strong_patterns_to_management(action_plan, start_date, end_date)
+                saved_count = save_strong_patterns_to_management(action_plan, filtered, start_date, end_date)
                 load_completed_audit_pks.clear()
                 st.success(
                     f"Management Coaching updated for {saved_count} staff member"
