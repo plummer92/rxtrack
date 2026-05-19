@@ -87,6 +87,53 @@ def init_db():
             days_since_last_count FLOAT,
             days_over_due FLOAT
         );""",
+        """CREATE TABLE IF NOT EXISTS cycle_count_variances (
+            pk TEXT PRIMARY KEY,
+            variance_type TEXT,
+            dt TIMESTAMP,
+            med_id TEXT,
+            med_desc TEXT,
+            starting_qty FLOAT,
+            new_qty FLOAT,
+            qty_variance FLOAT,
+            unit_cost FLOAT,
+            extended_cost FLOAT,
+            user_name TEXT,
+            source_filename TEXT
+        );""",
+        """CREATE TABLE IF NOT EXISTS buyer_formulary_listing (
+            pk TEXT PRIMARY KEY,
+            snapshot_date DATE,
+            source_filename TEXT,
+            location TEXT,
+            med_id TEXT,
+            med_desc TEXT,
+            package_size FLOAT,
+            min_qty FLOAT,
+            max_qty FLOAT,
+            qty FLOAT,
+            ndc TEXT,
+            distributor TEXT,
+            item_code TEXT,
+            purchase_date DATE,
+            received_qty FLOAT,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        );""",
+        """CREATE TABLE IF NOT EXISTS physical_inventory_snapshots (
+            pk TEXT PRIMARY KEY,
+            snapshot_date DATE,
+            source_filename TEXT,
+            isa_name TEXT,
+            med_id TEXT,
+            med_desc TEXT,
+            min_qty FLOAT,
+            max_qty FLOAT,
+            on_hand_qty FLOAT,
+            location TEXT,
+            unit_cost FLOAT,
+            extended_cost FLOAT,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        );""",
         """CREATE TABLE IF NOT EXISTS packaged_meds (
             pk TEXT PRIMARY KEY,
             dispense_dt TIMESTAMP,
@@ -307,7 +354,8 @@ def init_db():
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS schedule_status TEXT;""",
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;""",
         """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS cartfill_area TEXT;""",
-        """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS admin_given_dt TIMESTAMP;"""
+        """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS admin_given_dt TIMESTAMP;""",
+        """ALTER TABLE cycle_count_variances ADD COLUMN IF NOT EXISTS source_filename TEXT;"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
@@ -1051,6 +1099,209 @@ def clean_cycle_count_status_report(file_obj):
 
     df = df.astype(object)
     df = df.where(pd.notna(df), None)
+    return df[["pk", "snapshot_date", "source_filename"] + required]
+
+
+def _normalize_report_columns(df):
+    df = df.copy()
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(".", "", regex=False)
+        .str.replace(" ", "_", regex=False)
+        .str.replace("/", "_", regex=False)
+    )
+    return df
+
+
+def _read_metadata_header_csv(file_obj, dtype=None):
+    file_obj.seek(0)
+    metadata_line = file_obj.readline()
+    if isinstance(metadata_line, bytes):
+        metadata_line = metadata_line.decode("utf-8", errors="ignore")
+
+    file_obj.seek(0)
+    try:
+        df = pd.read_csv(file_obj, header=1, dtype=dtype, low_memory=False)
+    except UnicodeDecodeError:
+        file_obj.seek(0)
+        df = pd.read_csv(file_obj, header=1, dtype=dtype, encoding="latin1", low_memory=False)
+    return df, metadata_line
+
+
+def _snapshot_date_from_report(file_obj, metadata_line):
+    filename = getattr(file_obj, "name", "") or ""
+    snapshot_date = None
+    m_fname = re.search(r"(\d{8})", filename)
+    if m_fname:
+        snapshot_date = pd.to_datetime(m_fname.group(1), format="%m%d%Y", errors="coerce")
+    if pd.isna(snapshot_date) or snapshot_date is None:
+        m_meta = re.search(r"(?:Report On:|Reporting Between\s+)?(\d{1,2}/\d{1,2}/\d{4})", str(metadata_line))
+        if m_meta:
+            snapshot_date = pd.to_datetime(m_meta.group(1), errors="coerce")
+    if pd.isna(snapshot_date) or snapshot_date is None:
+        snapshot_date = pd.Timestamp.today().normalize()
+    return pd.to_datetime(snapshot_date, errors="coerce").date()
+
+
+def _money_to_numeric(series):
+    return pd.to_numeric(
+        series.astype(str).str.replace("$", "", regex=False).str.replace(",", "", regex=False),
+        errors="coerce",
+    ).fillna(0)
+
+
+def clean_cycle_count_variance_report(file_obj):
+    df, _metadata_line = _read_metadata_header_csv(file_obj)
+    df = _normalize_report_columns(df)
+    df = df.rename(columns={
+        "grptype": "variance_type",
+        "date_time": "dt",
+        "item_id": "med_id",
+        "description": "med_desc",
+        "starting_qoh": "starting_qty",
+        "new_qoh": "new_qty",
+        "quantity_variance": "qty_variance",
+        "cost": "unit_cost",
+        "extended_cost": "extended_cost",
+        "user": "user_name",
+    })
+
+    required = [
+        "variance_type", "dt", "med_id", "med_desc", "starting_qty",
+        "new_qty", "qty_variance", "unit_cost", "extended_cost", "user_name",
+    ]
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    df["med_id"] = df["med_id"].fillna("").astype(str).str.strip().str.upper()
+    df["med_desc"] = df["med_desc"].fillna("").astype(str).str.strip()
+    df["variance_type"] = df["variance_type"].fillna("").astype(str).str.strip()
+    df["user_name"] = df["user_name"].fillna("").astype(str).str.strip()
+    for col in ["starting_qty", "new_qty", "qty_variance", "unit_cost", "extended_cost"]:
+        df[col] = _money_to_numeric(df[col])
+
+    df = df[df["dt"].notna() & df["med_id"].ne("")].copy()
+    df["source_filename"] = getattr(file_obj, "name", "") or ""
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row["dt"]),
+                str(row["variance_type"]),
+                str(row["med_id"]),
+                str(row["qty_variance"]),
+                str(row["user_name"]),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    df = df.astype(object).where(pd.notna(df), None)
+    return df[["pk"] + required + ["source_filename"]]
+
+
+def clean_buyer_formulary_listing_report(file_obj):
+    df, metadata_line = _read_metadata_header_csv(file_obj, dtype=str)
+    df = _normalize_report_columns(df)
+    df = df.rename(columns={
+        "location": "location",
+        "med_id": "med_id",
+        "description": "med_desc",
+        "package_size": "package_size",
+        "min": "min_qty",
+        "max": "max_qty",
+        "qty": "qty",
+        "ndc": "ndc",
+        "distributor": "distributor",
+        "item_code": "item_code",
+        "purchase_date": "purchase_date",
+        "rcvqty": "received_qty",
+    })
+
+    required = [
+        "location", "med_id", "med_desc", "package_size", "min_qty",
+        "max_qty", "qty", "ndc", "distributor", "item_code",
+        "purchase_date", "received_qty",
+    ]
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    df["snapshot_date"] = _snapshot_date_from_report(file_obj, metadata_line)
+    df["source_filename"] = getattr(file_obj, "name", "") or ""
+    for col in ["location", "med_id", "med_desc", "ndc", "distributor", "item_code"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    df["location"] = df["location"].str.upper()
+    df["med_id"] = df["med_id"].str.upper()
+    for col in ["package_size", "min_qty", "max_qty", "qty", "received_qty"]:
+        df[col] = _money_to_numeric(df[col])
+    df["purchase_date"] = pd.to_datetime(df["purchase_date"], errors="coerce").dt.date
+
+    df = df[df["location"].ne("") & df["med_id"].ne("")].copy()
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row["snapshot_date"]),
+                str(row["location"]),
+                str(row["med_id"]),
+                str(row["ndc"]),
+                str(row["item_code"]),
+                str(row["purchase_date"]),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    df = df.astype(object).where(pd.notna(df), None)
+    return df[["pk", "snapshot_date", "source_filename"] + required]
+
+
+def clean_physical_inventory_report(file_obj):
+    df, metadata_line = _read_metadata_header_csv(file_obj, dtype=str)
+    df = _normalize_report_columns(df)
+    df = df.rename(columns={
+        "isa_name": "isa_name",
+        "med_id": "med_id",
+        "item_description": "med_desc",
+        "min": "min_qty",
+        "max": "max_qty",
+        "on_hand": "on_hand_qty",
+        "location": "location",
+        "cost": "unit_cost",
+        "ext_cost": "extended_cost",
+    })
+
+    required = [
+        "isa_name", "med_id", "med_desc", "min_qty", "max_qty",
+        "on_hand_qty", "location", "unit_cost", "extended_cost",
+    ]
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    df["snapshot_date"] = _snapshot_date_from_report(file_obj, metadata_line)
+    df["source_filename"] = getattr(file_obj, "name", "") or ""
+    for col in ["isa_name", "med_id", "med_desc", "location"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    df["med_id"] = df["med_id"].str.upper()
+    df["location"] = df["location"].str.upper()
+    for col in ["min_qty", "max_qty", "on_hand_qty", "unit_cost", "extended_cost"]:
+        df[col] = _money_to_numeric(df[col])
+
+    df = df[df["isa_name"].ne("") & df["med_id"].ne("") & df["location"].ne("")].copy()
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row["snapshot_date"]),
+                str(row["isa_name"]),
+                str(row["med_id"]),
+                str(row["location"]),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    df = df.astype(object).where(pd.notna(df), None)
     return df[["pk", "snapshot_date", "source_filename"] + required]
 
 
@@ -2920,7 +3171,10 @@ if _is_main:
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching",
-            "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats", "Days Since Last Cycle Count Report", "Packaging Report", "Device Inventory List"
+            "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats",
+            "Days Since Last Cycle Count Report", "Cycle Count Variance Report",
+            "Buyer Formulary Listing Report", "Physical Inventory Report",
+            "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded_files = st.file_uploader(f"Upload {u_type}", type=upload_types, accept_multiple_files=True)
@@ -3094,7 +3348,14 @@ if _is_main:
                 upload_started = time.perf_counter()
                 processed_count = 0
                 # 1. Load raw file
-                if u_type in {"Days Since Last Cycle Count Report", "Packaging Report"}:
+                direct_file_reports = {
+                    "Days Since Last Cycle Count Report",
+                    "Cycle Count Variance Report",
+                    "Buyer Formulary Listing Report",
+                    "Physical Inventory Report",
+                    "Packaging Report",
+                }
+                if u_type in direct_file_reports:
                     raw = None
                 else:
                     raw = read_uploaded_batch(uploaded_files)
@@ -3252,6 +3513,72 @@ if _is_main:
                                  days_since_last_count = EXCLUDED.days_since_last_count,
                                  days_over_due = EXCLUDED.days_over_due;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cycle Count Status")
+
+                elif u_type == "Cycle Count Variance Report":
+                    clean = pd.concat([clean_cycle_count_variance_report(file) for file in uploaded_files], ignore_index=True)
+                    sql = """INSERT INTO cycle_count_variances
+                             (pk, variance_type, dt, med_id, med_desc, starting_qty, new_qty,
+                              qty_variance, unit_cost, extended_cost, user_name, source_filename)
+                             VALUES (%(pk)s, %(variance_type)s, %(dt)s, %(med_id)s, %(med_desc)s,
+                                     %(starting_qty)s, %(new_qty)s, %(qty_variance)s, %(unit_cost)s,
+                                     %(extended_cost)s, %(user_name)s, %(source_filename)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 variance_type = EXCLUDED.variance_type,
+                                 dt = EXCLUDED.dt,
+                                 med_id = EXCLUDED.med_id,
+                                 med_desc = EXCLUDED.med_desc,
+                                 starting_qty = EXCLUDED.starting_qty,
+                                 new_qty = EXCLUDED.new_qty,
+                                 qty_variance = EXCLUDED.qty_variance,
+                                 unit_cost = EXCLUDED.unit_cost,
+                                 extended_cost = EXCLUDED.extended_cost,
+                                 user_name = EXCLUDED.user_name,
+                                 source_filename = EXCLUDED.source_filename;"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cycle Count Variances")
+
+                elif u_type == "Buyer Formulary Listing Report":
+                    clean = pd.concat([clean_buyer_formulary_listing_report(file) for file in uploaded_files], ignore_index=True)
+                    sql = """INSERT INTO buyer_formulary_listing
+                             (pk, snapshot_date, source_filename, location, med_id, med_desc, package_size,
+                              min_qty, max_qty, qty, ndc, distributor, item_code, purchase_date, received_qty)
+                             VALUES (%(pk)s, %(snapshot_date)s, %(source_filename)s, %(location)s, %(med_id)s,
+                                     %(med_desc)s, %(package_size)s, %(min_qty)s, %(max_qty)s, %(qty)s,
+                                     %(ndc)s, %(distributor)s, %(item_code)s, %(purchase_date)s, %(received_qty)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 source_filename = EXCLUDED.source_filename,
+                                 location = EXCLUDED.location,
+                                 med_desc = EXCLUDED.med_desc,
+                                 package_size = EXCLUDED.package_size,
+                                 min_qty = EXCLUDED.min_qty,
+                                 max_qty = EXCLUDED.max_qty,
+                                 qty = EXCLUDED.qty,
+                                 ndc = EXCLUDED.ndc,
+                                 distributor = EXCLUDED.distributor,
+                                 item_code = EXCLUDED.item_code,
+                                 purchase_date = EXCLUDED.purchase_date,
+                                 received_qty = EXCLUDED.received_qty,
+                                 uploaded_at = NOW();"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Buyer Formulary Listing")
+
+                elif u_type == "Physical Inventory Report":
+                    clean = pd.concat([clean_physical_inventory_report(file) for file in uploaded_files], ignore_index=True)
+                    sql = """INSERT INTO physical_inventory_snapshots
+                             (pk, snapshot_date, source_filename, isa_name, med_id, med_desc, min_qty,
+                              max_qty, on_hand_qty, location, unit_cost, extended_cost)
+                             VALUES (%(pk)s, %(snapshot_date)s, %(source_filename)s, %(isa_name)s, %(med_id)s,
+                                     %(med_desc)s, %(min_qty)s, %(max_qty)s, %(on_hand_qty)s, %(location)s,
+                                     %(unit_cost)s, %(extended_cost)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 source_filename = EXCLUDED.source_filename,
+                                 isa_name = EXCLUDED.isa_name,
+                                 med_desc = EXCLUDED.med_desc,
+                                 min_qty = EXCLUDED.min_qty,
+                                 max_qty = EXCLUDED.max_qty,
+                                 on_hand_qty = EXCLUDED.on_hand_qty,
+                                 unit_cost = EXCLUDED.unit_cost,
+                                 extended_cost = EXCLUDED.extended_cost,
+                                 uploaded_at = NOW();"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Physical Inventory")
 
                 elif u_type == "Packaging Report":
                     clean = pd.concat([clean_packaging_report(file) for file in uploaded_files], ignore_index=True)
