@@ -18,6 +18,7 @@ else:
 App.require_management_access("Management Coaching")
 
 engine = App.engine
+App.init_db()
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
@@ -37,7 +38,7 @@ def load_coaching_notes():
             text(
                 """
                 SELECT id, staff_name, topic, coaching_date, follow_up_date,
-                       status, summary, next_steps, created_at, updated_at
+                       status, summary, next_steps, source_page, source_key, created_at, updated_at
                 FROM management_coaching_notes
                 ORDER BY COALESCE(follow_up_date, coaching_date) DESC NULLS LAST, id DESC
                 """
@@ -128,7 +129,7 @@ with entry_col:
         manual_name = st.text_input("Or enter name")
         topic = st.selectbox(
             "Topic",
-            ["Attendance", "Workflow", "Accuracy", "Professionalism", "Follow-up", "Other"],
+            ["Attendance", "Workflow", "Accuracy", "Discrepancy", "Professionalism", "Follow-up", "Other"],
         )
         coaching_date = st.date_input("Coaching date", value=date.today())
         needs_follow_up = st.checkbox("Add follow-up date", value=True)
@@ -188,7 +189,7 @@ with list_col:
             view = view[haystack.str.contains(needle, na=False)].copy()
 
         st.dataframe(
-            view[["staff_name", "topic", "coaching_date", "follow_up_date", "status", "summary", "next_steps"]],
+            view[["staff_name", "topic", "coaching_date", "follow_up_date", "status", "summary", "next_steps", "source_page"]],
             width="stretch",
             hide_index=True,
         )

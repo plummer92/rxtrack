@@ -52,6 +52,7 @@ st.set_page_config(
 App.apply_global_styles()
 
 engine = App.engine
+App.init_db()
 render_sidebar = App.render_sidebar
 start_date, end_date = render_sidebar()
 App.require_management_access("Verify Count Audit")
@@ -223,6 +224,57 @@ def save_completed_rows(rows: pd.DataFrame, notes: str = "", manual_correction_b
                 "notes": notes,
             }
         )
+    with engine.begin() as conn:
+        result = conn.execute(sql, payload)
+    return result.rowcount or 0
+
+
+def save_strong_patterns_to_management(action_plan: pd.DataFrame, audit_start, audit_end) -> int:
+    if action_plan.empty:
+        return 0
+    strong_plan = action_plan[action_plan["strong"].fillna(0).astype(int) > 0].copy()
+    if strong_plan.empty:
+        return 0
+
+    sql = text("""
+        INSERT INTO management_coaching_notes
+            (staff_name, topic, coaching_date, follow_up_date, status, summary, next_steps, source_page, source_key)
+        VALUES
+            (:staff_name, :topic, CURRENT_DATE, CURRENT_DATE, 'Open', :summary, :next_steps, :source_page, :source_key)
+        ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
+            coaching_date = CURRENT_DATE,
+            follow_up_date = CURRENT_DATE,
+            status = CASE
+                WHEN management_coaching_notes.status = 'Closed' THEN 'Open'
+                ELSE management_coaching_notes.status
+            END,
+            summary = EXCLUDED.summary,
+            next_steps = EXCLUDED.next_steps,
+            updated_at = NOW()
+    """)
+    payload = []
+    for _, row in strong_plan.iterrows():
+        staff_name = str(row["prior_refill_user"]).strip()
+        source_key = f"verify-count-audit-strong:{staff_name.lower()}"
+        summary = (
+            f"Verify Count Audit found {int(row['strong'])} strong refill-entry pattern(s) "
+            f"and {int(row['possible'])} possible pattern(s) for {staff_name} "
+            f"between {audit_start} and {audit_end}.\n\n"
+            f"Examples:\n{row.get('example_evidence') or 'Review Verify Count Audit drilldown for examples.'}"
+        )
+        next_steps = (
+            "Coach on entering the actual refill/load quantity from the Pyxis pull, then document the conversation. "
+            "Use the Verify Count Audit examples to show the specific medication, device, entered refill quantity, pull quantity, and later verify discrepancy."
+        )
+        payload.append({
+            "staff_name": staff_name,
+            "topic": "Discrepancy",
+            "summary": summary,
+            "next_steps": next_steps,
+            "source_page": "Verify Count Audit",
+            "source_key": source_key,
+        })
+
     with engine.begin() as conn:
         result = conn.execute(sql, payload)
     return result.rowcount or 0
@@ -1178,6 +1230,20 @@ else:
             file_name="verify_count_audit_action_plan.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        strong_action_count = int((action_plan["strong"].fillna(0).astype(int) > 0).sum())
+        if strong_action_count > 0:
+            if st.button(
+                f"Add {strong_action_count} strong pattern item(s) to Management Coaching",
+                key="verify_audit_send_strong_to_management",
+            ):
+                saved_count = save_strong_patterns_to_management(action_plan, start_date, end_date)
+                load_completed_audit_pks.clear()
+                st.success(
+                    f"Management Coaching updated for {saved_count} staff member"
+                    f"{'s' if saved_count != 1 else ''}."
+                )
+        else:
+            st.info("No strong refill-entry pattern is visible to add to Management Coaching.")
 
         st.markdown("#### Coaching Drilldown")
         selected_action_user = st.selectbox(

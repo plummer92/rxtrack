@@ -319,6 +319,8 @@ def init_db():
             status TEXT DEFAULT 'Open',
             summary TEXT,
             next_steps TEXT,
+            source_page TEXT,
+            source_key TEXT,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );""",
@@ -355,7 +357,12 @@ def init_db():
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;""",
         """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS cartfill_area TEXT;""",
         """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS admin_given_dt TIMESTAMP;""",
-        """ALTER TABLE cycle_count_variances ADD COLUMN IF NOT EXISTS source_filename TEXT;"""
+        """ALTER TABLE cycle_count_variances ADD COLUMN IF NOT EXISTS source_filename TEXT;""",
+        """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_page TEXT;""",
+        """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_key TEXT;""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_management_coaching_notes_source_key
+            ON management_coaching_notes (source_key)
+            WHERE source_key IS NOT NULL;"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
