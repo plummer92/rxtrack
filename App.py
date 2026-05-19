@@ -134,6 +134,51 @@ def init_db():
             extended_cost FLOAT,
             uploaded_at TIMESTAMP DEFAULT NOW()
         );""",
+        """CREATE TABLE IF NOT EXISTS audit_transaction_detail_rc (
+            pk TEXT PRIMARY KEY,
+            care_area_name TEXT,
+            location TEXT,
+            station_name TEXT,
+            source_system TEXT,
+            dt TIMESTAMP,
+            user_name TEXT,
+            user_id TEXT,
+            user_type TEXT,
+            priority_code TEXT,
+            transaction_type TEXT,
+            med_id TEXT,
+            med_desc TEXT,
+            generic_name TEXT,
+            med_class TEXT,
+            therapeutic_class TEXT,
+            drawer_subdrawer_pocket TEXT,
+            min_qty FLOAT,
+            max_qty FLOAT,
+            dispense_amount FLOAT,
+            qty FLOAT,
+            beginning_qty FLOAT,
+            ending_qty FLOAT,
+            unit_cost FLOAT,
+            extended_cost FLOAT,
+            discrepancy TEXT,
+            discrepancy_difference FLOAT,
+            discrepancy_resolution_desc TEXT,
+            discrepancy_reason TEXT,
+            correction_quantity_before FLOAT,
+            correction_quantity_after FLOAT,
+            correction TEXT,
+            resolution_user TEXT,
+            resolution_dt TIMESTAMP,
+            waste_amount FLOAT,
+            waste_reason TEXT,
+            witness_user_name TEXT,
+            override_reason TEXT,
+            override_flag TEXT,
+            ordering_physician_present BOOLEAN,
+            attending_physician_present BOOLEAN,
+            source_filename TEXT,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        );""",
         """CREATE TABLE IF NOT EXISTS packaged_meds (
             pk TEXT PRIMARY KEY,
             dispense_dt TIMESTAMP,
@@ -1315,6 +1360,110 @@ def clean_physical_inventory_report(file_obj):
     )
     df = df.astype(object).where(pd.notna(df), None)
     return df[["pk", "snapshot_date", "source_filename"] + required]
+
+
+def clean_audit_transaction_detail_rc(df, source_filename=""):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    colmap = {
+        "CareAreaName": "care_area_name",
+        "Location": "location",
+        "StationName": "station_name",
+        "SourceSystem": "source_system",
+        "TransactionDateTime": "dt",
+        "UserName": "user_name",
+        "UserID": "user_id",
+        "UserType": "user_type",
+        "PriorityCode": "priority_code",
+        "TransactionType": "transaction_type",
+        "MedID": "med_id",
+        "MedDescription": "med_desc",
+        "GenericName": "generic_name",
+        "MedClass": "med_class",
+        "TherapeuticClass": "therapeutic_class",
+        "DrawerSubDrawerPocket": "drawer_subdrawer_pocket",
+        "Min": "min_qty",
+        "Max": "max_qty",
+        "DispenseAmount": "dispense_amount",
+        "Quantity": "qty",
+        "BeginCount": "beginning_qty",
+        "EndCount": "ending_qty",
+        "UnitCost": "unit_cost",
+        "ExtendedCost": "extended_cost",
+        "Discrepancy": "discrepancy",
+        "DiscrepancyDifference": "discrepancy_difference",
+        "DiscrepancyResolutionDesc": "discrepancy_resolution_desc",
+        "DiscrepancyReason": "discrepancy_reason",
+        "CorrectionQuantityBefore": "correction_quantity_before",
+        "CorrectionQuantityAfter": "correction_quantity_after",
+        "Correction": "correction",
+        "ResolutionUser": "resolution_user",
+        "ResolutionDateTime": "resolution_dt",
+        "WasteAmount": "waste_amount",
+        "WasteReason": "waste_reason",
+        "WitnessUserName": "witness_user_name",
+        "OverrideReason": "override_reason",
+        "Override": "override_flag",
+        "OrderingPhysician": "ordering_physician",
+        "AttendingPhysician": "attending_physician",
+    }
+    df = df.rename(columns=colmap)
+    required = [
+        "care_area_name", "location", "station_name", "source_system", "dt",
+        "user_name", "user_id", "user_type", "priority_code", "transaction_type",
+        "med_id", "med_desc", "generic_name", "med_class", "therapeutic_class",
+        "drawer_subdrawer_pocket", "min_qty", "max_qty", "dispense_amount", "qty",
+        "beginning_qty", "ending_qty", "unit_cost", "extended_cost", "discrepancy",
+        "discrepancy_difference", "discrepancy_resolution_desc", "discrepancy_reason",
+        "correction_quantity_before", "correction_quantity_after", "correction",
+        "resolution_user", "resolution_dt", "waste_amount", "waste_reason",
+        "witness_user_name", "override_reason", "override_flag",
+        "ordering_physician_present", "attending_physician_present", "source_filename",
+    ]
+    for col in required + ["ordering_physician", "attending_physician"]:
+        if col not in df.columns:
+            df[col] = None
+
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
+    text_cols = [
+        "care_area_name", "location", "station_name", "source_system", "user_name",
+        "user_id", "user_type", "priority_code", "transaction_type", "med_id",
+        "med_desc", "generic_name", "med_class", "therapeutic_class",
+        "drawer_subdrawer_pocket", "discrepancy", "discrepancy_resolution_desc",
+        "discrepancy_reason", "correction", "resolution_user", "waste_reason",
+        "witness_user_name", "override_reason", "override_flag",
+    ]
+    for col in text_cols:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    df["med_id"] = df["med_id"].str.upper().replace({"NAN": ""})
+    for col in [
+        "min_qty", "max_qty", "dispense_amount", "qty", "beginning_qty", "ending_qty",
+        "unit_cost", "extended_cost", "discrepancy_difference",
+        "correction_quantity_before", "correction_quantity_after", "waste_amount",
+    ]:
+        df[col] = _money_to_numeric(df[col])
+    df["ordering_physician_present"] = df["ordering_physician"].fillna("").astype(str).str.strip().ne("")
+    df["attending_physician_present"] = df["attending_physician"].fillna("").astype(str).str.strip().ne("")
+    df["source_filename"] = source_filename
+    df = df[df["dt"].notna() & df["med_id"].ne("")].copy()
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row["dt"]),
+                str(row["station_name"]),
+                str(row["med_id"]),
+                str(row["transaction_type"]),
+                str(row["user_id"] or row["user_name"]),
+                str(row["qty"]),
+                str(row["beginning_qty"]),
+                str(row["ending_qty"]),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    df = df.astype(object).where(pd.notna(df), None)
+    return df[["pk"] + required]
 
 
 def clean_packaging_report(file_obj):
@@ -3209,6 +3358,7 @@ if _is_main:
             "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats",
             "Days Since Last Cycle Count Report", "Cycle Count Variance Report",
             "Buyer Formulary Listing Report", "Physical Inventory Report",
+            "Audit Transaction Detail RC",
             "Packaging Report", "Device Inventory List"
         ])
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
@@ -3614,6 +3764,55 @@ if _is_main:
                                  extended_cost = EXCLUDED.extended_cost,
                                  uploaded_at = NOW();"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Physical Inventory")
+
+                elif u_type == "Audit Transaction Detail RC":
+                    if len(uploaded_files) > 1:
+                        clean = pd.concat(
+                            [
+                                clean_audit_transaction_detail_rc(read_uploaded_tabular(file), file.name)
+                                for file in uploaded_files
+                            ],
+                            ignore_index=True,
+                        )
+                    else:
+                        clean = clean_audit_transaction_detail_rc(raw, uploaded_names)
+                    sql = """INSERT INTO audit_transaction_detail_rc
+                             (pk, care_area_name, location, station_name, source_system, dt, user_name,
+                              user_id, user_type, priority_code, transaction_type, med_id, med_desc,
+                              generic_name, med_class, therapeutic_class, drawer_subdrawer_pocket,
+                              min_qty, max_qty, dispense_amount, qty, beginning_qty, ending_qty,
+                              unit_cost, extended_cost, discrepancy, discrepancy_difference,
+                              discrepancy_resolution_desc, discrepancy_reason, correction_quantity_before,
+                              correction_quantity_after, correction, resolution_user, resolution_dt,
+                              waste_amount, waste_reason, witness_user_name, override_reason, override_flag,
+                              ordering_physician_present, attending_physician_present, source_filename)
+                             VALUES
+                             (%(pk)s, %(care_area_name)s, %(location)s, %(station_name)s, %(source_system)s,
+                              %(dt)s, %(user_name)s, %(user_id)s, %(user_type)s, %(priority_code)s,
+                              %(transaction_type)s, %(med_id)s, %(med_desc)s, %(generic_name)s,
+                              %(med_class)s, %(therapeutic_class)s, %(drawer_subdrawer_pocket)s,
+                              %(min_qty)s, %(max_qty)s, %(dispense_amount)s, %(qty)s, %(beginning_qty)s,
+                              %(ending_qty)s, %(unit_cost)s, %(extended_cost)s, %(discrepancy)s,
+                              %(discrepancy_difference)s, %(discrepancy_resolution_desc)s,
+                              %(discrepancy_reason)s, %(correction_quantity_before)s,
+                              %(correction_quantity_after)s, %(correction)s, %(resolution_user)s,
+                              %(resolution_dt)s, %(waste_amount)s, %(waste_reason)s,
+                              %(witness_user_name)s, %(override_reason)s, %(override_flag)s,
+                              %(ordering_physician_present)s, %(attending_physician_present)s, %(source_filename)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 location = EXCLUDED.location,
+                                 station_name = EXCLUDED.station_name,
+                                 user_name = EXCLUDED.user_name,
+                                 user_type = EXCLUDED.user_type,
+                                 transaction_type = EXCLUDED.transaction_type,
+                                 med_desc = EXCLUDED.med_desc,
+                                 qty = EXCLUDED.qty,
+                                 beginning_qty = EXCLUDED.beginning_qty,
+                                 ending_qty = EXCLUDED.ending_qty,
+                                 waste_amount = EXCLUDED.waste_amount,
+                                 source_filename = EXCLUDED.source_filename,
+                                 uploaded_at = NOW();"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Audit Transaction Detail RC")
 
                 elif u_type == "Packaging Report":
                     clean = pd.concat([clean_packaging_report(file) for file in uploaded_files], ignore_index=True)

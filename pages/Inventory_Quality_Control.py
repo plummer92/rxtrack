@@ -711,6 +711,39 @@ def load_device_inventory_daily_delta():
 
 
 @st.cache_data(ttl=60)
+def load_clinical_pyxis_activity(start_date, end_date):
+    sql = text("""
+        SELECT
+            station_name AS device,
+            med_id,
+            med_desc,
+            transaction_type,
+            dt,
+            user_name,
+            user_type,
+            qty,
+            waste_amount
+        FROM audit_transaction_detail_rc
+        WHERE dt::date BETWEEN :start_date AND :end_date
+          AND (
+                transaction_type ILIKE '%vend%'
+             OR transaction_type ILIKE '%waste%'
+          )
+          AND (
+                user_type ILIKE '%registered nurse%'
+             OR user_type ILIKE '%nurse%'
+             OR user_type ILIKE '%anesthesia%'
+             OR user_type ILIKE '%respiratory%'
+          )
+    """)
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(sql, conn, params={"start_date": start_date, "end_date": end_date})
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
 def load_med_costs():
     sql = text("""
         SELECT
@@ -1473,6 +1506,30 @@ packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
 device_inventory_snapshot_dates = load_device_inventory_snapshot_dates()
 device_inventory_daily_delta = load_device_inventory_daily_delta()
+clinical_pyxis_activity = load_clinical_pyxis_activity(start_date, end_date)
+if not clinical_pyxis_activity.empty:
+    clinical_pyxis_activity = clinical_pyxis_activity.copy()
+    clinical_pyxis_activity["device"] = clinical_pyxis_activity["device"].fillna("").astype(str).str.strip()
+    clinical_pyxis_activity["med_id"] = clinical_pyxis_activity["med_id"].fillna("").astype(str).str.strip().str.upper()
+    clinical_pyxis_activity["transaction_type"] = clinical_pyxis_activity["transaction_type"].fillna("").astype(str).str.strip()
+    clinical_pyxis_activity["qty"] = pd.to_numeric(clinical_pyxis_activity["qty"], errors="coerce").fillna(0)
+    clinical_pyxis_activity["waste_amount"] = pd.to_numeric(clinical_pyxis_activity["waste_amount"], errors="coerce").fillna(0)
+    clinical_summary = (
+        clinical_pyxis_activity.groupby(["device", "med_id"], as_index=False)
+        .agg(
+            clinical_events=("transaction_type", "count"),
+            clinical_vends=("transaction_type", lambda s: s.str.contains("vend", case=False, na=False).sum()),
+            clinical_wastes=("transaction_type", lambda s: s.str.contains("waste", case=False, na=False).sum()),
+            clinical_qty=("qty", "sum"),
+            clinical_waste_qty=("waste_amount", "sum"),
+            last_clinical_dt=("dt", "max"),
+        )
+    )
+else:
+    clinical_summary = pd.DataFrame(columns=[
+        "device", "med_id", "clinical_events", "clinical_vends", "clinical_wastes",
+        "clinical_qty", "clinical_waste_qty", "last_clinical_dt",
+    ])
 med_costs = prep_med_costs(load_med_costs())
 inventory_audit = prep_inventory_audit(load_inventory_audit())
 pyxis_savings_projects = prep_pyxis_savings_projects(load_pyxis_savings_projects())
@@ -2092,22 +2149,37 @@ with tab_unload:
         st.warning("No Device Inventory List rows are loaded yet. Upload the device inventory CSV from the main upload page.")
     else:
         device_view = device_inventory.copy()
+        if not clinical_summary.empty:
+            device_view = device_view.merge(clinical_summary, on=["device", "med_id"], how="left")
+        for col in ["clinical_events", "clinical_vends", "clinical_wastes", "clinical_qty", "clinical_waste_qty"]:
+            if col not in device_view.columns:
+                device_view[col] = 0
+            device_view[col] = pd.to_numeric(device_view[col], errors="coerce").fillna(0)
+        if "last_clinical_dt" not in device_view.columns:
+            device_view["last_clinical_dt"] = pd.NaT
+        device_view["last_clinical_dt"] = pd.to_datetime(device_view["last_clinical_dt"], errors="coerce")
+        clinically_active = device_view["clinical_events"].gt(0)
+        device_view.loc[
+            device_view["unload_status"].isin(["High Priority", "Unload Due"]) & clinically_active,
+            "unload_status",
+        ] = "Clinical Use Review"
         device_snapshot = device_view["snapshot_dt"].dropna().max()
 
         due_mask = device_view["unload_status"].isin(["High Priority", "Unload Due"])
         exempt_mask = device_view["unload_status"].eq("Exempt")
 
-        d1, d2, d3, d4, d5 = st.columns(5)
+        d1, d2, d3, d4, d5, d6 = st.columns(6)
         d1.metric("Inventory Rows", f"{len(device_view):,}")
         d2.metric("Unload Due", f"{int(due_mask.sum()):,}")
         d3.metric("High Priority", f"{int(device_view['unload_status'].eq('High Priority').sum()):,}")
         d4.metric("Exempt Over 28 Days", f"{int(exempt_mask.sum()):,}")
-        d5.metric("Snapshot", device_snapshot.strftime("%m/%d/%Y %H:%M") if pd.notna(device_snapshot) else "Unknown")
+        d5.metric("Clinical Use Review", f"{int(device_view['unload_status'].eq('Clinical Use Review').sum()):,}")
+        d6.metric("Snapshot", device_snapshot.strftime("%m/%d/%Y %H:%M") if pd.notna(device_snapshot) else "Unknown")
 
         f1, f2, f3, f4 = st.columns(4)
         device_options = sorted(device_view["device"].dropna().unique())
         selected_devices = f1.multiselect("Device", device_options)
-        status_order = ["High Priority", "Unload Due", "Exempt", "Compliant"]
+        status_order = ["Clinical Use Review", "High Priority", "Unload Due", "Exempt", "Compliant"]
         selected_unload_statuses = f2.multiselect(
             "Unload status",
             status_order,
@@ -2155,6 +2227,10 @@ with tab_unload:
         dv4.metric(
             "Oldest Days Unused",
             f"{device_view['days_unused'].max():.0f}" if not device_view.empty else "N/A",
+        )
+        st.caption(
+            f"Clinical vend/waste activity in this analysis window: "
+            f"{int(device_view['clinical_events'].gt(0).sum()):,} visible pocket(s)."
         )
 
         unload_chart_1, unload_chart_2 = st.columns(2)
@@ -2322,6 +2398,11 @@ with tab_unload:
             "outdate_tracking",
             "standard_stock_check",
             "outdate_tracking_check",
+            "clinical_events",
+            "clinical_vends",
+            "clinical_wastes",
+            "clinical_qty",
+            "last_clinical_dt",
             "backordered",
             "snapshot_dt",
         ]
@@ -2336,6 +2417,11 @@ with tab_unload:
                 "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
                 "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
                 "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
+                "clinical_events": st.column_config.NumberColumn("Clinical Events", format="%d"),
+                "clinical_vends": st.column_config.NumberColumn("Clinical Vends", format="%d"),
+                "clinical_wastes": st.column_config.NumberColumn("Clinical Wastes", format="%d"),
+                "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
+                "last_clinical_dt": st.column_config.DatetimeColumn("Last Clinical", format="MM/DD/YYYY HH:mm"),
                 "snapshot_dt": st.column_config.DatetimeColumn("Loaded Snapshot", format="MM/DD/YYYY HH:mm"),
             },
         )

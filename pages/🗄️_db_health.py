@@ -63,6 +63,7 @@ def get_table_health():
         ("cycle_count_status",  "Cycle Count Status Snapshot",  "snapshot_date", "Days Since Last Cycle Count Report"),
         ("buyer_formulary_listing","Buyer Formulary Listing",   "snapshot_date", "Buyer Formulary Listing Report"),
         ("physical_inventory_snapshots","Physical Inventory Snapshots", "snapshot_date", "Physical Inventory Report"),
+        ("audit_transaction_detail_rc","Audit Transaction Detail RC", "dt", "Audit Transaction Detail RC"),
         ("inventory_detailed",  "Detailed Inventory",           None,        "Inventory Audit (Detailed RC)"),
     ]
 

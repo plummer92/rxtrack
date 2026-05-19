@@ -433,6 +433,48 @@ def load_inventory_change_events(start, end, lookback_days=60):
 
 
 @st.cache_data(ttl=300)
+def load_clinical_activity(start, end, lookback_days=60):
+    """Nursing/clinical Pyxis vend and waste activity from Audit Transaction Detail RC."""
+    try:
+        lookback = start - timedelta(days=lookback_days)
+        sql = text("""
+            SELECT
+                pk,
+                dt,
+                user_name,
+                user_type,
+                station_name AS device,
+                med_id,
+                med_desc,
+                transaction_type AS event_type,
+                qty,
+                beginning_qty,
+                ending_qty,
+                waste_amount,
+                location
+            FROM audit_transaction_detail_rc
+            WHERE dt::date BETWEEN :lookback AND :end
+              AND (
+                    transaction_type ILIKE '%vend%'
+                 OR transaction_type ILIKE '%waste%'
+              )
+              AND (
+                    user_type ILIKE '%registered nurse%'
+                 OR user_type ILIKE '%nurse%'
+                 OR user_type ILIKE '%anesthesia%'
+                 OR user_type ILIKE '%respiratory%'
+              )
+            ORDER BY dt ASC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"lookback": lookback, "end": end})
+        return normalize_event_numbers(df)
+    except Exception as exc:
+        st.warning(f"[load_clinical_activity] {exc}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
 def load_pyxis_pulls(start, end, lookback_days=60):
     """Carousel/Pyxis pull demand lines from pharmacy_orders."""
     try:
@@ -571,6 +613,46 @@ def find_inventory_changes_since_refill(verify_row: pd.Series, inventory_events:
     })
 
 
+def find_clinical_activity_since_refill(verify_row: pd.Series, clinical_events: pd.DataFrame) -> pd.Series:
+    if clinical_events.empty or pd.isna(verify_row.get("prior_refill_dt")):
+        return empty_clinical_chain()
+    matches = clinical_events[
+        (clinical_events["med_id"] == verify_row["med_id"]) &
+        (clinical_events["device"] == verify_row["device"]) &
+        (clinical_events["dt"] > verify_row["prior_refill_dt"]) &
+        (clinical_events["dt"] < verify_row["dt"])
+    ].sort_values("dt")
+    if matches.empty:
+        return empty_clinical_chain()
+
+    vend_count = int(matches["event_type"].fillna("").str.contains("vend", case=False, na=False).sum())
+    waste_count = int(matches["event_type"].fillna("").str.contains("waste", case=False, na=False).sum())
+    last_event = matches.iloc[-1]
+    return pd.Series({
+        "clinical_events_since_refill": int(len(matches)),
+        "clinical_vends_since_refill": vend_count,
+        "clinical_wastes_since_refill": waste_count,
+        "clinical_qty_since_refill": pd.to_numeric(matches["qty"], errors="coerce").fillna(0).sum(),
+        "last_clinical_event_dt": last_event["dt"],
+        "last_clinical_event_by": str(last_event.get("user_name") or "Unknown"),
+        "last_clinical_event_type": last_event.get("event_type", ""),
+        "last_clinical_event_qty": last_event.get("qty", np.nan),
+    })
+
+
+def empty_clinical_chain() -> pd.Series:
+    return pd.Series({
+        "clinical_events_since_refill": 0,
+        "clinical_vends_since_refill": 0,
+        "clinical_wastes_since_refill": 0,
+        "clinical_qty_since_refill": 0,
+        "last_clinical_event_dt": pd.NaT,
+        "last_clinical_event_by": "",
+        "last_clinical_event_type": "",
+        "last_clinical_event_qty": np.nan,
+    })
+
+
 def empty_inventory_chain() -> pd.Series:
     return pd.Series({
         "inventory_events_since_refill": 0,
@@ -595,6 +677,9 @@ def classify_evidence(row: pd.Series) -> pd.Series:
     elif inventory_events > 0:
         status = "Needs inventory-chain review"
         reason = "Another inventory-changing transaction happened after the prior refill and before the verify."
+    elif int(row.get("clinical_events_since_refill") or 0) > 0:
+        status = "Needs inventory-chain review"
+        reason = "Nursing/clinical vend or waste activity happened after the prior refill and before the verify."
     elif pd.isna(refill_pull_qty):
         status = "Missing pull data"
         reason = "No refill-date Pyxis pull quantity was found, so the refill entry cannot be compared to pull quantity."
@@ -694,6 +779,7 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
     df_refills = load_prior_refills(start, end)
     df_corrections = load_count_inventory_corrections(start, end)
     df_inventory_events = load_inventory_change_events(start, end)
+    df_clinical_events = load_clinical_activity(start, end)
     df_pulls = load_pyxis_pulls(start, end)
 
     if df_verify.empty:
@@ -708,6 +794,11 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
         axis=1,
     )
     audit_df = pd.concat([audit_df, inventory_chain_cols], axis=1)
+    clinical_chain_cols = audit_df.apply(
+        lambda row: find_clinical_activity_since_refill(row, df_clinical_events),
+        axis=1,
+    )
+    audit_df = pd.concat([audit_df, clinical_chain_cols], axis=1)
     audit_df["verify_date"] = audit_df["dt"].dt.date
     audit_df["prior_refill_date"] = audit_df["prior_refill_dt"].dt.date
     audit_df["has_prior_refill"] = audit_df["prior_refill_dt"].notna()
@@ -874,6 +965,10 @@ m2.metric("Strong Evidence", f"{int((filtered['evidence_status'] == 'Strong refi
 m3.metric("Possible Evidence", f"{int((filtered['evidence_status'] == 'Possible refill-entry pattern').sum()):,}")
 m4.metric("Clean Refill Chains", f"{int((filtered['inventory_events_since_refill'] == 0).sum()):,}")
 m5.metric("Total Qty Off", f"{filtered['abs_discrepancy_qty'].sum():,.0f}")
+st.caption(
+    f"Clinical vend/waste activity between refill and verify: "
+    f"{int(filtered['clinical_events_since_refill'].fillna(0).gt(0).sum()):,} row(s)."
+)
 
 if not filtered.empty:
     evidence_summary = (
@@ -911,6 +1006,9 @@ review_columns = [
     "inventory_events_since_refill", "last_inventory_event_dt", "last_inventory_event_by",
     "last_inventory_event_type", "last_inventory_event_qty", "last_inventory_event_beginning_qty",
     "last_inventory_event_ending_qty",
+    "clinical_events_since_refill", "clinical_vends_since_refill", "clinical_wastes_since_refill",
+    "clinical_qty_since_refill", "last_clinical_event_dt", "last_clinical_event_by",
+    "last_clinical_event_type", "last_clinical_event_qty",
     "hours_since_refill", "correction_dt", "correction_by", "correction_qty",
     "correction_beginning_qty", "correction_ending_qty", "correction_event_type",
     "hours_until_correction", "verify_date_pull_qty", "verify_qty_vs_pull",
@@ -931,6 +1029,7 @@ review_grid_columns = [
     "verify_qty_vs_pull", "prior_refill_dt", "prior_refill_by",
     "prior_refill_qty", "refill_date_pull_qty", "refill_qty_vs_pull",
     "inventory_events_since_refill", "last_inventory_event_type",
+    "clinical_events_since_refill", "last_clinical_event_type",
     "correction_dt", "correction_by", "correction_qty", "hours_since_refill",
 ]
 review_grid_df = review_df[review_grid_columns].copy()
@@ -959,6 +1058,8 @@ edited_review_df = st.data_editor(
         "refill_qty_vs_pull": st.column_config.NumberColumn("Refill Qty vs Pull", format="%.0f"),
         "inventory_events_since_refill": st.column_config.NumberColumn("Inv Events Since Refill", format="%d"),
         "last_inventory_event_type": st.column_config.TextColumn("Last Inv Event"),
+        "clinical_events_since_refill": st.column_config.NumberColumn("Clinical Events", format="%d"),
+        "last_clinical_event_type": st.column_config.TextColumn("Last Clinical Event"),
         "hours_since_refill": st.column_config.NumberColumn("Hours Since Refill", format="%.1f"),
         "correction_dt": st.column_config.DatetimeColumn("Count Inventory Time", format="MM/DD/YY HH:mm"),
         "correction_by": st.column_config.TextColumn("Count Inventory User"),
@@ -990,7 +1091,7 @@ else:
     verify_tab, prior_tab, chain_tab, correction_tab, raw_tab = st.tabs([
         "Verify Count",
         "Prior Refill + Pull",
-        "Inventory Chain",
+        "Inventory + Clinical Chain",
         "Count Inventory",
         "All Fields",
     ])
@@ -1050,6 +1151,14 @@ else:
                 "Last Inventory Event Qty": detail_row["last_inventory_event_qty"],
                 "Last Inventory Begin": detail_row["last_inventory_event_beginning_qty"],
                 "Last Inventory End": detail_row["last_inventory_event_ending_qty"],
+                "Clinical Events Since Refill": detail_row["clinical_events_since_refill"],
+                "Clinical Vends Since Refill": detail_row["clinical_vends_since_refill"],
+                "Clinical Wastes Since Refill": detail_row["clinical_wastes_since_refill"],
+                "Clinical Qty Since Refill": detail_row["clinical_qty_since_refill"],
+                "Last Clinical Event Time": detail_row["last_clinical_event_dt"],
+                "Last Clinical Event User": detail_row["last_clinical_event_by"],
+                "Last Clinical Event Type": detail_row["last_clinical_event_type"],
+                "Last Clinical Event Qty": detail_row["last_clinical_event_qty"],
             }]),
             use_container_width=True,
             hide_index=True,
