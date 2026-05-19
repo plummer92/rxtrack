@@ -1395,6 +1395,7 @@ def clean_device_inventory(df):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     original_columns = list(df.columns)
+    standard_stock_column_v = df[original_columns[21]].copy() if len(original_columns) >= 22 else None
 
     med_desc_col = "MedDescription.1" if "MedDescription.1" in df.columns else "MedDescription"
     colmap = {
@@ -1418,10 +1419,16 @@ def clean_device_inventory(df):
     }
     df = df.rename(columns=colmap)
 
-    # Pyxis Device Inventory exports put StandardStock in column V. Keep this
-    # fallback for files where the header is blank, shifted, or renamed.
-    if "standard_stock" not in df.columns and len(original_columns) >= 22:
-        df["standard_stock"] = df[original_columns[21]]
+    # Pyxis Device Inventory exports put StandardStock in column V. Use that
+    # source when it looks like the expected Y/N flag, even if the header shifted.
+    if standard_stock_column_v is not None:
+        column_v = standard_stock_column_v.fillna("").astype(str).str.strip().str.upper()
+        nonblank_v = column_v[column_v.ne("")]
+        column_v_is_yes_no = not nonblank_v.empty and nonblank_v.isin(["Y", "N"]).mean() >= 0.95
+        if column_v_is_yes_no:
+            df["standard_stock"] = column_v
+    elif "standard_stock" not in df.columns:
+        df["standard_stock"] = None
 
     required = list(colmap.values())
     for col in required:

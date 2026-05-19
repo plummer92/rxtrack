@@ -897,6 +897,16 @@ def prep_device_inventory(df):
         out["exemption_reason"].eq(""),
         out["exemption_reason"] + "; ",
     ) + "Active order"
+    valid_yn = {"Y", "N", ""}
+    out["standard_stock_check"] = "OK"
+    out["outdate_tracking_check"] = "OK"
+    out.loc[~out["standard_stock"].str.upper().isin(valid_yn), "standard_stock_check"] = "Invalid standard stock flag"
+    out.loc[~out["outdate_tracking"].str.upper().isin(valid_yn), "outdate_tracking_check"] = "Invalid outdate tracking flag"
+    probable_supply = out["med_desc"].str.contains(r"\b(key|paper|misc|premix)\b", case=False, na=False)
+    out.loc[
+        out["outdate_tracking"].str.upper().eq("N") & ~probable_supply,
+        "outdate_tracking_check",
+    ] = "Outdate tracking off - verify"
     return out
 
 
@@ -2280,6 +2290,19 @@ with tab_unload:
             )
 
         st.markdown("##### Device Inventory 28-Day Review")
+        standard_counts = device_view["standard_stock"].fillna("").astype(str).str.upper().value_counts()
+        outdate_counts = device_view["outdate_tracking"].fillna("").astype(str).str.upper().value_counts()
+        if len(device_view) > 0 and standard_counts.get("Y", 0) == 0:
+            st.warning(
+                "Standard Stock is `N` for every row in the current Device Inventory view. "
+                "That usually means the StandardStock source column did not map correctly. "
+                "Re-upload the Device Inventory List after this update so RxTrack uses column V for the flag."
+            )
+        if len(device_view) > 0 and outdate_counts.get("Y", 0) == 0:
+            st.warning(
+                "Outdate Tracking is not marked `Y` for any row in this Device Inventory view. "
+                "Verify the source export has the OutdateTracking column."
+            )
         device_cols = [
             "device",
             "zone",
@@ -2297,6 +2320,8 @@ with tab_unload:
             "exemption_reason",
             "status",
             "outdate_tracking",
+            "standard_stock_check",
+            "outdate_tracking_check",
             "backordered",
             "snapshot_dt",
         ]
