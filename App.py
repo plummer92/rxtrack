@@ -2993,6 +2993,10 @@ def render_sidebar():
         st.session_state.end_date = today
     if 'rxtrack_sidebar_filter_mode' not in st.session_state:
         st.session_state.rxtrack_sidebar_filter_mode = "Day"
+    st.session_state.start_date = min(max(st.session_state.start_date, min_selectable_date), max_selectable_date)
+    st.session_state.end_date = min(max(st.session_state.end_date, min_selectable_date), max_selectable_date)
+    if st.session_state.start_date > st.session_state.end_date:
+        st.session_state.end_date = st.session_state.start_date
 
     with st.sidebar:
         st.markdown("""
@@ -3019,14 +3023,26 @@ def render_sidebar():
         )
 
         if filter_mode == "Range":
-            date_range = st.slider(
-                "Select Range:",
+            range_start, range_end = st.columns(2)
+            selected_start = range_start.date_input(
+                "Start Date",
+                value=st.session_state.start_date,
                 min_value=min_selectable_date,
                 max_value=max_selectable_date,
-                value=(st.session_state.start_date, st.session_state.end_date),
-                format="MM/DD/YY"
+                key="rxtrack_sidebar_range_start",
             )
-            st.session_state.start_date, st.session_state.end_date = date_range
+            selected_end = range_end.date_input(
+                "End Date",
+                value=st.session_state.end_date,
+                min_value=min_selectable_date,
+                max_value=max_selectable_date,
+                key="rxtrack_sidebar_range_end",
+            )
+            if selected_start > selected_end:
+                st.warning("Start date was after end date, so RxTrack used the same day for both.")
+                selected_end = selected_start
+            st.session_state.start_date = selected_start
+            st.session_state.end_date = selected_end
 
         elif filter_mode == "Month":
             selected_month = st.date_input(
