@@ -19,6 +19,7 @@ else:
     App.render_sidebar()
 
 engine = App.engine
+App.init_db()
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
@@ -143,16 +144,51 @@ def get_daily_coverage(table, date_col, lookback_days=90):
 @st.cache_data(ttl=120)
 def get_cost_coverage():
     """
-    How many distinct med_ids in events have a matching cost in med_costs.
+    How many distinct med_ids in events have a matching cost in any loaded
+    inventory price source.
     """
     try:
         sql = text("""
+            WITH normalized_events AS (
+                SELECT DISTINCT UPPER(TRIM(med_id)) AS med_id
+                FROM events
+                WHERE NULLIF(UPPER(TRIM(COALESCE(med_id, ''))), '') IS NOT NULL
+                  AND UPPER(TRIM(COALESCE(med_id, ''))) <> 'NAN'
+            ),
+            cost_sources AS (
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(cost_per_unit) AS unit_cost
+                FROM med_costs
+                WHERE COALESCE(cost_per_unit, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+                UNION ALL
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(unit_cost) AS unit_cost
+                FROM inventory_audit
+                WHERE COALESCE(unit_cost, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+                UNION ALL
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(unit_cost) AS unit_cost
+                FROM inventory_detailed
+                WHERE COALESCE(unit_cost, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+                UNION ALL
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(unit_cost) AS unit_cost
+                FROM physical_inventory_snapshots
+                WHERE COALESCE(unit_cost, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+            ),
+            priced_meds AS (
+                SELECT med_id, MAX(unit_cost) AS unit_cost
+                FROM cost_sources
+                WHERE NULLIF(med_id, '') IS NOT NULL
+                  AND med_id <> 'NAN'
+                GROUP BY med_id
+            )
             SELECT
-                COUNT(DISTINCT e.med_id)                                      AS total_meds,
-                COUNT(DISTINCT c.med_id)                                      AS costed_meds,
-                COUNT(DISTINCT e.med_id) - COUNT(DISTINCT c.med_id)           AS missing_cost
-            FROM events e
-            LEFT JOIN med_costs c ON e.med_id = c.med_id
+                COUNT(e.med_id)                                      AS total_meds,
+                COUNT(p.med_id)                                      AS costed_meds,
+                COUNT(e.med_id) - COUNT(p.med_id)                    AS missing_cost
+            FROM normalized_events e
+            LEFT JOIN priced_meds p ON e.med_id = p.med_id
         """)
         with engine.connect() as conn:
             r = conn.execute(sql)
@@ -308,7 +344,7 @@ st.divider()
 
 st.subheader("💲 Med Cost Coverage")
 st.caption(
-    "Medications in your events table with no matching price in med_costs. "
+    "Medications in your events table with no matching price from loaded cost or inventory reports. "
     "These contribute $0 to any dollar-value calculation."
 )
 
@@ -322,11 +358,50 @@ if cost_cov["missing"] > 0:
     @st.cache_data(ttl=120)
     def get_missing_cost_meds():
         sql = text("""
-            SELECT e.med_id, e.med_desc, COUNT(*) AS event_count
-            FROM events e
-            LEFT JOIN med_costs c ON e.med_id = c.med_id
-            WHERE c.med_id IS NULL
-            GROUP BY e.med_id, e.med_desc
+            WITH normalized_events AS (
+                SELECT
+                    UPPER(TRIM(med_id)) AS med_id,
+                    NULLIF(TRIM(COALESCE(med_desc, '')), '') AS med_desc
+                FROM events
+                WHERE NULLIF(UPPER(TRIM(COALESCE(med_id, ''))), '') IS NOT NULL
+                  AND UPPER(TRIM(COALESCE(med_id, ''))) <> 'NAN'
+            ),
+            cost_sources AS (
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(cost_per_unit) AS unit_cost
+                FROM med_costs
+                WHERE COALESCE(cost_per_unit, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+                UNION ALL
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(unit_cost) AS unit_cost
+                FROM inventory_audit
+                WHERE COALESCE(unit_cost, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+                UNION ALL
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(unit_cost) AS unit_cost
+                FROM inventory_detailed
+                WHERE COALESCE(unit_cost, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+                UNION ALL
+                SELECT UPPER(TRIM(med_id)) AS med_id, MAX(unit_cost) AS unit_cost
+                FROM physical_inventory_snapshots
+                WHERE COALESCE(unit_cost, 0) > 0
+                GROUP BY UPPER(TRIM(med_id))
+            ),
+            priced_meds AS (
+                SELECT med_id, MAX(unit_cost) AS unit_cost
+                FROM cost_sources
+                WHERE NULLIF(med_id, '') IS NOT NULL
+                  AND med_id <> 'NAN'
+                GROUP BY med_id
+            )
+            SELECT
+                e.med_id,
+                MAX(e.med_desc) AS med_desc,
+                COUNT(*) AS event_count
+            FROM normalized_events e
+            LEFT JOIN priced_meds p ON e.med_id = p.med_id
+            WHERE p.med_id IS NULL
+            GROUP BY e.med_id
             ORDER BY event_count DESC
         """)
         with engine.connect() as conn:
@@ -342,7 +417,7 @@ if cost_cov["missing"] > 0:
             },
             hide_index=True
         )
-        st.caption("Fix by uploading an Inventory Audit (Prices) file via the main upload page.")
+        st.caption("Fix by uploading an Inventory Audit (Prices), Inventory Audit (Detailed RC), or Physical Inventory Report file.")
 else:
     st.success("✅ All medications have a cost price loaded.")
 

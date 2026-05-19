@@ -752,6 +752,7 @@ def clean_dataframe(df):
     df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
     for c in ["qty", "discrepancy_qty", "beginning_qty", "ending_qty"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype('float32')
+    df["med_id"] = df["med_id"].fillna("").astype(str).str.strip().str.upper().replace({"NAN": ""})
     # Leave timestamps as Python datetimes for psycopg2 and convert missing values to SQL NULL.
     df["discrepancy_reason"] = df["discrepancy_reason"].where(pd.notna(df["discrepancy_reason"]), None)
     df["resolution_dt"] = df["resolution_dt"].where(pd.notna(df["resolution_dt"]), None)
@@ -990,6 +991,7 @@ def clean_inventory_file(df):
         df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
     df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
     df['qty_on_hand'] = pd.to_numeric(df['qty_on_hand'], errors='coerce').fillna(0)
+    df['med_id'] = df['med_id'].fillna("").astype(str).str.strip().str.upper().replace({"NAN": ""})
     df['pk'] = df.apply(lambda x: str(x['med_id']), axis=1)
     return df[['pk', 'med_id', 'med_desc', 'med_class', 'unit_cost', 'qty_on_hand', 'min_lvl', 'max_lvl']]
 
@@ -1012,6 +1014,7 @@ def clean_detailed_inventory(df):
         df['unit_cost'] = df['unit_cost'].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False)
     df['unit_cost'] = pd.to_numeric(df['unit_cost'], errors='coerce').fillna(0)
     df['current_count'] = pd.to_numeric(df['current_count'], errors='coerce').fillna(0)
+    df['med_id'] = df['med_id'].fillna("").astype(str).str.strip().str.upper().replace({"NAN": ""})
     df['row_sig'] = df['station'].astype(str) + df['med_id'].astype(str) + df['pocket_location'].astype(str)
     df['pk'] = df['row_sig'].apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
     return df[required + ['pk']]
