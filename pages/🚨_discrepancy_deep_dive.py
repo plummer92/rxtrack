@@ -314,6 +314,126 @@ def save_strong_patterns_to_management(action_plan: pd.DataFrame, filtered_df: p
     return result.rowcount or 0
 
 
+def build_clinical_chain_actions(filtered_df: pd.DataFrame, min_example_qty_off: int = 3) -> pd.DataFrame:
+    if filtered_df.empty or "clinical_events_since_refill" not in filtered_df.columns:
+        return pd.DataFrame()
+    clinical_rows = filtered_df[
+        filtered_df["clinical_events_since_refill"].fillna(0).gt(0)
+        & filtered_df["prior_refill_by"].fillna("").astype(str).ne("")
+        & filtered_df["prior_refill_by"].ne("No prior refill found")
+    ].copy()
+    if clinical_rows.empty:
+        return pd.DataFrame()
+
+    action_rows = []
+    for user_name, user_rows in clinical_rows.groupby("prior_refill_by"):
+        example_rows = user_rows[user_rows["abs_discrepancy_qty"] >= min_example_qty_off]
+        if example_rows.empty:
+            example_rows = user_rows
+        examples = []
+        for _, row in example_rows.sort_values("abs_discrepancy_qty", ascending=False).head(3).iterrows():
+            examples.append(
+                f"{row['med_id']} at {row['device']} on {row['dt']:%m/%d %H:%M}: "
+                f"pharmacy {str(row.get('prior_refill_event_type') or 'refill/load').lower()} entered "
+                f"{fmt_qty(row['prior_refill_qty'])}; clinical chain had "
+                f"{int(row.get('clinical_vends_since_refill') or 0)} vend(s), "
+                f"{int(row.get('clinical_wastes_since_refill') or 0)} waste(s); "
+                f"later verify was off {fmt_qty(row['discrepancy_qty'])}."
+            )
+        action_rows.append({
+            "priority": "Review chain before coaching",
+            "prior_refill_user": user_name,
+            "clinical_chain_rows": len(user_rows),
+            "clinical_events": int(user_rows["clinical_events_since_refill"].fillna(0).sum()),
+            "clinical_vends": int(user_rows["clinical_vends_since_refill"].fillna(0).sum()),
+            "clinical_wastes": int(user_rows["clinical_wastes_since_refill"].fillna(0).sum()),
+            "total_qty_off": float(user_rows["abs_discrepancy_qty"].fillna(0).sum()),
+            "suggested_action": (
+                "Do not treat this as a clean refill-entry coaching signal until the clinical vend/waste chain is reviewed."
+            ),
+            "example_evidence": "\n".join(examples),
+        })
+    return pd.DataFrame(action_rows).sort_values(
+        ["clinical_chain_rows", "clinical_events", "total_qty_off"],
+        ascending=False,
+    )
+
+
+def save_clinical_chain_to_management(clinical_plan: pd.DataFrame, filtered_df: pd.DataFrame, audit_start, audit_end) -> int:
+    if clinical_plan.empty:
+        return 0
+    sql = text("""
+        INSERT INTO management_coaching_notes
+            (staff_name, topic, coaching_date, follow_up_date, status, summary, next_steps, source_page, source_key, source_payload_json)
+        VALUES
+            (:staff_name, :topic, CURRENT_DATE, CURRENT_DATE, 'Open', :summary, :next_steps, :source_page, :source_key, :source_payload_json)
+        ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
+            coaching_date = CURRENT_DATE,
+            follow_up_date = CURRENT_DATE,
+            status = CASE
+                WHEN management_coaching_notes.status = 'Closed' THEN 'Open'
+                ELSE management_coaching_notes.status
+            END,
+            summary = EXCLUDED.summary,
+            next_steps = EXCLUDED.next_steps,
+            source_payload_json = EXCLUDED.source_payload_json,
+            updated_at = NOW()
+    """)
+    payload = []
+    for _, plan_row in clinical_plan.iterrows():
+        staff_name = str(plan_row["prior_refill_user"]).strip()
+        source_key = f"verify-count-audit-clinical-chain:{staff_name.lower()}"
+        rows = filtered_df[
+            (filtered_df["prior_refill_by"].astype(str).str.strip() == staff_name)
+            & filtered_df["clinical_events_since_refill"].fillna(0).gt(0)
+        ].sort_values("abs_discrepancy_qty", ascending=False)
+        evidence_rows = []
+        for _, detail in rows.iterrows():
+            verify_time = pd.to_datetime(detail.get("dt"), errors="coerce")
+            prior_time = pd.to_datetime(detail.get("prior_refill_dt"), errors="coerce")
+            clinical_time = pd.to_datetime(detail.get("last_clinical_event_dt"), errors="coerce")
+            evidence_rows.append({
+                "Verify Time": verify_time.strftime("%m/%d/%y %H:%M") if pd.notna(verify_time) else "",
+                "Pyxis": str(detail.get("device") or ""),
+                "Med ID": str(detail.get("med_id") or ""),
+                "Medication": str(detail.get("med_desc") or ""),
+                "Pharmacy Refill Time": prior_time.strftime("%m/%d/%y %H:%M") if pd.notna(prior_time) else "",
+                "Pharmacy User": str(detail.get("prior_refill_by") or ""),
+                "Refill Entered": db_value(detail.get("prior_refill_qty")),
+                "Pull Qty": db_value(detail.get("refill_date_pull_qty")),
+                "Clinical Events": db_value(detail.get("clinical_events_since_refill")),
+                "Clinical Vends": db_value(detail.get("clinical_vends_since_refill")),
+                "Clinical Wastes": db_value(detail.get("clinical_wastes_since_refill")),
+                "Last Clinical Time": clinical_time.strftime("%m/%d/%y %H:%M") if pd.notna(clinical_time) else "",
+                "Last Clinical User": str(detail.get("last_clinical_event_by") or ""),
+                "Last Clinical Event": str(detail.get("last_clinical_event_type") or ""),
+                "Later Verify Off": db_value(detail.get("discrepancy_qty")),
+                "Why It Matched": str(detail.get("evidence_reason") or ""),
+            })
+        summary = (
+            f"Verify Count Audit found {int(plan_row['clinical_chain_rows'])} discrepancy row(s) for {staff_name} "
+            f"where clinical vend/waste activity occurred between the pharmacy refill/load and the later verify mismatch "
+            f"between {audit_start} and {audit_end}.\n\n"
+            f"Examples:\n{plan_row.get('example_evidence') or 'Review the clinical-chain evidence table below.'}"
+        )
+        next_steps = (
+            "Review the chain before coaching. Confirm whether the mismatch is explained by clinical vend/waste activity, "
+            "then coach only if the refill/load entry still appears inaccurate after that review."
+        )
+        payload.append({
+            "staff_name": staff_name,
+            "topic": "Discrepancy",
+            "summary": summary,
+            "next_steps": next_steps,
+            "source_page": "Verify Count Audit - Clinical Chain",
+            "source_key": source_key,
+            "source_payload_json": json.dumps(evidence_rows, default=str),
+        })
+    with engine.begin() as conn:
+        result = conn.execute(sql, payload)
+    return result.rowcount or 0
+
+
 def classify_med_section(row: pd.Series) -> pd.Series:
     med_text = f"{row.get('med_desc', '')} {row.get('med_id', '')}".lower()
     is_insulin = bool(pd.Series([med_text]).str.contains(INSULIN_PATTERN, regex=True, na=False).iloc[0])
@@ -1300,6 +1420,7 @@ else:
             unique_meds=("med_id", "nunique"),
             unique_devices=("device", "nunique"),
             median_hours_since_refill=("hours_since_refill", "median"),
+            clinical_chain_rows=("clinical_events_since_refill", lambda s: s.fillna(0).gt(0).sum()),
         )
         .reset_index()
         .sort_values(["mismatch_count", "total_qty_off"], ascending=False)
@@ -1330,6 +1451,7 @@ else:
             "unique_meds": st.column_config.NumberColumn("Meds", format="%d"),
             "unique_devices": st.column_config.NumberColumn("Devices", format="%d"),
             "median_hours_since_refill": st.column_config.NumberColumn("Median Hours Since Refill", format="%.1f"),
+            "clinical_chain_rows": st.column_config.NumberColumn("Clinical Chain", format="%d"),
         },
     )
     st.download_button(
@@ -1354,8 +1476,40 @@ else:
         key="verify_audit_action_plan_min_qty",
     )
     action_plan = build_coaching_actions(filtered, user_summary, int(min_action_example_qty))
+    clinical_plan = build_clinical_chain_actions(filtered, int(min_action_example_qty))
     if action_plan.empty:
         st.info("No strong or possible refill-entry patterns are visible with the current filters.")
+        if not clinical_plan.empty:
+            st.markdown("#### Clinical Chain Review Worklist")
+            st.caption(
+                "These rows have clinical vend/waste activity between the pharmacy refill/load and the later verify mismatch. "
+                "Use this before deciding whether the item is truly coaching for refill entry."
+            )
+            st.dataframe(
+                clinical_plan,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "priority": st.column_config.TextColumn("Priority"),
+                    "prior_refill_user": st.column_config.TextColumn("Pharmacy User"),
+                    "clinical_chain_rows": st.column_config.NumberColumn("Rows", format="%d"),
+                    "clinical_events": st.column_config.NumberColumn("Clinical Events", format="%d"),
+                    "clinical_vends": st.column_config.NumberColumn("Vends", format="%d"),
+                    "clinical_wastes": st.column_config.NumberColumn("Wastes", format="%d"),
+                    "total_qty_off": st.column_config.NumberColumn("Total Qty Off", format="%.0f"),
+                    "suggested_action": st.column_config.TextColumn("What To Do"),
+                    "example_evidence": st.column_config.TextColumn("Examples"),
+                },
+            )
+            if st.button(
+                f"Add {len(clinical_plan)} clinical chain review item(s) to Management Coaching",
+                key="verify_audit_send_clinical_chain_to_management_only",
+            ):
+                saved_count = save_clinical_chain_to_management(clinical_plan, filtered, start_date, end_date)
+                st.success(
+                    f"Management Coaching updated for {saved_count} clinical-chain item"
+                    f"{'s' if saved_count != 1 else ''}."
+                )
     else:
         st.dataframe(
             action_plan,
@@ -1392,6 +1546,40 @@ else:
                 )
         else:
             st.info("No strong refill-entry pattern is visible to add to Management Coaching.")
+
+        st.markdown("#### Clinical Chain Review Worklist")
+        st.caption(
+            "These rows have clinical vend/waste activity between the pharmacy refill/load and the later verify mismatch. "
+            "Use this before deciding whether the item is truly coaching for refill entry."
+        )
+        if clinical_plan.empty:
+            st.info("No clinical vend/waste chain rows are visible with the current filters.")
+        else:
+            st.dataframe(
+                clinical_plan,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "priority": st.column_config.TextColumn("Priority"),
+                    "prior_refill_user": st.column_config.TextColumn("Pharmacy User"),
+                    "clinical_chain_rows": st.column_config.NumberColumn("Rows", format="%d"),
+                    "clinical_events": st.column_config.NumberColumn("Clinical Events", format="%d"),
+                    "clinical_vends": st.column_config.NumberColumn("Vends", format="%d"),
+                    "clinical_wastes": st.column_config.NumberColumn("Wastes", format="%d"),
+                    "total_qty_off": st.column_config.NumberColumn("Total Qty Off", format="%.0f"),
+                    "suggested_action": st.column_config.TextColumn("What To Do"),
+                    "example_evidence": st.column_config.TextColumn("Examples"),
+                },
+            )
+            if st.button(
+                f"Add {len(clinical_plan)} clinical chain review item(s) to Management Coaching",
+                key="verify_audit_send_clinical_chain_to_management",
+            ):
+                saved_count = save_clinical_chain_to_management(clinical_plan, filtered, start_date, end_date)
+                st.success(
+                    f"Management Coaching updated for {saved_count} clinical-chain item"
+                    f"{'s' if saved_count != 1 else ''}."
+                )
 
         st.markdown("#### Coaching Drilldown")
         selected_action_user = st.selectbox(

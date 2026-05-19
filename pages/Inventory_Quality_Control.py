@@ -1574,9 +1574,10 @@ for col in ["active_bud_review_dt", "reviewed_active_bud_date"]:
     isa_lifecycle[col] = pd.to_datetime(isa_lifecycle[col], errors="coerce")
 isa_lifecycle["active_bud_reviewed"] = isa_lifecycle["active_bud_review_dt"].notna()
 
-tab_lifecycle, tab_unload, tab_buyer_review, tab_turns, tab_savings = st.tabs([
+tab_lifecycle, tab_unload, tab_outdate, tab_buyer_review, tab_turns, tab_savings = st.tabs([
     "ISA Receiving Lifecycle",
     "Pyxis 28-Day Unload",
+    "Outdate Tracking Audit",
     "Buyer No-Inventory Review",
     "Inventory Turns",
     "Pyxis Overstock Savings",
@@ -2502,6 +2503,111 @@ with tab_unload:
                         "waste_amount": st.column_config.NumberColumn("Waste", format="%.0f"),
                     },
                 )
+
+
+with tab_outdate:
+    st.subheader("Outdate Tracking Audit")
+    st.caption(
+        "Flags pockets where `OutdateTracking` is off but the row looks like a real medication, "
+        "especially when clinical vend/waste activity appears in the RC audit file."
+    )
+
+    if device_inventory.empty:
+        st.warning("No Device Inventory List rows are loaded yet. Upload the Device Inventory List first.")
+    else:
+        outdate_view = device_inventory.copy()
+        if not clinical_summary.empty:
+            outdate_view = outdate_view.merge(clinical_summary, on=["device", "med_id"], how="left")
+        for col in ["clinical_events", "clinical_vends", "clinical_wastes", "clinical_qty", "clinical_waste_qty"]:
+            if col not in outdate_view.columns:
+                outdate_view[col] = 0
+            outdate_view[col] = pd.to_numeric(outdate_view[col], errors="coerce").fillna(0)
+        if "last_clinical_dt" not in outdate_view.columns:
+            outdate_view["last_clinical_dt"] = pd.NaT
+        outdate_view["last_clinical_dt"] = pd.to_datetime(outdate_view["last_clinical_dt"], errors="coerce")
+
+        for col in ["med_desc", "med_id", "brand_name", "device", "pocket_location", "outdate_tracking", "status"]:
+            outdate_view[col] = outdate_view[col].fillna("").astype(str).str.strip()
+        outdate_view["med_id"] = outdate_view["med_id"].str.upper()
+        supply_pattern = r"\b(key|paper|misc|label|printer|drawer|premix|kit|cassette|bin)\b"
+        outdate_view["looks_like_supply"] = (
+            outdate_view["med_desc"].str.contains(supply_pattern, case=False, na=False)
+            | outdate_view["brand_name"].str.contains(supply_pattern, case=False, na=False)
+        )
+        outdate_view["outdate_tracking_off"] = outdate_view["outdate_tracking"].str.upper().eq("N")
+        outdate_view["has_clinical_activity"] = outdate_view["clinical_events"].gt(0)
+        outdate_view["outdate_audit_priority"] = "OK"
+        outdate_view.loc[
+            outdate_view["outdate_tracking_off"] & ~outdate_view["looks_like_supply"],
+            "outdate_audit_priority",
+        ] = "Review"
+        outdate_view.loc[
+            outdate_view["outdate_tracking_off"] & ~outdate_view["looks_like_supply"] & outdate_view["has_clinical_activity"],
+            "outdate_audit_priority",
+        ] = "High Review - Clinical Use"
+
+        priority_options = ["High Review - Clinical Use", "Review", "OK"]
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Outdate Tracking Off", f"{int(outdate_view['outdate_tracking_off'].sum()):,}")
+        a2.metric("Review Rows", f"{int(outdate_view['outdate_audit_priority'].isin(['Review', 'High Review - Clinical Use']).sum()):,}")
+        a3.metric("Clinical Use Review", f"{int(outdate_view['outdate_audit_priority'].eq('High Review - Clinical Use').sum()):,}")
+        a4.metric("Clinical Events", f"{int(outdate_view['clinical_events'].sum()):,}")
+
+        f1, f2, f3 = st.columns(3)
+        selected_priorities = f1.multiselect(
+            "Audit priority",
+            priority_options,
+            default=["High Review - Clinical Use", "Review"],
+        )
+        selected_devices = f2.multiselect("Device", sorted(outdate_view["device"].dropna().unique()))
+        outdate_search = f3.text_input("Med/device search", key="outdate_tracking_audit_search")
+
+        audit_rows = outdate_view.copy()
+        if selected_priorities:
+            audit_rows = audit_rows[audit_rows["outdate_audit_priority"].isin(selected_priorities)]
+        if selected_devices:
+            audit_rows = audit_rows[audit_rows["device"].isin(selected_devices)]
+        if outdate_search:
+            mask = (
+                audit_rows["device"].str.contains(outdate_search, case=False, na=False)
+                | audit_rows["med_id"].str.contains(outdate_search, case=False, na=False)
+                | audit_rows["med_desc"].str.contains(outdate_search, case=False, na=False)
+                | audit_rows["pocket_location"].str.contains(outdate_search, case=False, na=False)
+            )
+            audit_rows = audit_rows[mask]
+
+        audit_cols = [
+            "outdate_audit_priority", "device", "pocket_location", "med_id", "med_desc",
+            "current_quantity", "min_qty", "max_qty", "days_unused", "outdate_tracking",
+            "clinical_events", "clinical_vends", "clinical_wastes", "clinical_qty",
+            "last_clinical_dt", "standard_stock", "active_orders", "status", "brand_name",
+        ]
+        st.dataframe(
+            audit_rows.sort_values(["outdate_audit_priority", "clinical_events", "days_unused"], ascending=[True, False, False])[audit_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "outdate_audit_priority": "Priority",
+                "device": "Device",
+                "pocket_location": "Pocket",
+                "current_quantity": st.column_config.NumberColumn("Current Qty", format="%.0f"),
+                "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
+                "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
+                "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
+                "clinical_events": st.column_config.NumberColumn("Clinical Events", format="%d"),
+                "clinical_vends": st.column_config.NumberColumn("Vends", format="%d"),
+                "clinical_wastes": st.column_config.NumberColumn("Wastes", format="%d"),
+                "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
+                "last_clinical_dt": st.column_config.DatetimeColumn("Last Clinical", format="MM/DD/YYYY HH:mm"),
+            },
+        )
+
+        st.download_button(
+            "Download outdate tracking audit CSV",
+            data=audit_rows[audit_cols].to_csv(index=False).encode("utf-8"),
+            file_name="outdate_tracking_audit.csv",
+            mime="text/csv",
+        )
 
 
 with tab_buyer_review:

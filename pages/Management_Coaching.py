@@ -215,17 +215,31 @@ with list_col:
                 except Exception:
                     evidence = pd.DataFrame()
                 if not evidence.empty:
-                    st.markdown("**Strong Pattern Evidence**")
+                    evidence_title = (
+                        "Clinical Chain Evidence"
+                        if str(selected_note.get("source_page") or "").lower().find("clinical") >= 0
+                        else "Strong Pattern Evidence"
+                    )
+                    st.markdown(f"**{evidence_title}**")
                     chain_cols = [
-                        "Verify Time", "Pyxis", "Med ID", "Medication", "Prior Refill Time",
-                        "Prior Event", "Refill Entered", "Pull Qty", "Refill vs Pull",
+                        "Verify Time", "Pyxis", "Med ID", "Medication",
+                        "Pharmacy Refill Time", "Prior Refill Time", "Pharmacy User", "Prior Event",
+                        "Refill Entered", "Pull Qty", "Refill vs Pull",
+                        "Clinical Events", "Clinical Vends", "Clinical Wastes",
+                        "Last Clinical Time", "Last Clinical User", "Last Clinical Event",
                         "Later Verify Off", "Verify User", "Inventory Events Since",
                     ]
                     visible_cols = [col for col in chain_cols if col in evidence.columns]
                     st.dataframe(evidence[visible_cols], width="stretch", hide_index=True)
 
-                    chart_cols = ["Refill Entered", "Pull Qty", "Later Verify Off"]
-                    if all(col in evidence.columns for col in chart_cols):
+                    chart_cols = [
+                        col for col in [
+                            "Refill Entered", "Pull Qty", "Clinical Events",
+                            "Clinical Vends", "Clinical Wastes", "Later Verify Off",
+                        ]
+                        if col in evidence.columns
+                    ]
+                    if chart_cols:
                         chart_df = evidence.copy()
                         if "Verify Time" not in chart_df.columns:
                             chart_df["Verify Time"] = ""
