@@ -2183,7 +2183,7 @@ with tab_unload:
         selected_unload_statuses = f2.multiselect(
             "Unload status",
             status_order,
-            default=["High Priority", "Unload Due"],
+            default=["Clinical Use Review", "High Priority", "Unload Due"],
         )
         min_days = int(device_view["days_unused"].max()) if device_view["days_unused"].notna().any() else 0
         days_floor = f3.number_input("Minimum days unused", min_value=0, max_value=max(min_days, 29), value=29, step=1)
@@ -2394,15 +2394,15 @@ with tab_unload:
             "active_orders",
             "unload_status",
             "exemption_reason",
-            "status",
-            "outdate_tracking",
-            "standard_stock_check",
-            "outdate_tracking_check",
             "clinical_events",
             "clinical_vends",
             "clinical_wastes",
             "clinical_qty",
             "last_clinical_dt",
+            "status",
+            "outdate_tracking",
+            "standard_stock_check",
+            "outdate_tracking_check",
             "backordered",
             "snapshot_dt",
         ]
@@ -2432,6 +2432,76 @@ with tab_unload:
             file_name="pyxis_28_day_unload_review.csv",
             mime="text/csv",
         )
+
+        clinical_review_rows = device_view[device_view["unload_status"].eq("Clinical Use Review")].copy()
+        if not clinical_review_rows.empty:
+            st.markdown("##### Clinical Use Review Details")
+            st.caption(
+                "These are pockets that look stale by Device Inventory days-unused, but the RC audit file shows "
+                "nurse/anesthesia/respiratory vend or waste activity in the selected date range."
+            )
+            clinical_detail = clinical_review_rows[[
+                "device", "pocket_location", "med_id", "med_desc", "days_unused",
+                "current_quantity", "min_qty", "max_qty", "clinical_events",
+                "clinical_vends", "clinical_wastes", "clinical_qty", "clinical_waste_qty",
+                "last_clinical_dt",
+            ]].sort_values(["clinical_events", "days_unused"], ascending=[False, False])
+            st.dataframe(
+                clinical_detail,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "device": "Device",
+                    "pocket_location": "Pocket",
+                    "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
+                    "current_quantity": st.column_config.NumberColumn("Current Qty", format="%.0f"),
+                    "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
+                    "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
+                    "clinical_events": st.column_config.NumberColumn("Events", format="%d"),
+                    "clinical_vends": st.column_config.NumberColumn("Vends", format="%d"),
+                    "clinical_wastes": st.column_config.NumberColumn("Wastes", format="%d"),
+                    "clinical_qty": st.column_config.NumberColumn("Vend Qty", format="%.0f"),
+                    "clinical_waste_qty": st.column_config.NumberColumn("Waste Qty", format="%.0f"),
+                    "last_clinical_dt": st.column_config.DatetimeColumn("Last Clinical Event", format="MM/DD/YYYY HH:mm"),
+                },
+            )
+
+            if not clinical_pyxis_activity.empty:
+                selected_clinical_key = st.selectbox(
+                    "Show clinical transaction chain for pocket",
+                    clinical_detail.assign(
+                        label=lambda df: (
+                            df["device"].astype(str)
+                            + " | "
+                            + df["med_id"].astype(str)
+                            + " | "
+                            + df["pocket_location"].astype(str)
+                        )
+                    )["label"].tolist(),
+                    key="clinical_use_review_detail_key",
+                )
+                selected_device, selected_med_id, _selected_pocket = selected_clinical_key.split(" | ", 2)
+                event_detail = clinical_pyxis_activity[
+                    clinical_pyxis_activity["device"].astype(str).str.strip().eq(selected_device)
+                    & clinical_pyxis_activity["med_id"].astype(str).str.strip().str.upper().eq(selected_med_id)
+                ].copy()
+                event_detail["dt"] = pd.to_datetime(event_detail["dt"], errors="coerce")
+                event_detail = event_detail.sort_values("dt", ascending=False)
+                st.dataframe(
+                    event_detail[[
+                        "dt", "transaction_type", "user_name", "user_type", "qty", "waste_amount", "med_desc",
+                    ]],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "dt": st.column_config.DatetimeColumn("Time", format="MM/DD/YYYY HH:mm"),
+                        "transaction_type": "Transaction",
+                        "user_name": "User",
+                        "user_type": "User Type",
+                        "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+                        "waste_amount": st.column_config.NumberColumn("Waste", format="%.0f"),
+                    },
+                )
 
 
 with tab_buyer_review:
