@@ -747,15 +747,20 @@ if audit_df.empty:
 completed_pks = load_completed_audit_pks()
 audit_df["completed"] = audit_df["pk"].isin(completed_pks)
 
-max_qty_off = int(np.ceil(audit_df["abs_discrepancy_qty"].max())) if not audit_df.empty else 0
+max_qty_off_raw = pd.to_numeric(audit_df["abs_discrepancy_qty"], errors="coerce").max() if not audit_df.empty else 0
+max_qty_off = int(np.ceil(max_qty_off_raw)) if pd.notna(max_qty_off_raw) else 1
+max_qty_off = max(1, max_qty_off)
+slider_key = "verify_audit_min_qty_off"
+if slider_key in st.session_state:
+    st.session_state[slider_key] = min(max(1, int(st.session_state[slider_key])), max_qty_off)
 min_qty_off = st.slider(
     "Minimum quantity off",
     min_value=1,
-    max_value=max(1, max_qty_off),
+    max_value=max_qty_off,
     value=1,
     step=1,
     help="Raise this to focus on larger count misses, such as 5 or more off.",
-    key="verify_audit_min_qty_off",
+    key=slider_key,
 )
 
 with st.sidebar:
