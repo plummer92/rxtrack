@@ -104,15 +104,19 @@ def classify_iv_order_status(df):
     no_preparer = out["prepared_by"].str.lower().isin(["", "unassigned", "none", "nan"])
     no_approval = out["approved_by"].str.lower().isin(["", "unassigned", "none", "nan"])
     no_secondary = out["secondary_approved_by"].str.lower().isin(["", "unassigned", "none", "nan"])
+    has_any_approval = ~(no_approval & no_secondary)
 
     out["order_status"] = "Completed / Made"
     out.loc[no_completion & no_preparer & no_approval & no_secondary, "order_status"] = "Canceled / Not Made"
     out.loc[no_completion & ~(no_preparer & no_approval & no_secondary), "order_status"] = "Needs Completion Review"
-    batch_has_approval = ~(no_approval & no_secondary)
+    out.loc[
+        ~is_batch & no_completion & ~no_preparer & has_any_approval,
+        "order_status",
+    ] = "Made / Completion Time Missing"
     out.loc[is_batch & no_completion & ~no_preparer & no_approval & no_secondary, "order_status"] = (
         "Batch Ready / Staged"
     )
-    out.loc[is_batch & no_completion & batch_has_approval, "order_status"] = "Batch Started Prepare"
+    out.loc[is_batch & no_completion & has_any_approval, "order_status"] = "Batch Started Prepare"
     return out
 
 
@@ -234,6 +238,11 @@ if not canceled_review.empty or not batch_staged_review.empty:
         "Canceled / Not Made and Batch Ready / Staged rows are excluded from the default workload view. "
         "For batching, RxTrack uses the later Batch Started Prepare row for actual workload and TAT instead "
         "of the overnight ready/staging row."
+    )
+if "Made / Completion Time Missing" in set(filtered["order_status"].dropna().tolist()):
+    st.caption(
+        "Rows labeled Made / Completion Time Missing have a real preparer and approval user, so they count as made. "
+        "The MedKeeper export did not provide a completed timestamp for those rows."
     )
 
 st.divider()
