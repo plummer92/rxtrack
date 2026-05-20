@@ -825,6 +825,197 @@ else:
                     },
                 )
 
+st.subheader("User Shift Drilldown")
+user_candidates = set()
+if not workflow_filtered.empty:
+    for user_col in ["prepared_by", "approved_by"]:
+        if user_col in workflow_filtered.columns:
+            user_candidates.update(
+                workflow_filtered[user_col]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace({"": pd.NA, "None": pd.NA, "Unassigned": pd.NA})
+                .dropna()
+                .tolist()
+            )
+if not raw_filtered.empty:
+    for user_col in ["prepared_by", "approved_by", "secondary_approved_by"]:
+        if user_col in raw_filtered.columns:
+            user_candidates.update(
+                raw_filtered[user_col]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .replace({"": pd.NA, "None": pd.NA, "Unassigned": pd.NA})
+                .dropna()
+                .tolist()
+            )
+
+user_options = sorted(user_candidates)
+if not user_options:
+    st.info("No IV room users are available in the selected date range.")
+else:
+    drill_col1, drill_col2 = st.columns([2, 1])
+    selected_user = drill_col1.selectbox("IV room user", user_options, key="iv_user_shift_drilldown")
+    user_activity_scope = drill_col2.segmented_control(
+        "Activity",
+        ["All", "Prepared", "Approved"],
+        default="All",
+        key="iv_user_shift_activity_scope",
+    )
+
+    user_workflow = pd.DataFrame()
+    if not workflow_filtered.empty:
+        user_workflow = workflow_filtered.copy()
+        for col in ["prepared_by", "approved_by", "workflow_step_type", "workflow_step_name", "workflow_step_category"]:
+            if col not in user_workflow.columns:
+                user_workflow[col] = ""
+            user_workflow[col] = user_workflow[col].fillna("").astype(str).str.strip()
+        user_workflow["total_duration_minutes"] = pd.to_numeric(
+            user_workflow["total_duration_minutes"], errors="coerce"
+        ).fillna(0)
+        user_workflow["stage"] = user_workflow["workflow_step_type"].replace("", "Unknown")
+        user_workflow["activity"] = user_workflow["workflow_step_name"].replace("", "Unknown")
+        user_workflow["category"] = user_workflow["workflow_step_category"].replace("", "Unknown")
+        if user_activity_scope == "Prepared":
+            user_workflow = user_workflow[user_workflow["prepared_by"].eq(selected_user)].copy()
+        elif user_activity_scope == "Approved":
+            user_workflow = user_workflow[user_workflow["approved_by"].eq(selected_user)].copy()
+        else:
+            user_workflow = user_workflow[
+                user_workflow["prepared_by"].eq(selected_user)
+                | user_workflow["approved_by"].eq(selected_user)
+            ].copy()
+
+    user_orders = raw_filtered.copy()
+    if not user_orders.empty:
+        if user_activity_scope == "Prepared":
+            user_orders = user_orders[user_orders["prepared_by"].fillna("").astype(str).eq(selected_user)].copy()
+        elif user_activity_scope == "Approved":
+            user_orders = user_orders[
+                user_orders["approved_by"].fillna("").astype(str).eq(selected_user)
+                | user_orders["secondary_approved_by"].fillna("").astype(str).eq(selected_user)
+            ].copy()
+        else:
+            user_orders = user_orders[
+                user_orders["prepared_by"].fillna("").astype(str).eq(selected_user)
+                | user_orders["approved_by"].fillna("").astype(str).eq(selected_user)
+                | user_orders["secondary_approved_by"].fillna("").astype(str).eq(selected_user)
+            ].copy()
+
+    working_rows = user_workflow[user_workflow["category"].eq("Working")].copy() if not user_workflow.empty else pd.DataFrame()
+    waiting_rows = user_workflow[user_workflow["category"].eq("Waiting")].copy() if not user_workflow.empty else pd.DataFrame()
+    first_activity = user_workflow["start_dt"].dropna().min() if not user_workflow.empty else pd.NaT
+    last_activity = user_workflow["stop_dt"].dropna().max() if not user_workflow.empty else pd.NaT
+    if pd.isna(last_activity) and not user_workflow.empty:
+        last_activity = user_workflow["start_dt"].dropna().max()
+
+    u1, u2, u3, u4, u5 = st.columns(5)
+    u1.metric("Order Rows", f"{len(user_orders):,}")
+    u2.metric("Workflow Rows", f"{len(user_workflow):,}")
+    u3.metric("Working Min", f"{working_rows['total_duration_minutes'].sum():,.1f}" if not working_rows.empty else "0.0")
+    u4.metric("Waiting Min", f"{waiting_rows['total_duration_minutes'].sum():,.1f}" if not waiting_rows.empty else "0.0")
+    if pd.notna(first_activity) and pd.notna(last_activity):
+        span_minutes = max((last_activity - first_activity).total_seconds() / 60, 0)
+        u5.metric("Activity Span", f"{span_minutes / 60:.1f}h" if span_minutes >= 60 else f"{span_minutes:.0f}m")
+    else:
+        u5.metric("Activity Span", "-")
+
+    shift_tab1, shift_tab2, shift_tab3, shift_tab4 = st.tabs(
+        ["Timeline", "Stage Summary", "Order Rows", "Slowest Work"]
+    )
+    with shift_tab1:
+        if user_workflow.empty:
+            st.info("No workflow-detail rows found for this user and activity filter.")
+        else:
+            user_timeline_cols = [
+                "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                "stage", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
+                "source_file",
+            ]
+            st.dataframe(
+                user_workflow[[c for c in user_timeline_cols if c in user_workflow.columns]].sort_values(
+                    ["start_dt", "order_lot_number"], na_position="last"
+                ),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
+                    "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                    "total_duration_minutes": st.column_config.NumberColumn("Minutes", format="%.2f"),
+                },
+            )
+
+    with shift_tab2:
+        if user_workflow.empty:
+            st.info("No workflow-detail rows found for this user and activity filter.")
+        else:
+            user_stage_summary = (
+                user_workflow.groupby(["stage", "activity", "category"], as_index=False)
+                .agg(
+                    rows=("pk", "count"),
+                    orders=("order_lot_number", "nunique"),
+                    minutes=("total_duration_minutes", "sum"),
+                    median_minutes=("total_duration_minutes", "median"),
+                )
+                .sort_values(["minutes", "rows"], ascending=False)
+            )
+            st.dataframe(
+                user_stage_summary,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                    "orders": st.column_config.NumberColumn("Orders/Lots", format="%.0f"),
+                    "minutes": st.column_config.NumberColumn("Minutes", format="%.1f"),
+                    "median_minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
+                },
+            )
+
+    with shift_tab3:
+        if user_orders.empty:
+            st.info("No IV summary order rows found for this user and activity filter.")
+        else:
+            user_order_cols = [
+                "order_dt", "completed_on", "compound_type", "drug_name", "dose_number",
+                "order_lot_number", "num_preparations", "priority_name", "prepare_tat_minutes",
+                "prepared_by", "approved_by", "secondary_approved_by", "order_status",
+            ]
+            st.dataframe(
+                user_orders[[c for c in user_order_cols if c in user_orders.columns]].sort_values(
+                    ["order_dt", "drug_name"], ascending=[False, True], na_position="last"
+                ),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "order_dt": st.column_config.DatetimeColumn("Ordered", format="MM/DD/YY HH:mm"),
+                    "completed_on": st.column_config.DatetimeColumn("Completed", format="MM/DD/YY HH:mm"),
+                    "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                    "prepare_tat_minutes": st.column_config.NumberColumn("Summary TAT Min", format="%.1f"),
+                },
+            )
+
+    with shift_tab4:
+        if working_rows.empty:
+            st.info("No working rows found for this user and activity filter.")
+        else:
+            slow_user_work = working_rows.sort_values("total_duration_minutes", ascending=False).head(25)
+            slow_cols = [
+                "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                "stage", "activity", "total_duration_minutes", "prepared_by", "approved_by",
+            ]
+            st.dataframe(
+                slow_user_work[[c for c in slow_cols if c in slow_user_work.columns]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
+                    "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                    "total_duration_minutes": st.column_config.NumberColumn("Working Min", format="%.2f"),
+                },
+            )
+
 mix_col, batch_col = st.columns(2)
 
 with mix_col:
