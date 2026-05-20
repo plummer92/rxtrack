@@ -651,13 +651,15 @@ with mix_col:
     st.plotly_chart(fig_mix, width="stretch")
 
 with batch_col:
-    st.subheader("Batching Summary")
-    batch_only = filtered[filtered["compound_type"].str.upper().eq("BATCH")].copy()
-    if batch_only.empty:
-        st.info("No batch records are in the current filter window.")
+    st.subheader("Batch Making Summary")
+    batch_making = all_status_raw_filtered[
+        all_status_raw_filtered["order_status"].eq("Batch Started Prepare")
+    ].copy()
+    if batch_making.empty:
+        st.info("No batch making records are in the current filter window.")
     else:
         batch_summary = (
-            batch_only.groupby("drug_name", as_index=False)
+            batch_making.groupby("drug_name", as_index=False)
             .agg(
                 batch_orders=("pk", "count"),
                 batch_preparations=("num_preparations", "sum"),
@@ -675,6 +677,119 @@ with batch_col:
                 "median_tat": st.column_config.NumberColumn("Median TAT (min)", format="%.1f"),
             },
         )
+
+st.subheader("Batch Workflow Split")
+st.caption(
+    "Overnight setup is tracked separately from actual batch making. Setup rows show what was prepared for the queue; "
+    "making rows show who started preparing the batch and how long that compound took."
+)
+setup_tab, making_tab, slow_tab = st.tabs(["Overnight Setup", "Batch Making by Tech", "Slowest/Fastest Batches"])
+
+with setup_tab:
+    if batch_staged_review.empty:
+        st.info("No batch ready/staged rows are in the current filter window.")
+    else:
+        setup_summary = (
+            batch_staged_review.groupby("prepared_by", as_index=False)
+            .agg(
+                setup_rows=("pk", "count"),
+                setup_preparations=("num_preparations", "sum"),
+                unique_batches=("order_lot_number", "nunique"),
+                unique_drugs=("drug_name", "nunique"),
+                median_source_tat=("prepare_tat_minutes", "median"),
+            )
+            .sort_values(["setup_preparations", "setup_rows"], ascending=False)
+        )
+        st.dataframe(
+            setup_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "setup_rows": st.column_config.NumberColumn("Setup Rows", format="%.0f"),
+                "setup_preparations": st.column_config.NumberColumn("Setup Preps", format="%.0f"),
+                "unique_batches": st.column_config.NumberColumn("Batches", format="%.0f"),
+                "unique_drugs": st.column_config.NumberColumn("Meds", format="%.0f"),
+                "median_source_tat": st.column_config.NumberColumn("Median Source TAT", format="%.1f"),
+            },
+        )
+
+with making_tab:
+    batch_making = all_status_raw_filtered[
+        all_status_raw_filtered["order_status"].eq("Batch Started Prepare")
+    ].copy()
+    if batch_making.empty:
+        st.info("No batch started-prepare rows are in the current filter window.")
+    else:
+        maker_summary = (
+            batch_making.groupby("prepared_by", as_index=False)
+            .agg(
+                batches_made=("pk", "count"),
+                preparations=("num_preparations", "sum"),
+                unique_drugs=("drug_name", "nunique"),
+                median_make_tat=("prepare_tat_minutes", "median"),
+                fastest_make_tat=("prepare_tat_minutes", "min"),
+                slowest_make_tat=("prepare_tat_minutes", "max"),
+            )
+            .sort_values(["preparations", "batches_made"], ascending=False)
+        )
+        st.dataframe(
+            maker_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "batches_made": st.column_config.NumberColumn("Batches Made", format="%.0f"),
+                "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+                "unique_drugs": st.column_config.NumberColumn("Meds", format="%.0f"),
+                "median_make_tat": st.column_config.NumberColumn("Median Make TAT", format="%.1f"),
+                "fastest_make_tat": st.column_config.NumberColumn("Fastest", format="%.1f"),
+                "slowest_make_tat": st.column_config.NumberColumn("Slowest", format="%.1f"),
+            },
+        )
+
+with slow_tab:
+    batch_making = all_status_raw_filtered[
+        all_status_raw_filtered["order_status"].eq("Batch Started Prepare")
+    ].copy()
+    if batch_making.empty:
+        st.info("No batch making details are in the current filter window.")
+    else:
+        detail_cols = [
+            "order_dt",
+            "prepared_by",
+            "drug_name",
+            "order_lot_number",
+            "num_preparations",
+            "prepare_tat_minutes",
+            "approved_by",
+            "secondary_approved_by",
+        ]
+        slowest = batch_making.sort_values("prepare_tat_minutes", ascending=False).head(15)
+        fastest = batch_making.sort_values("prepare_tat_minutes", ascending=True).head(15)
+        slow_col, fast_col = st.columns(2)
+        with slow_col:
+            st.markdown("**Slowest Made Batches**")
+            st.dataframe(
+                slowest[[c for c in detail_cols if c in slowest.columns]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "order_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
+                    "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                    "prepare_tat_minutes": st.column_config.NumberColumn("Make TAT Min", format="%.1f"),
+                },
+            )
+        with fast_col:
+            st.markdown("**Fastest Made Batches**")
+            st.dataframe(
+                fastest[[c for c in detail_cols if c in fastest.columns]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "order_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
+                    "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                    "prepare_tat_minutes": st.column_config.NumberColumn("Make TAT Min", format="%.1f"),
+                },
+            )
 
 st.subheader("IV Room Summary Table")
 summary = (
