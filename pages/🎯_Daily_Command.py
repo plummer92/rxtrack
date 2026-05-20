@@ -95,6 +95,179 @@ def _should_fire_today(recurrence: str, days_of_week: str) -> bool:
         return today_name in selected
     return False
 
+
+@st.cache_data(ttl=300)
+def load_daily_synopsis(report_date):
+    day = str(report_date)
+
+    def read_sql(sql, params=None):
+        with engine.connect() as conn:
+            return pd.read_sql(text(sql), conn, params=params or {"d": day})
+
+    result = {"warnings": []}
+    try:
+        result["iv"] = read_sql("""
+            SELECT
+                COUNT(*) AS orders,
+                COALESCE(SUM(num_preparations), 0) AS preparations,
+                COUNT(*) FILTER (WHERE compound_type ILIKE 'Patient') AS patient_orders,
+                COUNT(*) FILTER (WHERE compound_type ILIKE 'Batch') AS batch_orders,
+                COUNT(*) FILTER (WHERE priority_name ILIKE 'STAT') AS stat_orders,
+                COUNT(DISTINCT NULLIF(prepared_by, 'Unassigned')) AS preparers
+            FROM iv_room_workload
+            WHERE order_date = :d
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"IV workload: {exc}")
+        result["iv"] = pd.DataFrame()
+
+    try:
+        result["iv_workflow"] = read_sql("""
+            SELECT
+                workflow_step_type,
+                workflow_step_name,
+                workflow_step_category,
+                COUNT(*) AS rows,
+                COALESCE(SUM(total_duration_minutes), 0) AS minutes,
+                COUNT(DISTINCT order_lot_number) AS orders
+            FROM iv_room_workflow_detail
+            WHERE start_date = :d
+            GROUP BY workflow_step_type, workflow_step_name, workflow_step_category
+            ORDER BY minutes DESC
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"IV workflow detail: {exc}")
+        result["iv_workflow"] = pd.DataFrame()
+
+    try:
+        result["iv_preparers"] = read_sql("""
+            SELECT
+                prepared_by,
+                COUNT(*) AS rows,
+                COALESCE(SUM(num_preparations), 0) AS preparations
+            FROM iv_room_workload
+            WHERE order_date = :d
+              AND COALESCE(prepared_by, '') NOT IN ('', 'Unassigned', 'None')
+            GROUP BY prepared_by
+            ORDER BY preparations DESC, rows DESC
+            LIMIT 10
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"IV preparers: {exc}")
+        result["iv_preparers"] = pd.DataFrame()
+
+    try:
+        result["pyxis"] = read_sql("""
+            SELECT
+                COUNT(*) AS transactions,
+                COUNT(*) FILTER (WHERE event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
+                                  AND event_type NOT ILIKE ANY (ARRAY['%cancel%', '%unload%', '%empty%'])) AS refill_rows,
+                COALESCE(SUM(qty) FILTER (WHERE event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
+                                           AND event_type NOT ILIKE ANY (ARRAY['%cancel%', '%unload%', '%empty%'])), 0) AS refill_qty,
+                COUNT(*) FILTER (WHERE event_type ILIKE '%unload%' OR event_type ILIKE '%empty%') AS unload_rows,
+                COALESCE(SUM(ABS(qty)) FILTER (WHERE event_type ILIKE '%unload%' OR event_type ILIKE '%empty%'), 0) AS unload_qty,
+                COUNT(*) FILTER (WHERE event_type ILIKE '%return%') AS return_rows,
+                COALESCE(SUM(ABS(qty)) FILTER (WHERE event_type ILIKE '%return%'), 0) AS return_qty,
+                COUNT(*) FILTER (WHERE event_type ILIKE '%outdate%') AS outdate_rows,
+                COUNT(DISTINCT user_name) AS active_users,
+                COUNT(DISTINCT device) AS active_devices
+            FROM events
+            WHERE dt::date = :d
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"Pyxis events: {exc}")
+        result["pyxis"] = pd.DataFrame()
+
+    try:
+        result["refill_users"] = read_sql("""
+            SELECT
+                user_name,
+                COUNT(*) AS refill_rows,
+                COALESCE(SUM(qty), 0) AS refill_qty,
+                COUNT(DISTINCT device) AS devices
+            FROM events
+            WHERE dt::date = :d
+              AND event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
+              AND event_type NOT ILIKE ANY (ARRAY['%cancel%', '%unload%', '%empty%'])
+              AND COALESCE(UPPER(med_id), '') != 'PATCAS'
+            GROUP BY user_name
+            ORDER BY refill_rows DESC, refill_qty DESC
+            LIMIT 10
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"Refill users: {exc}")
+        result["refill_users"] = pd.DataFrame()
+
+    try:
+        result["carousel"] = read_sql("""
+            SELECT
+                COUNT(*) AS pull_lines,
+                COALESCE(SUM(qty), 0) AS pull_qty,
+                COUNT(DISTINCT destination) AS destinations,
+                COUNT(DISTINCT med_id) AS meds,
+                COUNT(DISTINCT user_name) AS pull_users,
+                MIN(dt) AS first_pull,
+                MAX(dt) AS last_pull,
+                EXTRACT(EPOCH FROM (MAX(dt) - MIN(dt))) / 60.0 AS pull_span_minutes
+            FROM pharmacy_orders
+            WHERE dt::date = :d
+              AND priority ILIKE '%pyxis%pull%'
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"Carousel/Pyxis pulls: {exc}")
+        result["carousel"] = pd.DataFrame()
+
+    try:
+        result["pull_users"] = read_sql("""
+            SELECT
+                user_name,
+                COUNT(*) AS pull_lines,
+                COALESCE(SUM(qty), 0) AS pull_qty,
+                COUNT(DISTINCT destination) AS destinations,
+                MIN(dt) AS first_pull,
+                MAX(dt) AS last_pull
+            FROM pharmacy_orders
+            WHERE dt::date = :d
+              AND priority ILIKE '%pyxis%pull%'
+            GROUP BY user_name
+            ORDER BY pull_lines DESC, pull_qty DESC
+            LIMIT 10
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"Pull users: {exc}")
+        result["pull_users"] = pd.DataFrame()
+
+    return result
+
+
+def _first_value(df, column, default=0):
+    if df.empty or column not in df.columns:
+        return default
+    value = df.iloc[0].get(column)
+    if pd.isna(value):
+        return default
+    return value
+
+
+def _fmt_num(value, decimals=0):
+    try:
+        value = float(value)
+    except Exception:
+        return "0"
+    return f"{value:,.{decimals}f}"
+
+
+def _fmt_minutes(value):
+    try:
+        value = float(value)
+    except Exception:
+        return "-"
+    if pd.isna(value):
+        return "-"
+    if value >= 60:
+        return f"{value / 60:.1f}h"
+    return f"{value:.0f}m"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # AUTO-SEED RECURRING TASKS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,6 +314,153 @@ if not tasks_all.empty:
     tasks_all["due_date"] = pd.to_datetime(tasks_all["due_date"], errors="coerce").dt.date
 if not followups_all.empty:
     followups_all["follow_up_date"] = pd.to_datetime(followups_all["follow_up_date"], errors="coerce").dt.date
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SECTION 0 — YESTERDAY'S OPERATIONS SYNOPSIS
+# ─────────────────────────────────────────────────────────────────────────────
+
+default_synopsis_date = today - timedelta(days=1)
+st.subheader("Yesterday's Operations Synopsis")
+synopsis_date = st.date_input(
+    "Synopsis date",
+    value=default_synopsis_date,
+    max_value=today,
+    help="Defaults to yesterday so Daily Command opens with what happened on the prior operating day.",
+)
+synopsis = load_daily_synopsis(synopsis_date)
+
+iv = synopsis.get("iv", pd.DataFrame())
+pyxis = synopsis.get("pyxis", pd.DataFrame())
+carousel = synopsis.get("carousel", pd.DataFrame())
+workflow = synopsis.get("iv_workflow", pd.DataFrame())
+
+iv_orders = _first_value(iv, "orders")
+iv_preps = _first_value(iv, "preparations")
+patient_orders = _first_value(iv, "patient_orders")
+batch_orders = _first_value(iv, "batch_orders")
+stat_orders = _first_value(iv, "stat_orders")
+workflow_working_min = 0
+workflow_waiting_min = 0
+if not workflow.empty:
+    wf = workflow.copy()
+    wf["workflow_step_category"] = wf["workflow_step_category"].fillna("").astype(str).str.strip()
+    wf["minutes"] = pd.to_numeric(wf["minutes"], errors="coerce").fillna(0)
+    workflow_working_min = wf.loc[wf["workflow_step_category"].eq("Working"), "minutes"].sum()
+    workflow_waiting_min = wf.loc[wf["workflow_step_category"].eq("Waiting"), "minutes"].sum()
+
+refill_rows = _first_value(pyxis, "refill_rows")
+refill_qty = _first_value(pyxis, "refill_qty")
+unload_rows = _first_value(pyxis, "unload_rows")
+return_rows = _first_value(pyxis, "return_rows")
+return_qty = _first_value(pyxis, "return_qty")
+outdate_rows = _first_value(pyxis, "outdate_rows")
+pull_lines = _first_value(carousel, "pull_lines")
+pull_qty = _first_value(carousel, "pull_qty")
+pull_destinations = _first_value(carousel, "destinations")
+pull_span = _first_value(carousel, "pull_span_minutes", None)
+
+s1, s2, s3, s4 = st.columns(4)
+s1.metric("IV Room Orders", f"{int(iv_orders):,}", delta=f"{int(iv_preps):,} preps")
+s2.metric("IV Timing", _fmt_minutes(workflow_working_min), delta=f"{_fmt_minutes(workflow_waiting_min)} waiting")
+s3.metric("Pyxis Refills", f"{int(refill_rows):,}", delta=f"{_fmt_num(refill_qty)} units")
+s4.metric("Carousel Pulls", f"{int(pull_lines):,}", delta=f"{_fmt_num(pull_qty)} units")
+
+s5, s6, s7, s8 = st.columns(4)
+s5.metric("Patient / Batch", f"{int(patient_orders):,} / {int(batch_orders):,}")
+s6.metric("STAT IV Orders", f"{int(stat_orders):,}")
+s7.metric("Returns / Unloads", f"{int(return_rows):,} / {int(unload_rows):,}", delta=f"{_fmt_num(return_qty)} return units")
+s8.metric("Pull Footprint", f"{int(pull_destinations):,} destinations", delta=_fmt_minutes(pull_span))
+
+synopsis_lines = [
+    f"IV room made {int(iv_orders):,} order rows covering {int(iv_preps):,} preparations "
+    f"({int(patient_orders):,} patient, {int(batch_orders):,} batch, {int(stat_orders):,} STAT).",
+    f"Workflow detail captured {_fmt_minutes(workflow_working_min)} of working time and "
+    f"{_fmt_minutes(workflow_waiting_min)} of waiting time.",
+    f"Pyxis had {int(refill_rows):,} refill/load rows for {_fmt_num(refill_qty)} units, "
+    f"{int(unload_rows):,} unload rows, {int(return_rows):,} return rows, and {int(outdate_rows):,} outdate rows.",
+    f"Carousel/Pyxis pull demand was {int(pull_lines):,} pull lines for {_fmt_num(pull_qty)} units across "
+    f"{int(pull_destinations):,} destinations; pull activity spanned {_fmt_minutes(pull_span)}.",
+]
+st.markdown("\n".join(f"- {line}" for line in synopsis_lines))
+
+tab_iv_syn, tab_pyxis_syn, tab_carousel_syn = st.tabs(["IV Room Detail", "Pyxis Detail", "Carousel Pull Detail"])
+with tab_iv_syn:
+    iv_preparers = synopsis.get("iv_preparers", pd.DataFrame())
+    if iv_preparers.empty and workflow.empty:
+        st.info("No IV room synopsis rows found for this day.")
+    else:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**Top IV Preparers**")
+            if iv_preparers.empty:
+                st.info("No IV workload preparer rows found.")
+            else:
+                st.dataframe(
+                    iv_preparers,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                        "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+                    },
+                )
+        with col_b:
+            st.markdown("**Top Workflow Timing Stages**")
+            if workflow.empty:
+                st.info("Upload IV Room Workflow Detail to populate timing stages.")
+            else:
+                stage_view = workflow.copy().head(12)
+                st.dataframe(
+                    stage_view,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                        "minutes": st.column_config.NumberColumn("Minutes", format="%.1f"),
+                        "orders": st.column_config.NumberColumn("Orders", format="%.0f"),
+                    },
+                )
+
+with tab_pyxis_syn:
+    refill_users = synopsis.get("refill_users", pd.DataFrame())
+    if refill_users.empty:
+        st.info("No Pyxis refill/load rows found for this day.")
+    else:
+        st.dataframe(
+            refill_users,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "refill_rows": st.column_config.NumberColumn("Refill Rows", format="%.0f"),
+                "refill_qty": st.column_config.NumberColumn("Refill Qty", format="%.0f"),
+                "devices": st.column_config.NumberColumn("Devices", format="%.0f"),
+            },
+        )
+
+with tab_carousel_syn:
+    pull_users = synopsis.get("pull_users", pd.DataFrame())
+    if pull_users.empty:
+        st.info("No carousel/Pyxis pull rows found for this day.")
+    else:
+        st.dataframe(
+            pull_users,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "pull_lines": st.column_config.NumberColumn("Pull Lines", format="%.0f"),
+                "pull_qty": st.column_config.NumberColumn("Pull Qty", format="%.0f"),
+                "destinations": st.column_config.NumberColumn("Destinations", format="%.0f"),
+                "first_pull": st.column_config.DatetimeColumn("First Pull", format="MM/DD/YY HH:mm"),
+                "last_pull": st.column_config.DatetimeColumn("Last Pull", format="MM/DD/YY HH:mm"),
+            },
+        )
+
+if synopsis.get("warnings"):
+    with st.expander("Synopsis data warnings", expanded=False):
+        for warning in synopsis["warnings"]:
+            st.warning(warning)
+
+st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 1 — TODAY'S TASKS
