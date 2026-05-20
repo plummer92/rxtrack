@@ -96,6 +96,10 @@ def classify_iv_order_status(df):
         out[col] = out[col].fillna("").astype(str).str.strip()
 
     out["completed_on"] = pd.to_datetime(out["completed_on"], errors="coerce")
+    if "compound_type" not in out.columns:
+        out["compound_type"] = ""
+    compound_type = out["compound_type"].fillna("").astype(str).str.upper()
+    is_batch = compound_type.eq("BATCH")
     no_completion = out["completed_on"].isna()
     no_preparer = out["prepared_by"].str.lower().isin(["", "unassigned", "none", "nan"])
     no_approval = out["approved_by"].str.lower().isin(["", "unassigned", "none", "nan"])
@@ -104,6 +108,11 @@ def classify_iv_order_status(df):
     out["order_status"] = "Completed / Made"
     out.loc[no_completion & no_preparer & no_approval & no_secondary, "order_status"] = "Canceled / Not Made"
     out.loc[no_completion & ~(no_preparer & no_approval & no_secondary), "order_status"] = "Needs Completion Review"
+    batch_has_approval = ~(no_approval & no_secondary)
+    out.loc[is_batch & no_completion & ~no_preparer & no_approval & no_secondary, "order_status"] = (
+        "Batch Ready / Staged"
+    )
+    out.loc[is_batch & no_completion & batch_has_approval, "order_status"] = "Batch Started Prepare"
     return out
 
 
@@ -158,14 +167,18 @@ selected_compounds = st.multiselect("Compound Type", compound_options, default=c
 
 filtered = work.copy()
 status_options = sorted(filtered["order_status"].dropna().unique().tolist())
-default_statuses = [status for status in status_options if status != "Canceled / Not Made"]
+default_excluded_statuses = {"Canceled / Not Made", "Batch Ready / Staged"}
+default_statuses = [status for status in status_options if status not in default_excluded_statuses]
 if not default_statuses:
     default_statuses = status_options
 selected_statuses = st.multiselect(
     "Order Status",
     status_options,
     default=default_statuses,
-    help="Canceled / Not Made rows appear to have been sent to MedKeeper but never compounded.",
+    help=(
+        "Batch Ready / Staged rows are overnight setup events. Batch Started Prepare is the row used for actual "
+        "batch workload and TAT."
+    ),
 )
 if selected_facilities:
     filtered = filtered[filtered["facility_name"].isin(selected_facilities)]
@@ -199,6 +212,7 @@ if selected_compounds:
     all_status_raw_filtered = all_status_raw_filtered[all_status_raw_filtered["compound_type"].isin(selected_compounds)]
 
 canceled_review = all_status_raw_filtered[all_status_raw_filtered["order_status"].eq("Canceled / Not Made")].copy()
+batch_staged_review = all_status_raw_filtered[all_status_raw_filtered["order_status"].eq("Batch Ready / Staged")].copy()
 review_completion = all_status_raw_filtered[all_status_raw_filtered["order_status"].eq("Needs Completion Review")].copy()
 
 stat_mask = filtered["priority_name"].str.upper().eq("STAT")
@@ -213,13 +227,13 @@ m5.metric(
     "Median Prep TAT",
     f"{tat_ready['prepare_tat_minutes'].median():.1f} min" if not tat_ready.empty else "N/A",
 )
-m6.metric("Canceled / Not Made", f"{len(canceled_review):,}")
+m6.metric("Excluded Setup/Cancel", f"{len(canceled_review) + len(batch_staged_review):,}")
 
-if not canceled_review.empty:
+if not canceled_review.empty or not batch_staged_review.empty:
     st.info(
-        "Canceled / Not Made rows look like orders that reached MedKeeper but were never compounded: "
-        "no completion time and no preparer or approval user. They are available for review below and "
-        "are excluded from the default workload view."
+        "Canceled / Not Made and Batch Ready / Staged rows are excluded from the default workload view. "
+        "For batching, RxTrack uses the later Batch Started Prepare row for actual workload and TAT instead "
+        "of the overnight ready/staging row."
     )
 
 st.divider()
@@ -501,6 +515,32 @@ if not canceled_review.empty:
             "Export canceled / not made orders",
             data=to_csv_bytes(canceled_review[[c for c in canceled_cols if c in canceled_review.columns]]),
             file_name="iv_room_canceled_not_made_orders.csv",
+            mime="text/csv",
+        )
+
+if not batch_staged_review.empty:
+    with st.expander(f"Batch Ready / Staged Review ({len(batch_staged_review):,} rows)", expanded=False):
+        st.caption(
+            "These are batch setup handoffs, usually from the overnight tech. They are useful for workflow context, "
+            "but excluded from default workload and TAT because the compound starts at Batch Started Prepare."
+        )
+        st.dataframe(
+            batch_staged_review[[c for c in canceled_cols if c in batch_staged_review.columns]].sort_values(
+                ["order_dt", "drug_name"], ascending=[False, True], na_position="last"
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "order_dt": st.column_config.DatetimeColumn("Ready/Staged", format="MM/DD/YY HH:mm"),
+                "completed_on": st.column_config.DatetimeColumn("Completed", format="MM/DD/YY HH:mm"),
+                "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                "prepare_tat_minutes": st.column_config.NumberColumn("Source TAT Min", format="%.1f"),
+            },
+        )
+        st.download_button(
+            "Export batch ready / staged rows",
+            data=to_csv_bytes(batch_staged_review[[c for c in canceled_cols if c in batch_staged_review.columns]]),
+            file_name="iv_room_batch_ready_staged_rows.csv",
             mime="text/csv",
         )
 
