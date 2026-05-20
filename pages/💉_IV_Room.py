@@ -895,6 +895,63 @@ with making_tab:
                 "slowest_make_tat": st.column_config.NumberColumn("Slowest", format="%.1f"),
             },
         )
+        maker_options = maker_summary["prepared_by"].dropna().astype(str).tolist()
+        selected_maker = st.selectbox(
+            "Drill into batch maker",
+            maker_options,
+            key="iv_batch_maker_drilldown",
+        )
+        maker_rows = batch_making[batch_making["prepared_by"].astype(str).eq(str(selected_maker))].copy()
+        maker_detail_cols = [
+            "order_dt",
+            "drug_name",
+            "order_lot_number",
+            "num_preparations",
+            "prepare_tat_minutes",
+            "approved_by",
+            "secondary_approved_by",
+            "order_status",
+        ]
+        st.dataframe(
+            maker_rows[[c for c in maker_detail_cols if c in maker_rows.columns]].sort_values(
+                ["order_dt", "drug_name"], ascending=[False, True], na_position="last"
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "order_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
+                "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                "prepare_tat_minutes": st.column_config.NumberColumn("Make TAT Min", format="%.1f"),
+            },
+        )
+        if not workflow_filtered.empty:
+            maker_workflow = workflow_filtered[
+                workflow_filtered["prepared_by"].fillna("").astype(str).eq(str(selected_maker))
+                & workflow_filtered["workflow_step_category"].fillna("").astype(str).str.strip().eq("Working")
+            ].copy()
+            if not maker_workflow.empty:
+                maker_workflow["total_duration_minutes"] = pd.to_numeric(
+                    maker_workflow["total_duration_minutes"], errors="coerce"
+                ).fillna(0)
+                maker_workflow["stage"] = maker_workflow["workflow_step_type"].fillna("").astype(str).str.strip()
+                maker_workflow["activity"] = maker_workflow["workflow_step_name"].fillna("").astype(str).str.strip()
+                st.caption("Workflow-detail rows behind this maker's working time.")
+                workflow_cols = [
+                    "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                    "stage", "activity", "total_duration_minutes", "approved_by", "source_file",
+                ]
+                st.dataframe(
+                    maker_workflow[[c for c in workflow_cols if c in maker_workflow.columns]].sort_values(
+                        ["start_dt", "order_lot_number"], na_position="last"
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
+                        "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                        "total_duration_minutes": st.column_config.NumberColumn("Working Min", format="%.2f"),
+                    },
+                )
 
 with slow_tab:
     batch_making = all_status_raw_filtered[
@@ -940,6 +997,129 @@ with slow_tab:
                     "prepare_tat_minutes": st.column_config.NumberColumn("Make TAT Min", format="%.1f"),
                 },
             )
+        slow_options = (
+            slowest.assign(
+                drill_label=lambda d: d["order_lot_number"].astype(str)
+                + " - "
+                + d["drug_name"].astype(str).str.slice(0, 70)
+                + " ("
+                + d["prepared_by"].astype(str)
+                + ")"
+            )["drill_label"]
+            .tolist()
+        )
+        selected_slow_label = st.selectbox(
+            "Drill into a slow batch",
+            slow_options,
+            key="iv_slow_batch_drilldown",
+        )
+        selected_slow = slowest.assign(
+            drill_label=lambda d: d["order_lot_number"].astype(str)
+            + " - "
+            + d["drug_name"].astype(str).str.slice(0, 70)
+            + " ("
+            + d["prepared_by"].astype(str)
+            + ")"
+        )
+        selected_slow = selected_slow[selected_slow["drill_label"].eq(selected_slow_label)].head(1)
+        if not selected_slow.empty:
+            selected_row = selected_slow.iloc[0]
+            selected_lot = str(selected_row.get("order_lot_number") or "")
+            selected_dose = str(selected_row.get("dose_number") or "")
+            selected_maker = str(selected_row.get("prepared_by") or "")
+            selected_drug = str(selected_row.get("drug_name") or "")
+            st.markdown("**Selected Batch Detail**")
+            st.write(
+                {
+                    "Order/Lot": selected_lot,
+                    "Dose": selected_dose,
+                    "Prepared By": selected_maker,
+                    "Drug": selected_drug,
+                    "Make TAT Min": selected_row.get("prepare_tat_minutes"),
+                }
+            )
+            if workflow_filtered.empty:
+                st.info("Upload IV Room Workflow Detail files to see the timeline and competing work for this batch.")
+            else:
+                wf_batch = workflow_filtered[
+                    workflow_filtered["order_lot_number"].fillna("").astype(str).eq(selected_lot)
+                ].copy()
+                if selected_dose:
+                    wf_batch = wf_batch[
+                        wf_batch["dose_number"].fillna("").astype(str).eq(selected_dose)
+                        | wf_batch["dose_number"].isna()
+                    ].copy()
+                if wf_batch.empty:
+                    st.warning("No workflow-detail rows matched this order/lot in the selected date range.")
+                else:
+                    wf_batch["stage"] = wf_batch["workflow_step_type"].fillna("").astype(str).str.strip()
+                    wf_batch["activity"] = wf_batch["workflow_step_name"].fillna("").astype(str).str.strip()
+                    wf_batch["category"] = wf_batch["workflow_step_category"].fillna("").astype(str).str.strip()
+                    wf_batch["total_duration_minutes"] = pd.to_numeric(
+                        wf_batch["total_duration_minutes"], errors="coerce"
+                    ).fillna(0)
+                    batch_timeline_cols = [
+                        "start_dt", "stop_dt", "stage", "activity", "category",
+                        "total_duration_minutes", "prepared_by", "approved_by", "source_file",
+                    ]
+                    st.markdown("**Batch Workflow Timeline**")
+                    st.dataframe(
+                        wf_batch[[c for c in batch_timeline_cols if c in wf_batch.columns]].sort_values(
+                            ["start_dt", "stage", "activity"], na_position="last"
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
+                            "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                            "total_duration_minutes": st.column_config.NumberColumn("Minutes", format="%.2f"),
+                        },
+                    )
+                    batch_start = wf_batch["start_dt"].dropna().min()
+                    batch_stop = wf_batch["stop_dt"].dropna().max()
+                    if pd.isna(batch_stop):
+                        batch_stop = wf_batch["start_dt"].dropna().max()
+                    if pd.notna(batch_start) and pd.notna(batch_stop):
+                        other_work = workflow_filtered[
+                            workflow_filtered["prepared_by"].fillna("").astype(str).eq(selected_maker)
+                            & workflow_filtered["workflow_step_category"].fillna("").astype(str).str.strip().eq("Working")
+                            & ~workflow_filtered["order_lot_number"].fillna("").astype(str).eq(selected_lot)
+                        ].copy()
+                        if not other_work.empty:
+                            other_work["stop_for_overlap"] = other_work["stop_dt"].fillna(other_work["start_dt"])
+                            overlap = other_work[
+                                other_work["start_dt"].notna()
+                                & other_work["stop_for_overlap"].notna()
+                                & (other_work["start_dt"] <= batch_stop)
+                                & (other_work["stop_for_overlap"] >= batch_start)
+                            ].copy()
+                        else:
+                            overlap = pd.DataFrame()
+                        st.markdown("**Other Work by Same Tech During This Batch Window**")
+                        if overlap.empty:
+                            st.success("No other working rows for this tech overlap the selected batch window.")
+                        else:
+                            overlap["stage"] = overlap["workflow_step_type"].fillna("").astype(str).str.strip()
+                            overlap["activity"] = overlap["workflow_step_name"].fillna("").astype(str).str.strip()
+                            overlap["total_duration_minutes"] = pd.to_numeric(
+                                overlap["total_duration_minutes"], errors="coerce"
+                            ).fillna(0)
+                            overlap_cols = [
+                                "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                                "stage", "activity", "total_duration_minutes", "approved_by",
+                            ]
+                            st.dataframe(
+                                overlap[[c for c in overlap_cols if c in overlap.columns]].sort_values(
+                                    ["start_dt", "order_lot_number"], na_position="last"
+                                ),
+                                width="stretch",
+                                hide_index=True,
+                                column_config={
+                                    "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
+                                    "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                                    "total_duration_minutes": st.column_config.NumberColumn("Working Min", format="%.2f"),
+                                },
+                            )
 
 st.subheader("IV Room Summary Table")
 summary = (
