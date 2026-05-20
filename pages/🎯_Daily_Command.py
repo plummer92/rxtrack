@@ -140,7 +140,34 @@ def load_daily_synopsis(report_date):
         result["iv_workflow"] = pd.DataFrame()
 
     try:
-        result["iv_preparers"] = read_sql("""
+        result["iv_makers"] = read_sql("""
+            SELECT
+                prepared_by,
+                COUNT(*) AS working_rows,
+                COUNT(DISTINCT order_lot_number) AS orders,
+                COALESCE(SUM(total_duration_minutes), 0) AS working_minutes,
+                PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY total_duration_minutes) AS median_minutes
+            FROM iv_room_workflow_detail
+            WHERE start_date = :d
+              AND workflow_step_category = 'Working'
+              AND COALESCE(prepared_by, '') NOT IN ('', 'Unassigned', 'None')
+              AND workflow_step_name ILIKE ANY (ARRAY[
+                  '%Prepare%',
+                  '%Scan Product%',
+                  '%Gather Component%',
+                  '%Relabel%',
+                  '%Image%'
+              ])
+            GROUP BY prepared_by
+            ORDER BY working_minutes DESC, working_rows DESC
+            LIMIT 10
+        """)
+    except Exception as exc:
+        result["warnings"].append(f"IV makers: {exc}")
+        result["iv_makers"] = pd.DataFrame()
+
+    try:
+        result["iv_summary_preparers"] = read_sql("""
             SELECT
                 prepared_by,
                 COUNT(*) AS rows,
@@ -153,8 +180,8 @@ def load_daily_synopsis(report_date):
             LIMIT 10
         """)
     except Exception as exc:
-        result["warnings"].append(f"IV preparers: {exc}")
-        result["iv_preparers"] = pd.DataFrame()
+        result["warnings"].append(f"IV summary preparers: {exc}")
+        result["iv_summary_preparers"] = pd.DataFrame()
 
     try:
         result["pyxis"] = read_sql("""
@@ -385,25 +412,45 @@ st.markdown("\n".join(f"- {line}" for line in synopsis_lines))
 
 tab_iv_syn, tab_pyxis_syn, tab_carousel_syn = st.tabs(["IV Room Detail", "Pyxis Detail", "Carousel Pull Detail"])
 with tab_iv_syn:
-    iv_preparers = synopsis.get("iv_preparers", pd.DataFrame())
-    if iv_preparers.empty and workflow.empty:
+    iv_makers = synopsis.get("iv_makers", pd.DataFrame())
+    iv_summary_preparers = synopsis.get("iv_summary_preparers", pd.DataFrame())
+    if iv_makers.empty and workflow.empty and iv_summary_preparers.empty:
         st.info("No IV room synopsis rows found for this day.")
     else:
         col_a, col_b = st.columns(2)
         with col_a:
-            st.markdown("**Top IV Preparers**")
-            if iv_preparers.empty:
-                st.info("No IV workload preparer rows found.")
+            st.markdown("**Top IV Makers by Working Time**")
+            if iv_makers.empty:
+                st.info("Upload IV Room Workflow Detail to show true maker working time.")
             else:
                 st.dataframe(
-                    iv_preparers,
+                    iv_makers,
                     hide_index=True,
                     width="stretch",
                     column_config={
-                        "rows": st.column_config.NumberColumn("Rows", format="%.0f"),
-                        "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+                        "working_rows": st.column_config.NumberColumn("Working Rows", format="%.0f"),
+                        "orders": st.column_config.NumberColumn("Orders/Lots", format="%.0f"),
+                        "working_minutes": st.column_config.NumberColumn("Working Min", format="%.1f"),
+                        "median_minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
                     },
                 )
+            with st.expander("Summary export preparers, volume-only", expanded=False):
+                st.caption(
+                    "This is the older summary-export view. It can include overnight setup/staging, so use it as "
+                    "volume context rather than true making time."
+                )
+                if iv_summary_preparers.empty:
+                    st.info("No summary-export preparer rows found.")
+                else:
+                    st.dataframe(
+                        iv_summary_preparers,
+                        hide_index=True,
+                        width="stretch",
+                        column_config={
+                            "rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                            "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+                        },
+                    )
         with col_b:
             st.markdown("**Top Workflow Timing Stages**")
             if workflow.empty:
