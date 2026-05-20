@@ -120,6 +120,54 @@ def classify_iv_order_status(df):
     return out
 
 
+def add_batch_make_window(batch_df, workflow_df):
+    if batch_df.empty:
+        return batch_df.copy()
+
+    out = batch_df.copy()
+    out["batch_make_start_dt"] = pd.to_datetime(out.get("order_dt"), errors="coerce")
+    out["batch_make_stop_dt"] = pd.NaT
+    if workflow_df.empty:
+        return out
+
+    wf = workflow_df.copy()
+    for col in ["order_lot_number", "dose_number", "workflow_step_name", "workflow_step_category"]:
+        if col not in wf.columns:
+            wf[col] = ""
+        wf[col] = wf[col].fillna("").astype(str).str.strip()
+    wf["start_dt"] = pd.to_datetime(wf.get("start_dt"), errors="coerce")
+    wf["stop_dt"] = pd.to_datetime(wf.get("stop_dt"), errors="coerce")
+    wf["total_duration_minutes"] = pd.to_numeric(wf.get("total_duration_minutes"), errors="coerce")
+
+    prepare_work = wf[
+        wf["workflow_step_category"].eq("Working")
+        & wf["workflow_step_name"].str.contains("prepare", case=False, na=False)
+        & wf["start_dt"].notna()
+    ].copy()
+    if prepare_work.empty:
+        return out
+
+    make_windows = (
+        prepare_work.groupby(["order_lot_number", "dose_number"], as_index=False)
+        .agg(
+            batch_make_start_dt=("start_dt", "min"),
+            batch_make_stop_dt=("stop_dt", "max"),
+            workflow_make_minutes=("total_duration_minutes", "sum"),
+        )
+    )
+    out["order_lot_number"] = out["order_lot_number"].fillna("").astype(str).str.strip()
+    out["dose_number"] = out["dose_number"].fillna("").astype(str).str.strip()
+    out = out.merge(
+        make_windows,
+        on=["order_lot_number", "dose_number"],
+        how="left",
+        suffixes=("", "_workflow"),
+    )
+    out["batch_make_start_dt"] = out["batch_make_start_dt_workflow"].fillna(out["batch_make_start_dt"])
+    out["batch_make_stop_dt"] = out["batch_make_stop_dt_workflow"].fillna(out["batch_make_stop_dt"])
+    return out.drop(columns=["batch_make_start_dt_workflow", "batch_make_stop_dt_workflow"], errors="ignore")
+
+
 st.set_page_config(page_title="IV Room", page_icon="💉", layout="wide")
 App.apply_global_styles()
 
@@ -805,6 +853,7 @@ with batch_col:
     batch_making = all_status_raw_filtered[
         all_status_raw_filtered["order_status"].eq("Batch Started Prepare")
     ].copy()
+    batch_making = add_batch_make_window(batch_making, workflow_filtered)
     if batch_making.empty:
         st.info("No batch making records are in the current filter window.")
     else:
@@ -867,6 +916,7 @@ with making_tab:
     batch_making = all_status_raw_filtered[
         all_status_raw_filtered["order_status"].eq("Batch Started Prepare")
     ].copy()
+    batch_making = add_batch_make_window(batch_making, workflow_filtered)
     if batch_making.empty:
         st.info("No batch started-prepare rows are in the current filter window.")
     else:
@@ -903,25 +953,29 @@ with making_tab:
         )
         maker_rows = batch_making[batch_making["prepared_by"].astype(str).eq(str(selected_maker))].copy()
         maker_detail_cols = [
-            "order_dt",
+            "batch_make_start_dt",
+            "batch_make_stop_dt",
             "drug_name",
             "order_lot_number",
             "num_preparations",
             "prepare_tat_minutes",
+            "workflow_make_minutes",
             "approved_by",
             "secondary_approved_by",
             "order_status",
         ]
         st.dataframe(
             maker_rows[[c for c in maker_detail_cols if c in maker_rows.columns]].sort_values(
-                ["order_dt", "drug_name"], ascending=[False, True], na_position="last"
+                ["batch_make_start_dt", "drug_name"], ascending=[False, True], na_position="last"
             ),
             width="stretch",
             hide_index=True,
             column_config={
-                "order_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
+                "batch_make_start_dt": st.column_config.DatetimeColumn("Started Prepare", format="MM/DD/YY HH:mm"),
+                "batch_make_stop_dt": st.column_config.DatetimeColumn("Stopped Prepare", format="MM/DD/YY HH:mm"),
                 "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
                 "prepare_tat_minutes": st.column_config.NumberColumn("Make TAT Min", format="%.1f"),
+                "workflow_make_minutes": st.column_config.NumberColumn("Workflow Prepare Min", format="%.1f"),
             },
         )
         if not workflow_filtered.empty:
@@ -957,16 +1011,19 @@ with slow_tab:
     batch_making = all_status_raw_filtered[
         all_status_raw_filtered["order_status"].eq("Batch Started Prepare")
     ].copy()
+    batch_making = add_batch_make_window(batch_making, workflow_filtered)
     if batch_making.empty:
         st.info("No batch making details are in the current filter window.")
     else:
         detail_cols = [
-            "order_dt",
+            "batch_make_start_dt",
+            "batch_make_stop_dt",
             "prepared_by",
             "drug_name",
             "order_lot_number",
             "num_preparations",
             "prepare_tat_minutes",
+            "workflow_make_minutes",
             "approved_by",
             "secondary_approved_by",
         ]
@@ -981,8 +1038,11 @@ with slow_tab:
                 hide_index=True,
                 column_config={
                     "order_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
+                    "batch_make_start_dt": st.column_config.DatetimeColumn("Started Prepare", format="MM/DD/YY HH:mm"),
+                    "batch_make_stop_dt": st.column_config.DatetimeColumn("Stopped Prepare", format="MM/DD/YY HH:mm"),
                     "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
                     "prepare_tat_minutes": st.column_config.NumberColumn("Make TAT Min", format="%.1f"),
+                    "workflow_make_minutes": st.column_config.NumberColumn("Workflow Prepare Min", format="%.1f"),
                 },
             )
         with fast_col:
@@ -993,8 +1053,11 @@ with slow_tab:
                 hide_index=True,
                 column_config={
                     "order_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
+                    "batch_make_start_dt": st.column_config.DatetimeColumn("Started Prepare", format="MM/DD/YY HH:mm"),
+                    "batch_make_stop_dt": st.column_config.DatetimeColumn("Stopped Prepare", format="MM/DD/YY HH:mm"),
                     "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
                     "prepare_tat_minutes": st.column_config.NumberColumn("Make TAT Min", format="%.1f"),
+                    "workflow_make_minutes": st.column_config.NumberColumn("Workflow Prepare Min", format="%.1f"),
                 },
             )
         slow_options = (
@@ -1035,7 +1098,10 @@ with slow_tab:
                     "Dose": selected_dose,
                     "Prepared By": selected_maker,
                     "Drug": selected_drug,
+                    "Started Prepare": selected_row.get("batch_make_start_dt"),
+                    "Stopped Prepare": selected_row.get("batch_make_stop_dt"),
                     "Make TAT Min": selected_row.get("prepare_tat_minutes"),
+                    "Workflow Prepare Min": selected_row.get("workflow_make_minutes"),
                 }
             )
             if workflow_filtered.empty:
@@ -1075,8 +1141,12 @@ with slow_tab:
                             "total_duration_minutes": st.column_config.NumberColumn("Minutes", format="%.2f"),
                         },
                     )
-                    batch_start = wf_batch["start_dt"].dropna().min()
-                    batch_stop = wf_batch["stop_dt"].dropna().max()
+                    batch_start = pd.to_datetime(selected_row.get("batch_make_start_dt"), errors="coerce")
+                    batch_stop = pd.to_datetime(selected_row.get("batch_make_stop_dt"), errors="coerce")
+                    if pd.isna(batch_start):
+                        batch_start = wf_batch["start_dt"].dropna().min()
+                    if pd.isna(batch_stop):
+                        batch_stop = wf_batch["stop_dt"].dropna().max()
                     if pd.isna(batch_stop):
                         batch_stop = wf_batch["start_dt"].dropna().max()
                     if pd.notna(batch_start) and pd.notna(batch_stop):
