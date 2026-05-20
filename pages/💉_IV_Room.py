@@ -85,6 +85,28 @@ def collapse_iv_display_rows(df):
     )
 
 
+def classify_iv_order_status(df):
+    if df.empty:
+        return df.copy()
+
+    out = df.copy()
+    for col in ["prepared_by", "approved_by", "secondary_approved_by"]:
+        if col not in out.columns:
+            out[col] = ""
+        out[col] = out[col].fillna("").astype(str).str.strip()
+
+    out["completed_on"] = pd.to_datetime(out["completed_on"], errors="coerce")
+    no_completion = out["completed_on"].isna()
+    no_preparer = out["prepared_by"].str.lower().isin(["", "unassigned", "none", "nan"])
+    no_approval = out["approved_by"].str.lower().isin(["", "unassigned", "none", "nan"])
+    no_secondary = out["secondary_approved_by"].str.lower().isin(["", "unassigned", "none", "nan"])
+
+    out["order_status"] = "Completed / Made"
+    out.loc[no_completion & no_preparer & no_approval & no_secondary, "order_status"] = "Canceled / Not Made"
+    out.loc[no_completion & ~(no_preparer & no_approval & no_secondary), "order_status"] = "Needs Completion Review"
+    return out
+
+
 st.set_page_config(page_title="IV Room", page_icon="💉", layout="wide")
 App.apply_global_styles()
 
@@ -124,6 +146,8 @@ work["priority_name"] = work["priority_name"].fillna("").astype(str).str.strip()
 work["compound_type"] = work["compound_type"].fillna("Unspecified").astype(str).str.strip().replace("", "Unspecified")
 work["prepared_by"] = work["prepared_by"].fillna("").astype(str).str.strip().replace("", "Unassigned")
 work["approved_by"] = work["approved_by"].fillna("").astype(str).str.strip().replace("", "Unassigned")
+work["secondary_approved_by"] = work["secondary_approved_by"].fillna("").astype(str).str.strip().replace("", "Unassigned")
+work = classify_iv_order_status(work)
 raw_work = work.copy()
 work = collapse_iv_display_rows(work)
 
@@ -133,16 +157,30 @@ compound_options = sorted(work["compound_type"].dropna().unique().tolist())
 selected_compounds = st.multiselect("Compound Type", compound_options, default=compound_options)
 
 filtered = work.copy()
+status_options = sorted(filtered["order_status"].dropna().unique().tolist())
+default_statuses = [status for status in status_options if status != "Canceled / Not Made"]
+if not default_statuses:
+    default_statuses = status_options
+selected_statuses = st.multiselect(
+    "Order Status",
+    status_options,
+    default=default_statuses,
+    help="Canceled / Not Made rows appear to have been sent to MedKeeper but never compounded.",
+)
 if selected_facilities:
     filtered = filtered[filtered["facility_name"].isin(selected_facilities)]
 if selected_compounds:
     filtered = filtered[filtered["compound_type"].isin(selected_compounds)]
+if selected_statuses:
+    filtered = filtered[filtered["order_status"].isin(selected_statuses)]
 
 raw_filtered = raw_work.copy()
 if selected_facilities:
     raw_filtered = raw_filtered[raw_filtered["facility_name"].isin(selected_facilities)]
 if selected_compounds:
     raw_filtered = raw_filtered[raw_filtered["compound_type"].isin(selected_compounds)]
+if selected_statuses:
+    raw_filtered = raw_filtered[raw_filtered["order_status"].isin(selected_statuses)]
 
 if filtered.empty:
     st.warning("No IV room records match the current filters.")
@@ -154,10 +192,19 @@ if collapsed_count > 0:
         f"Collapsed {collapsed_count:,} workflow-stage duplicate rows for display. The raw log remains available below for verification."
     )
 
+all_status_raw_filtered = raw_work.copy()
+if selected_facilities:
+    all_status_raw_filtered = all_status_raw_filtered[all_status_raw_filtered["facility_name"].isin(selected_facilities)]
+if selected_compounds:
+    all_status_raw_filtered = all_status_raw_filtered[all_status_raw_filtered["compound_type"].isin(selected_compounds)]
+
+canceled_review = all_status_raw_filtered[all_status_raw_filtered["order_status"].eq("Canceled / Not Made")].copy()
+review_completion = all_status_raw_filtered[all_status_raw_filtered["order_status"].eq("Needs Completion Review")].copy()
+
 stat_mask = filtered["priority_name"].str.upper().eq("STAT")
 tat_ready = filtered.dropna(subset=["prepare_tat_minutes"]).copy()
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("IV Orders", f"{len(filtered):,}")
 m2.metric("Preparations", f"{int(filtered['num_preparations'].sum()):,}")
 m3.metric("STAT Orders", f"{int(stat_mask.sum()):,}")
@@ -166,6 +213,14 @@ m5.metric(
     "Median Prep TAT",
     f"{tat_ready['prepare_tat_minutes'].median():.1f} min" if not tat_ready.empty else "N/A",
 )
+m6.metric("Canceled / Not Made", f"{len(canceled_review):,}")
+
+if not canceled_review.empty:
+    st.info(
+        "Canceled / Not Made rows look like orders that reached MedKeeper but were never compounded: "
+        "no completion time and no preparer or approval user. They are available for review below and "
+        "are excluded from the default workload view."
+    )
 
 st.divider()
 
@@ -407,10 +462,54 @@ with col4:
     fig_tech.update_layout(coloraxis_showscale=False, height=420)
     st.plotly_chart(fig_tech, use_container_width=True)
 
-unassigned_rows = raw_filtered[raw_filtered["prepared_by"].eq("Unassigned")].copy()
-if not unassigned_rows.empty:
-    with st.expander(f"Unassigned Tech Prep Raw Data ({len(unassigned_rows):,} rows)", expanded=False):
-        st.caption("These rows have a blank or missing `Prepared By` value in the IV Room source data.")
+canceled_cols = [
+    "order_dt",
+    "completed_on",
+    "facility_name",
+    "compound_type",
+    "drug_name",
+    "dose_number",
+    "order_lot_number",
+    "num_preparations",
+    "priority_name",
+    "prepare_tat_minutes",
+    "prepared_by",
+    "approved_by",
+    "secondary_approved_by",
+    "order_status",
+]
+if not canceled_review.empty:
+    with st.expander(f"Canceled / Not Made Order Review ({len(canceled_review):,} rows)", expanded=False):
+        st.caption(
+            "These rows have no completion timestamp and no preparer or approval user. Based on your MedKeeper workflow, "
+            "treat them as orders that were sent but canceled before compounding."
+        )
+        st.dataframe(
+            canceled_review[[c for c in canceled_cols if c in canceled_review.columns]].sort_values(
+                ["order_dt", "drug_name"], ascending=[False, True], na_position="last"
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "order_dt": st.column_config.DatetimeColumn("Ordered", format="MM/DD/YY HH:mm"),
+                "completed_on": st.column_config.DatetimeColumn("Completed", format="MM/DD/YY HH:mm"),
+                "num_preparations": st.column_config.NumberColumn("Preps", format="%.0f"),
+                "prepare_tat_minutes": st.column_config.NumberColumn("TAT Min", format="%.1f"),
+            },
+        )
+        st.download_button(
+            "Export canceled / not made orders",
+            data=to_csv_bytes(canceled_review[[c for c in canceled_cols if c in canceled_review.columns]]),
+            file_name="iv_room_canceled_not_made_orders.csv",
+            mime="text/csv",
+        )
+
+if not review_completion.empty:
+    with st.expander(f"Needs Completion Review ({len(review_completion):,} rows)", expanded=False):
+        st.caption(
+            "These rows have some preparation or approval activity but no completed timestamp. Review them before counting "
+            "them as made or canceled."
+        )
         raw_cols = [
             "order_dt",
             "completed_on",
@@ -425,9 +524,10 @@ if not unassigned_rows.empty:
             "prepared_by",
             "approved_by",
             "secondary_approved_by",
+            "order_status",
         ]
         st.dataframe(
-            unassigned_rows[[c for c in raw_cols if c in unassigned_rows.columns]].sort_values(
+            review_completion[[c for c in raw_cols if c in review_completion.columns]].sort_values(
                 ["order_dt", "drug_name"], ascending=[False, True], na_position="last"
             ),
             width="stretch",
@@ -571,6 +671,7 @@ with st.expander("Raw IV Room Log"):
         "prepared_by",
         "approved_by",
         "secondary_approved_by",
+        "order_status",
     ]
     st.dataframe(
         raw_filtered[raw_cols].sort_values("order_dt", ascending=False),
