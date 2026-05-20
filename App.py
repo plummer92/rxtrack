@@ -262,6 +262,32 @@ def init_db():
             approved_by TEXT,
             secondary_approved_by TEXT
         );""",
+        """CREATE TABLE IF NOT EXISTS iv_room_workflow_detail (
+            pk TEXT PRIMARY KEY,
+            facility_name TEXT,
+            order_lot_number TEXT,
+            dose_number TEXT,
+            ordered_on DATE,
+            prepared_by TEXT,
+            approved_by TEXT,
+            drug_name TEXT,
+            workflow_name TEXT,
+            workflow_step_type TEXT,
+            workflow_step_name TEXT,
+            workflow_step_category TEXT,
+            start_date DATE,
+            start_time TEXT,
+            stop_time TEXT,
+            start_dt TIMESTAMP,
+            stop_dt TIMESTAMP,
+            total_duration_minutes FLOAT,
+            source_file TEXT,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        );""",
+        """CREATE INDEX IF NOT EXISTS idx_iv_room_workflow_detail_start_date
+            ON iv_room_workflow_detail (start_date);""",
+        """CREATE INDEX IF NOT EXISTS idx_iv_room_workflow_detail_order_lot
+            ON iv_room_workflow_detail (order_lot_number, dose_number);""",
         """CREATE TABLE IF NOT EXISTS wcc_compounding_stats (
             pk TEXT PRIMARY KEY,
             component_name TEXT,
@@ -1676,6 +1702,90 @@ def clean_iv_room_report(df):
     return df[required + ["order_dt", "pk"]]
 
 
+def clean_iv_room_workflow_detail(df, source_file=""):
+    df = df.copy()
+    colmap = {
+        "Facility Name": "facility_name",
+        "Order/Lot Number": "order_lot_number",
+        "Order/LOT Number": "order_lot_number",
+        "Dose Number": "dose_number",
+        "Ordered On": "ordered_on",
+        "Prepared By": "prepared_by",
+        "Approved By": "approved_by",
+        "Drug Name": "drug_name",
+        "Workflow Name": "workflow_name",
+        "Workflow Step Type": "workflow_step_type",
+        "Workflow Step Name": "workflow_step_name",
+        "Workflow Step Category": "workflow_step_category",
+        "Start Date": "start_date",
+        "Start Time": "start_time",
+        "Stop Time": "stop_time",
+        "Total Duration Minutes": "total_duration_minutes",
+    }
+    df.rename(columns=colmap, inplace=True)
+
+    required = list(dict.fromkeys(colmap.values()))
+    for col in required:
+        if col not in df.columns:
+            df[col] = None
+
+    for col in [
+        "facility_name", "prepared_by", "approved_by", "drug_name", "workflow_name",
+        "workflow_step_type", "workflow_step_name", "workflow_step_category",
+        "start_time", "stop_time",
+    ]:
+        df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].replace({"": None, "nan": None, "None": None})
+
+    df["order_lot_number"] = df["order_lot_number"].apply(normalize_identifier_text)
+    df["dose_number"] = df["dose_number"].apply(normalize_identifier_text)
+    df["ordered_on"] = pd.to_datetime(df["ordered_on"], errors="coerce").dt.date
+    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce").dt.date
+    df["total_duration_minutes"] = pd.to_numeric(df["total_duration_minutes"], errors="coerce")
+    df["source_file"] = source_file
+
+    df["start_dt"] = pd.to_datetime(
+        df["start_date"].astype(str) + " " + df["start_time"].fillna("00:00"),
+        errors="coerce",
+    )
+    df["stop_dt"] = pd.NaT
+    has_stop_time = df["stop_time"].notna()
+    df.loc[has_stop_time, "stop_dt"] = pd.to_datetime(
+        df.loc[has_stop_time, "start_date"].astype(str) + " " + df.loc[has_stop_time, "stop_time"],
+        errors="coerce",
+    )
+
+    df.dropna(subset=["start_date"], inplace=True)
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row.get("order_lot_number") or ""),
+                str(row.get("dose_number") or ""),
+                str(row.get("drug_name") or ""),
+                str(row.get("workflow_name") or ""),
+                str(row.get("workflow_step_type") or ""),
+                str(row.get("workflow_step_name") or ""),
+                str(row.get("workflow_step_category") or ""),
+                str(row.get("start_date") or ""),
+                str(row.get("start_time") or ""),
+                str(row.get("stop_time") or ""),
+                str(row.get("total_duration_minutes") or ""),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+
+    df = df.astype(object)
+    df = df.where(pd.notna(df), None)
+    return df[[
+        "pk", "facility_name", "order_lot_number", "dose_number", "ordered_on",
+        "prepared_by", "approved_by", "drug_name", "workflow_name",
+        "workflow_step_type", "workflow_step_name", "workflow_step_category",
+        "start_date", "start_time", "stop_time", "start_dt", "stop_dt",
+        "total_duration_minutes", "source_file",
+    ]]
+
+
 def clean_wcc_compounding_stats(df, source_file=""):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -2299,6 +2409,49 @@ def load_iv_room_data(start_date, end_date):
         ]
         if dedupe_cols:
             df = df.drop_duplicates(subset=dedupe_cols, keep="first").copy()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_iv_room_workflow_detail(start_date, end_date):
+    query = """
+        SELECT
+            pk,
+            facility_name,
+            order_lot_number,
+            dose_number,
+            ordered_on,
+            prepared_by,
+            approved_by,
+            drug_name,
+            workflow_name,
+            workflow_step_type,
+            workflow_step_name,
+            workflow_step_category,
+            start_date,
+            start_time,
+            stop_time,
+            start_dt,
+            stop_dt,
+            total_duration_minutes,
+            source_file
+        FROM iv_room_workflow_detail
+        WHERE start_date BETWEEN %s AND %s
+        ORDER BY start_dt, order_lot_number, dose_number, workflow_step_type, workflow_step_name
+    """
+    try:
+        with db_cursor() as (conn, cur):
+            df = pd.read_sql(query, conn, params=(start_date, end_date))
+        for col in ["ordered_on", "start_date", "start_dt", "stop_dt"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        for col in ["order_lot_number", "dose_number"]:
+            if col in df.columns:
+                df[col] = df[col].apply(normalize_identifier_text)
+        if "total_duration_minutes" in df.columns:
+            df["total_duration_minutes"] = pd.to_numeric(df["total_duration_minutes"], errors="coerce")
         return df
     except Exception:
         return pd.DataFrame()
@@ -3354,7 +3507,7 @@ if _is_main:
         u_type = st.selectbox("File Type:", [
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
-            "IV Room Workload", "IV Room Batching",
+            "IV Room Workload", "IV Room Batching", "IV Room Workflow Detail",
             "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats",
             "Days Since Last Cycle Count Report", "Cycle Count Variance Report",
             "Buyer Formulary Listing Report", "Physical Inventory Report",
@@ -3854,6 +4007,41 @@ if _is_main:
                                      %(prepare_tat_minutes)s, %(prepared_by)s, %(approved_by)s,
                                      %(secondary_approved_by)s)
                              ON CONFLICT (pk) DO NOTHING;"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name=u_type)
+                    processed_count = len(clean)
+
+                elif u_type == "IV Room Workflow Detail":
+                    clean = clean_iv_room_workflow_detail(raw, uploaded_names)
+                    sql = """INSERT INTO iv_room_workflow_detail
+                             (pk, facility_name, order_lot_number, dose_number, ordered_on,
+                              prepared_by, approved_by, drug_name, workflow_name, workflow_step_type,
+                              workflow_step_name, workflow_step_category, start_date, start_time, stop_time,
+                              start_dt, stop_dt, total_duration_minutes, source_file)
+                             VALUES (%(pk)s, %(facility_name)s, %(order_lot_number)s, %(dose_number)s,
+                                     %(ordered_on)s, %(prepared_by)s, %(approved_by)s, %(drug_name)s,
+                                     %(workflow_name)s, %(workflow_step_type)s, %(workflow_step_name)s,
+                                     %(workflow_step_category)s, %(start_date)s, %(start_time)s, %(stop_time)s,
+                                     %(start_dt)s, %(stop_dt)s, %(total_duration_minutes)s, %(source_file)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 facility_name = EXCLUDED.facility_name,
+                                 order_lot_number = EXCLUDED.order_lot_number,
+                                 dose_number = EXCLUDED.dose_number,
+                                 ordered_on = EXCLUDED.ordered_on,
+                                 prepared_by = EXCLUDED.prepared_by,
+                                 approved_by = EXCLUDED.approved_by,
+                                 drug_name = EXCLUDED.drug_name,
+                                 workflow_name = EXCLUDED.workflow_name,
+                                 workflow_step_type = EXCLUDED.workflow_step_type,
+                                 workflow_step_name = EXCLUDED.workflow_step_name,
+                                 workflow_step_category = EXCLUDED.workflow_step_category,
+                                 start_date = EXCLUDED.start_date,
+                                 start_time = EXCLUDED.start_time,
+                                 stop_time = EXCLUDED.stop_time,
+                                 start_dt = EXCLUDED.start_dt,
+                                 stop_dt = EXCLUDED.stop_dt,
+                                 total_duration_minutes = EXCLUDED.total_duration_minutes,
+                                 source_file = EXCLUDED.source_file,
+                                 uploaded_at = NOW();"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name=u_type)
                     processed_count = len(clean)
 

@@ -125,6 +125,7 @@ App.apply_global_styles()
 
 render_sidebar = App.render_sidebar
 load_iv_room_data = App.load_iv_room_data
+load_iv_room_workflow_detail = getattr(App, "load_iv_room_workflow_detail", lambda *_args, **_kwargs: pd.DataFrame())
 
 start_date, end_date = render_sidebar()
 
@@ -144,6 +145,7 @@ else:
 
 with st.spinner("Loading IV room workload..."):
     df_iv = load_iv_room_data(start_date, end_date)
+    workflow_detail = load_iv_room_workflow_detail(start_date, end_date)
 
 if df_iv.empty:
     st.info("No IV room workload found for this date range. Upload an `IV Room Workload` or `IV Room Batching` file from the sidebar to get started.")
@@ -198,6 +200,10 @@ if selected_compounds:
     raw_filtered = raw_filtered[raw_filtered["compound_type"].isin(selected_compounds)]
 if selected_statuses:
     raw_filtered = raw_filtered[raw_filtered["order_status"].isin(selected_statuses)]
+
+workflow_filtered = workflow_detail.copy()
+if not workflow_filtered.empty and selected_facilities and "facility_name" in workflow_filtered.columns:
+    workflow_filtered = workflow_filtered[workflow_filtered["facility_name"].isin(selected_facilities)]
 
 if filtered.empty:
     st.warning("No IV room records match the current filters.")
@@ -635,6 +641,141 @@ with tat_col:
         )
         fig_tat.update_layout(height=360)
         st.plotly_chart(fig_tat, use_container_width=True)
+
+st.subheader("Workflow Timing Detail")
+if workflow_filtered.empty:
+    st.info(
+        "Upload the MedKeeper workflow detail exports as `IV Room Workflow Detail` to see initial creation, "
+        "component check, prepare, approve, and secondary approval timing."
+    )
+else:
+    wf = workflow_filtered.copy()
+    for col in ["workflow_step_type", "workflow_step_name", "workflow_step_category", "prepared_by", "approved_by"]:
+        wf[col] = wf[col].fillna("Unknown").astype(str).str.strip().replace("", "Unknown")
+    wf["total_duration_minutes"] = pd.to_numeric(wf["total_duration_minutes"], errors="coerce").fillna(0)
+    wf["stage"] = wf["workflow_step_type"].str.strip().replace("", "Unknown")
+    wf["activity"] = wf["workflow_step_name"].str.strip().replace("", "Unknown")
+    wf["category"] = wf["workflow_step_category"].str.strip().replace("", "Unknown")
+
+    timing_status = wf["category"].isin(["Working", "Waiting"])
+    if not timing_status.any():
+        st.warning("Workflow detail is loaded, but no Waiting/Working timing rows were found in the selected range.")
+    else:
+        wf_timing = wf[timing_status].copy()
+        working = wf_timing[wf_timing["category"].eq("Working")].copy()
+        waiting = wf_timing[wf_timing["category"].eq("Waiting")].copy()
+
+        w1, w2, w3, w4 = st.columns(4)
+        w1.metric("Workflow Rows", f"{len(wf_timing):,}")
+        w2.metric("Working Minutes", f"{working['total_duration_minutes'].sum():,.1f}")
+        w3.metric("Waiting Minutes", f"{waiting['total_duration_minutes'].sum():,.1f}")
+        w4.metric("Orders/Lots", f"{wf_timing['order_lot_number'].nunique():,}")
+
+        stage_summary = (
+            wf_timing.groupby(["stage", "activity", "category"], as_index=False)
+            .agg(
+                rows=("pk", "count"),
+                total_minutes=("total_duration_minutes", "sum"),
+                median_minutes=("total_duration_minutes", "median"),
+                p90_minutes=("total_duration_minutes", lambda s: s.quantile(0.90)),
+            )
+            .sort_values(["stage", "category", "total_minutes"], ascending=[True, True, False])
+        )
+
+        timing_tab, prep_tab, approve_tab, detail_tab = st.tabs(
+            ["Stage Timing", "Prepared By Working", "Approved By Working", "Order Timeline"]
+        )
+        with timing_tab:
+            st.dataframe(
+                stage_summary,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                    "total_minutes": st.column_config.NumberColumn("Total Min", format="%.1f"),
+                    "median_minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
+                    "p90_minutes": st.column_config.NumberColumn("P90 Min", format="%.1f"),
+                },
+            )
+
+        with prep_tab:
+            prep_work = working[working["prepared_by"].ne("None") & working["prepared_by"].ne("Unknown")].copy()
+            if prep_work.empty:
+                st.info("No prepared-by working rows are loaded for the selected range.")
+            else:
+                prep_summary = (
+                    prep_work.groupby("prepared_by", as_index=False)
+                    .agg(
+                        working_rows=("pk", "count"),
+                        orders=("order_lot_number", "nunique"),
+                        working_minutes=("total_duration_minutes", "sum"),
+                        median_minutes=("total_duration_minutes", "median"),
+                    )
+                    .sort_values(["working_minutes", "working_rows"], ascending=False)
+                )
+                st.dataframe(
+                    prep_summary,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "working_rows": st.column_config.NumberColumn("Working Rows", format="%.0f"),
+                        "orders": st.column_config.NumberColumn("Orders/Lots", format="%.0f"),
+                        "working_minutes": st.column_config.NumberColumn("Working Min", format="%.1f"),
+                        "median_minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
+                    },
+                )
+
+        with approve_tab:
+            approve_work = working[working["approved_by"].ne("None") & working["approved_by"].ne("Unknown")].copy()
+            if approve_work.empty:
+                st.info("No approved-by working rows are loaded for the selected range.")
+            else:
+                approve_summary = (
+                    approve_work.groupby("approved_by", as_index=False)
+                    .agg(
+                        working_rows=("pk", "count"),
+                        orders=("order_lot_number", "nunique"),
+                        working_minutes=("total_duration_minutes", "sum"),
+                        median_minutes=("total_duration_minutes", "median"),
+                    )
+                    .sort_values(["working_minutes", "working_rows"], ascending=False)
+                )
+                st.dataframe(
+                    approve_summary,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "working_rows": st.column_config.NumberColumn("Working Rows", format="%.0f"),
+                        "orders": st.column_config.NumberColumn("Orders/Lots", format="%.0f"),
+                        "working_minutes": st.column_config.NumberColumn("Working Min", format="%.1f"),
+                        "median_minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
+                    },
+                )
+
+        with detail_tab:
+            lot_options = sorted(wf_timing["order_lot_number"].dropna().astype(str).unique().tolist())
+            if not lot_options:
+                st.info("No order/lot values are available in the workflow detail rows.")
+            else:
+                selected_lot = st.selectbox("Order/Lot timeline", lot_options, index=0)
+                timeline_cols = [
+                    "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                    "stage", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
+                    "source_file",
+                ]
+                timeline = wf_timing[wf_timing["order_lot_number"].astype(str).eq(str(selected_lot))].copy()
+                st.dataframe(
+                    timeline[[c for c in timeline_cols if c in timeline.columns]].sort_values(
+                        ["start_dt", "stage", "activity"], na_position="last"
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
+                        "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                        "total_duration_minutes": st.column_config.NumberColumn("Minutes", format="%.2f"),
+                    },
+                )
 
 mix_col, batch_col = st.columns(2)
 
