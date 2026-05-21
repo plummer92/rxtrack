@@ -3,7 +3,7 @@ from datetime import timedelta
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 import App
 
@@ -36,12 +36,6 @@ def _date_bounds(start, end):
     start_ts = pd.Timestamp(start)
     end_exclusive = pd.Timestamp(end) + pd.Timedelta(days=1)
     return start_ts, end_exclusive
-
-
-def _sql_in_clause(values, prefix):
-    params = {f"{prefix}_{idx}": value for idx, value in enumerate(values)}
-    clause = ", ".join(f":{name}" for name in params)
-    return clause, params
 
 
 def _clean_device_name(value):
@@ -85,18 +79,21 @@ def load_device_events(start, end, selected_devices):
     if not selected_devices:
         return pd.DataFrame()
     start_ts, end_exclusive = _date_bounds(start, end)
-    clause, params = _sql_in_clause([_clean_device_name(d) for d in selected_devices], "device")
-    params.update({"start_ts": start_ts, "end_exclusive": end_exclusive})
-    sql = f"""
+    params = {
+        "start_ts": start_ts,
+        "end_exclusive": end_exclusive,
+        "devices": [_clean_device_name(d) for d in selected_devices],
+    }
+    sql = text("""
         SELECT pk, dt, user_name, UPPER(TRIM(device)) AS device, med_id, med_desc,
                event_type, qty, beginning_qty, ending_qty, discrepancy_qty
         FROM events
         WHERE dt >= :start_ts AND dt < :end_exclusive
-          AND UPPER(TRIM(device)) IN ({clause})
+          AND UPPER(TRIM(device)) IN :devices
         ORDER BY dt
-    """
+    """).bindparams(bindparam("devices", expanding=True))
     with engine.connect() as conn:
-        df = pd.read_sql(text(sql), conn, params=params)
+        df = pd.read_sql(sql, conn, params=params)
     if df.empty:
         return df
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
@@ -112,18 +109,21 @@ def load_device_orders(start, end, selected_devices):
     if not selected_devices:
         return pd.DataFrame()
     start_ts, end_exclusive = _date_bounds(start, end)
-    clause, params = _sql_in_clause([_clean_device_name(d) for d in selected_devices], "device")
-    params.update({"start_ts": start_ts, "end_exclusive": end_exclusive})
-    sql = f"""
+    params = {
+        "start_ts": start_ts,
+        "end_exclusive": end_exclusive,
+        "devices": [_clean_device_name(d) for d in selected_devices],
+    }
+    sql = text("""
         SELECT pk, queue_id, priority, dt, med_id, med_desc,
                UPPER(TRIM(destination)) AS destination, user_name, qty
         FROM pharmacy_orders
         WHERE dt >= :start_ts AND dt < :end_exclusive
-          AND UPPER(TRIM(destination)) IN ({clause})
+          AND UPPER(TRIM(destination)) IN :devices
         ORDER BY dt
-    """
+    """).bindparams(bindparam("devices", expanding=True))
     with engine.connect() as conn:
-        df = pd.read_sql(text(sql), conn, params=params)
+        df = pd.read_sql(sql, conn, params=params)
     if df.empty:
         return df
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
