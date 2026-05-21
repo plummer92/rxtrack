@@ -185,6 +185,40 @@ def load_audit_usage(start, end, selected_devices):
     return df
 
 
+@st.cache_data(ttl=300)
+def load_device_inventory_current(selected_devices):
+    if not selected_devices:
+        return pd.DataFrame()
+    params = {"devices": [_clean_device_name(d) for d in selected_devices]}
+    sql = text("""
+        SELECT
+            UPPER(TRIM(device)) AS device,
+            UPPER(TRIM(med_id)) AS med_id,
+            med_desc,
+            pocket_location,
+            status,
+            current_quantity,
+            min_qty,
+            max_qty,
+            standard_stock,
+            outdate_tracking,
+            days_unused,
+            snapshot_dt
+        FROM device_inventory
+        WHERE UPPER(TRIM(device)) IN :devices
+    """).bindparams(bindparam("devices", expanding=True))
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params=params)
+    if df.empty:
+        return df
+    for col in ["current_quantity", "min_qty", "max_qty", "days_unused"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["snapshot_dt"] = pd.to_datetime(df["snapshot_dt"], errors="coerce")
+    for col in ["device", "med_id", "med_desc", "pocket_location", "status", "standard_stock", "outdate_tracking"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    return df
+
+
 def classify_events(events):
     if events.empty:
         return events
@@ -391,6 +425,17 @@ def _suggest_reachable_refill_label(pressure_hour, blocked_start, blocked_end):
     return f"{max(pressure_hour - 1, 0):02d}:00"
 
 
+def _case_window_label(hour, blocked_start, blocked_end):
+    if pd.isna(hour):
+        return "Unknown"
+    hour = int(hour)
+    if _is_blocked_hour(hour, blocked_start, blocked_end):
+        return "During cases"
+    if blocked_start < blocked_end:
+        return "Pre-case" if hour < blocked_start else "Post-case"
+    return "Open access"
+
+
 def build_refill_time_suggestions(events, orders, audit_usage, blocked_start, blocked_end):
     rows = []
     for device in selected_devices:
@@ -516,6 +561,205 @@ def build_refill_time_suggestions(events, orders, audit_usage, blocked_start, bl
     return pd.DataFrame(rows)
 
 
+def build_case_window_summary(events, orders, audit_usage, blocked_start, blocked_end):
+    frames = []
+    if not audit_usage.empty:
+        usage = audit_usage.copy()
+        usage["case_window"] = usage["hour"].apply(lambda h: _case_window_label(h, blocked_start, blocked_end))
+        frames.append(usage.groupby(["device", "case_window"]).agg(
+            usage_events=("pk", "count"),
+            usage_qty=("abs_qty", "sum"),
+            usage_meds=("med_id", "nunique"),
+        ).reset_index())
+    if not events.empty:
+        refills = events[events["is_refill"]].copy()
+        if not refills.empty:
+            refills["case_window"] = refills["hour"].apply(lambda h: _case_window_label(h, blocked_start, blocked_end))
+            frames.append(refills.groupby(["device", "case_window"]).agg(
+                refill_rows=("pk", "count"),
+                refill_qty=("abs_qty", "sum"),
+            ).reset_index())
+    if not orders.empty:
+        stock = orders[orders["is_stockout"]].copy()
+        if not stock.empty:
+            stock["case_window"] = stock["hour"].apply(lambda h: _case_window_label(h, blocked_start, blocked_end))
+            frames.append(stock.groupby(["destination", "case_window"]).agg(
+                stockout_orders=("pk", "count"),
+                stockout_qty=("abs_qty", "sum"),
+            ).reset_index().rename(columns={"destination": "device"}))
+    frames = [frame for frame in frames if not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    summary = frames[0]
+    for frame in frames[1:]:
+        summary = summary.merge(frame, on=["device", "case_window"], how="outer")
+    return summary.fillna(0)
+
+
+def build_med_signal_detail(events, orders, audit_usage, inventory, gap_df):
+    frames = []
+    if not audit_usage.empty:
+        frames.append(audit_usage.groupby(["device", "med_id", "med_desc"]).agg(
+            usage_events=("pk", "count"),
+            usage_qty=("abs_qty", "sum"),
+            last_usage=("dt", "max"),
+        ).reset_index())
+    if not events.empty:
+        refills = events[events["is_refill"]].copy()
+        if not refills.empty:
+            frames.append(refills.groupby(["device", "med_id", "med_desc"]).agg(
+                refill_rows=("pk", "count"),
+                refill_qty=("abs_qty", "sum"),
+                last_refill=("dt", "max"),
+            ).reset_index())
+    if not orders.empty:
+        stock = orders[orders["is_stockout"]].copy()
+        if not stock.empty:
+            frames.append(stock.groupby(["destination", "med_id", "med_desc"]).agg(
+                stockout_orders=("pk", "count"),
+                stockout_qty=("abs_qty", "sum"),
+                last_stockout_order=("dt", "max"),
+            ).reset_index().rename(columns={"destination": "device"}))
+    if not gap_df.empty:
+        frames.append(gap_df.groupby(["device", "med_id", "med_desc"]).agg(
+            clinical_zero_events=("clinical_zero_time", "count"),
+            max_zero_gap_hours=("gap_hours", "max"),
+            median_zero_gap_hours=("gap_hours", "median"),
+        ).reset_index())
+    inv_summary = pd.DataFrame()
+    if not inventory.empty:
+        inv_cols = [
+            "device", "med_id", "med_desc", "current_quantity", "min_qty", "max_qty",
+            "standard_stock", "days_unused", "pocket_location", "status", "outdate_tracking",
+        ]
+        inv_summary = inventory.sort_values("snapshot_dt").groupby(["device", "med_id"], as_index=False).tail(1)[inv_cols]
+    if not frames:
+        if inv_summary.empty:
+            return pd.DataFrame()
+        detail = inv_summary.copy()
+    else:
+        detail = frames[0]
+        for frame in frames[1:]:
+            detail = detail.merge(frame, on=["device", "med_id", "med_desc"], how="outer")
+        if not inv_summary.empty:
+            detail = detail.merge(inv_summary.drop(columns=["med_desc"]), on=["device", "med_id"], how="left")
+    for col in [
+        "usage_events", "usage_qty", "refill_rows", "refill_qty", "stockout_orders",
+        "stockout_qty", "clinical_zero_events", "max_zero_gap_hours", "median_zero_gap_hours",
+        "current_quantity", "min_qty", "max_qty", "days_unused",
+    ]:
+        if col not in detail.columns:
+            detail[col] = 0
+        detail[col] = pd.to_numeric(detail[col], errors="coerce").fillna(0)
+    detail["problem_score"] = (
+        detail["stockout_orders"] * 10
+        + detail["clinical_zero_events"] * 6
+        + detail["usage_events"]
+        + detail["usage_qty"] * 0.2
+        + detail["max_zero_gap_hours"].fillna(0).clip(lower=0) * 0.5
+    )
+    return detail.sort_values(["problem_score", "stockout_orders", "clinical_zero_events", "usage_qty"], ascending=False)
+
+
+def build_inventory_crosscheck(audit_usage, inventory):
+    if inventory.empty:
+        return pd.DataFrame()
+    inv = inventory.sort_values("snapshot_dt").groupby(["device", "med_id"], as_index=False).tail(1).copy()
+    usage_summary = pd.DataFrame(columns=["device", "med_id", "audit_usage_events", "audit_usage_qty", "audit_last_usage"])
+    if not audit_usage.empty:
+        usage_summary = audit_usage.groupby(["device", "med_id"]).agg(
+            audit_usage_events=("pk", "count"),
+            audit_usage_qty=("abs_qty", "sum"),
+            audit_last_usage=("dt", "max"),
+        ).reset_index()
+    check = inv.merge(usage_summary, on=["device", "med_id"], how="left")
+    check["audit_usage_events"] = pd.to_numeric(check["audit_usage_events"], errors="coerce").fillna(0)
+    check["audit_usage_qty"] = pd.to_numeric(check["audit_usage_qty"], errors="coerce").fillna(0)
+    check["days_unused"] = pd.to_numeric(check["days_unused"], errors="coerce")
+
+    def status(row):
+        has_audit = row["audit_usage_events"] > 0
+        days = row["days_unused"]
+        recent_inventory = pd.notna(days) and days <= 3
+        stale_inventory = pd.notna(days) and days >= 14
+        if has_audit and recent_inventory:
+            return "Matches recent use"
+        if has_audit and stale_inventory:
+            return "Inventory days-unused high despite audit use"
+        if not has_audit and recent_inventory:
+            return "Audit missing recent inventory use"
+        if not has_audit and stale_inventory:
+            return "Likely unused"
+        return "Needs context"
+
+    check["crosscheck_status"] = check.apply(status, axis=1)
+    return check.sort_values(["crosscheck_status", "days_unused", "audit_usage_events"], ascending=[True, False, False])
+
+
+def build_stock_config_review(med_detail):
+    if med_detail.empty:
+        return pd.DataFrame()
+    review = med_detail.copy()
+
+    def config_flag(row):
+        flags = []
+        if row.get("usage_events", 0) > 0 and str(row.get("standard_stock", "")).upper() == "N":
+            flags.append("Active but non-standard")
+        if row.get("usage_events", 0) > 0 and row.get("min_qty", 0) <= 0:
+            flags.append("Min 0 with usage")
+        if row.get("stockout_orders", 0) > 0 and row.get("max_qty", 0) <= row.get("min_qty", 0):
+            flags.append("Max not above min")
+        if row.get("clinical_zero_events", 0) > 0 and row.get("current_quantity", 0) <= 0:
+            flags.append("Current zero after clinical zero")
+        return ", ".join(flags) if flags else "No obvious config flag"
+
+    review["config_review"] = review.apply(config_flag, axis=1)
+    review["config_score"] = (
+        (review["config_review"] != "No obvious config flag").astype(int) * 10
+        + review["stockout_orders"] * 5
+        + review["usage_events"]
+    )
+    return review.sort_values(["config_score", "stockout_orders", "usage_events"], ascending=False)
+
+
+def build_recommendation_summary(selected_devices, current_summary, prior_summary, suggestions, med_detail, gap_df):
+    rows = []
+    for device in selected_devices:
+        device_suggestion = pd.Series(dtype=object)
+        if not suggestions.empty:
+            matches = suggestions[suggestions["device"] == device]
+            if not matches.empty:
+                device_suggestion = matches.iloc[0]
+        device_meds = med_detail[med_detail["device"] == device] if not med_detail.empty else pd.DataFrame()
+        device_gaps = gap_df[gap_df["device"] == device] if not gap_df.empty else pd.DataFrame()
+        long_gap_count = int((device_gaps["gap_hours"].fillna(0) >= 4).sum()) if not device_gaps.empty else 0
+        stockout_orders = int(device_meds["stockout_orders"].sum()) if not device_meds.empty else 0
+        problem_meds = int((device_meds["problem_score"] >= 10).sum()) if not device_meds.empty else 0
+        usage_qty = float(device_meds["usage_qty"].sum()) if not device_meds.empty else 0
+        suggested = str(device_suggestion.get("suggested_second_refill", "Needs more data") or "Needs more data")
+        if stockout_orders > 0 or long_gap_count > 0:
+            recommendation = "Trial second refill"
+        elif suggested in ["Already covered", "No extra refill signal"]:
+            recommendation = "Keep current refill window"
+        elif usage_qty > 0 and suggested not in ["Needs more data", ""]:
+            recommendation = "Consider targeted top-off"
+        else:
+            recommendation = "Needs more data"
+        rows.append({
+            "device": device,
+            "recommendation": recommendation,
+            "suggested_time": suggested,
+            "usage_qty": usage_qty,
+            "stockout_orders": stockout_orders,
+            "problem_meds": problem_meds,
+            "long_zero_gaps": long_gap_count,
+            "usage_delta": metric_delta(current_summary["usage_qty"], prior_summary["usage_qty"]),
+            "refill_delta": metric_delta(current_summary["refill_qty"], prior_summary["refill_qty"]),
+            "why": device_suggestion.get("rationale", "Review usage, stockout, and configuration tabs."),
+        })
+    return pd.DataFrame(rows)
+
+
 candidate_devices = load_device_candidates()
 default_devices = [device for device in DEFAULT_CATHLAB_DEVICES if device in candidate_devices]
 if not default_devices:
@@ -550,15 +794,45 @@ if not selected_devices:
     st.warning("Choose at least one device to analyze.")
     st.stop()
 
+with st.expander("Cath Lab access assumptions", expanded=False):
+    a1, a2 = st.columns(2)
+    with a1:
+        blocked_start = st.number_input(
+            "Room limited-access start hour",
+            min_value=0,
+            max_value=23,
+            value=7,
+            step=1,
+            key="device_utilization_blocked_start",
+            help="Default assumes scheduled Cath Lab procedure activity starts around 07:00.",
+        )
+    with a2:
+        blocked_end = st.number_input(
+            "Room limited-access end hour",
+            min_value=0,
+            max_value=23,
+            value=17,
+            step=1,
+            key="device_utilization_blocked_end",
+            help="Default assumes the room is easier to access again around 17:00.",
+        )
+
 events = classify_events(load_device_events(start_date, end_date, selected_devices))
 orders = classify_orders(load_device_orders(start_date, end_date, selected_devices))
 audit_usage = load_audit_usage(start_date, end_date, selected_devices)
+inventory = load_device_inventory_current(selected_devices)
 daily = build_daily(events, orders, audit_usage)
 prior_start, prior_end, prior_events, prior_orders, prior_usage = build_prior_comparison(selected_devices)
 current_summary = summarize_window(events, orders, audit_usage)
 prior_summary = summarize_window(prior_events, prior_orders, prior_usage)
+gap_df = build_zero_gap_analysis(events, audit_usage)
+suggestions = build_refill_time_suggestions(events, orders, audit_usage, int(blocked_start), int(blocked_end))
+med_signal_detail = build_med_signal_detail(events, orders, audit_usage, inventory, gap_df)
+recommendation_summary = build_recommendation_summary(
+    selected_devices, current_summary, prior_summary, suggestions, med_signal_detail, gap_df
+)
 
-if events.empty and orders.empty and audit_usage.empty:
+if events.empty and orders.empty and audit_usage.empty and inventory.empty:
     st.info("No event or pharmacy order activity found for the selected devices and date range.")
     st.stop()
 
@@ -585,16 +859,33 @@ elif refill_up or usage_up:
 else:
     st.success("No clear demand increase versus the prior comparable window for the selected devices.")
 
-tab_trend, tab_usage, tab_refill_times, tab_zero_gap, tab_daypart, tab_stockout, tab_meds, tab_raw = st.tabs([
+tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_zero_gap, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
+    "Recommendation",
     "Daily Trend",
+    "Case Window",
     "Usage",
     "Optimal Refill Times",
     "Vend-to-Zero Gap",
-    "AM / PM Split",
-    "Stockout Pressure",
-    "Medication Detail",
+    "Weekend / Weekday",
+    "Problem Meds",
+    "Inventory Cross-Check",
     "Raw Data",
 ])
+
+with tab_recommendation:
+    st.subheader("Twice-Daily Refill Recommendation")
+    st.caption("This rolls up usage, stockout pressure, vend-to-zero gaps, and current suggested timing into one manager-facing table.")
+    st.dataframe(
+        recommendation_summary,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "usage_qty": st.column_config.NumberColumn("Usage Qty", format="%.0f"),
+            "stockout_orders": st.column_config.NumberColumn("Stockouts", format="%d"),
+            "problem_meds": st.column_config.NumberColumn("Problem Meds", format="%d"),
+            "long_zero_gaps": st.column_config.NumberColumn("Long Zero Gaps", format="%d"),
+        },
+    )
 
 with tab_trend:
     trend_cols = ["usage_qty", "refill_qty", "stockout_orders", "zero_inventory_events", "pyxis_pull_qty"]
@@ -620,6 +911,20 @@ with tab_trend:
             "pyxis_pull_qty": st.column_config.NumberColumn("Pyxis Pull Qty", format="%.0f"),
         },
     )
+
+with tab_case_window:
+    case_summary = build_case_window_summary(events, orders, audit_usage, int(blocked_start), int(blocked_end))
+    if case_summary.empty:
+        st.info("No usage, refill, or stockout activity was found to split by case-window timing.")
+    else:
+        st.caption(f"Pre-case, during cases, and post-case are based on limited-access hours {int(blocked_start):02d}:00-{int(blocked_end):02d}:00.")
+        chart_cols = [col for col in ["usage_qty", "refill_qty", "stockout_orders"] if col in case_summary.columns]
+        chart_data = case_summary.melt(["device", "case_window"], value_vars=chart_cols, var_name="measure", value_name="value")
+        st.plotly_chart(
+            px.bar(chart_data, x="case_window", y="value", color="measure", facet_col="device", barmode="group"),
+            width="stretch",
+        )
+        st.dataframe(case_summary, width="stretch", hide_index=True)
 
 with tab_usage:
     usage_events = audit_usage.copy()
@@ -652,28 +957,6 @@ with tab_usage:
             st.dataframe(usage_by_day.sort_values(["event_date", "device"], ascending=[False, True]), width="stretch", hide_index=True)
 
 with tab_refill_times:
-    a1, a2 = st.columns(2)
-    with a1:
-        blocked_start = st.number_input(
-            "Room limited-access start hour",
-            min_value=0,
-            max_value=23,
-            value=7,
-            step=1,
-            key="device_utilization_blocked_start",
-            help="Default assumes scheduled Cath Lab procedure activity starts around 07:00.",
-        )
-    with a2:
-        blocked_end = st.number_input(
-            "Room limited-access end hour",
-            min_value=0,
-            max_value=23,
-            value=17,
-            step=1,
-            key="device_utilization_blocked_end",
-            help="Default assumes the room is easier to access again around 17:00.",
-        )
-    suggestions = build_refill_time_suggestions(events, orders, audit_usage, int(blocked_start), int(blocked_end))
     if suggestions.empty:
         st.info("Not enough usage or stockout data to suggest refill timing.")
     else:
@@ -717,7 +1000,6 @@ with tab_refill_times:
                 st.dataframe(detail, width="stretch", hide_index=True)
 
 with tab_zero_gap:
-    gap_df = build_zero_gap_analysis(events, audit_usage)
     if gap_df.empty:
         st.info("No clinical Audit Detail rows were found where a vend/remove/waste left the device ending quantity at zero.")
     else:
@@ -744,100 +1026,101 @@ with tab_zero_gap:
             },
         )
 
-with tab_daypart:
-    frames = []
-    if not events.empty:
-        frames.append(events[events["is_refill"]].groupby(["device", "daypart"]).agg(refill_rows=("pk", "count"), refill_qty=("abs_qty", "sum")).reset_index())
-    if not audit_usage.empty:
-        frames.append(audit_usage.groupby(["device", "daypart"]).agg(usage_rows=("pk", "count"), usage_qty=("abs_qty", "sum")).reset_index())
-    if not orders.empty:
-        frames.append(
-            orders[orders["is_stockout"]].groupby(["destination", "daypart"]).agg(
-                stockout_orders=("pk", "count"),
-                stockout_qty=("abs_qty", "sum"),
-            ).reset_index().rename(columns={"destination": "device"})
-        )
-    frames = [frame for frame in frames if not frame.empty]
-    if frames:
-        daypart = frames[0]
-        for frame in frames[1:]:
-            daypart = daypart.merge(frame, on=["device", "daypart"], how="outer")
-        daypart = daypart.fillna(0)
-        value_cols = [col for col in ["usage_qty", "refill_qty", "stockout_orders"] if col in daypart.columns]
-        chart_data = daypart.melt(["device", "daypart"], value_vars=value_cols, var_name="measure", value_name="value")
-        st.plotly_chart(px.bar(chart_data, x="daypart", y="value", color="measure", facet_col="device", barmode="group"), width="stretch")
-        st.dataframe(daypart, width="stretch", hide_index=True)
+with tab_weekend:
+    if audit_usage.empty and orders.empty:
+        st.info("No Audit Detail usage or stockout-order rows found for weekend/weekday comparison.")
     else:
-        st.info("No refill, usage, or stockout daypart activity found.")
+        frames = []
+        if not audit_usage.empty:
+            wk = audit_usage.copy()
+            wk["day_type"] = wk["dt"].dt.weekday.apply(lambda x: "Weekend" if x >= 5 else "Weekday")
+            frames.append(wk.groupby(["device", "day_type"]).agg(
+                usage_events=("pk", "count"),
+                usage_qty=("abs_qty", "sum"),
+                usage_meds=("med_id", "nunique"),
+            ).reset_index())
+        if not orders.empty:
+            so = orders[orders["is_stockout"]].copy()
+            if not so.empty:
+                so["day_type"] = so["dt"].dt.weekday.apply(lambda x: "Weekend" if x >= 5 else "Weekday")
+                frames.append(so.groupby(["destination", "day_type"]).agg(
+                    stockout_orders=("pk", "count"),
+                    stockout_qty=("abs_qty", "sum"),
+                ).reset_index().rename(columns={"destination": "device"}))
+        frames = [f for f in frames if not f.empty]
+        if frames:
+            weekend = frames[0]
+            for frame in frames[1:]:
+                weekend = weekend.merge(frame, on=["device", "day_type"], how="outer")
+            weekend = weekend.fillna(0)
+            st.plotly_chart(
+                px.bar(weekend.melt(["device", "day_type"], var_name="measure", value_name="value"), x="day_type", y="value", color="measure", facet_col="device", barmode="group"),
+                width="stretch",
+            )
+            st.dataframe(weekend, width="stretch", hide_index=True)
 
-with tab_stockout:
-    stockout_orders = orders[orders["is_stockout"]].copy() if not orders.empty else pd.DataFrame()
-    zero_events = events[events["is_zero_event"]].copy() if not events.empty else pd.DataFrame()
-    if stockout_orders.empty and zero_events.empty:
-        st.success("No stockout orders or zero-ending-inventory events found for this window.")
+with tab_problem_meds:
+    if med_signal_detail.empty:
+        st.info("No medication-level signal found for these devices.")
     else:
-        if not stockout_orders.empty:
-            st.subheader("Stockout Orders")
-            stockout_summary = stockout_orders.groupby(["destination", "med_id", "med_desc"]).agg(
-                stockout_orders=("pk", "count"),
-                stockout_qty=("abs_qty", "sum"),
-                first_stockout=("dt", "min"),
-                last_stockout=("dt", "max"),
-            ).reset_index().sort_values(["stockout_orders", "stockout_qty"], ascending=False)
-            st.dataframe(stockout_summary, width="stretch", hide_index=True)
-        if not zero_events.empty:
-            st.subheader("Zero Ending Inventory Events")
-            zero_summary = zero_events.groupby(["device", "med_id", "med_desc"]).agg(
-                zero_events=("pk", "count"),
-                first_zero=("dt", "min"),
-                last_zero=("dt", "max"),
-                last_ending_qty=("ending_qty", "last"),
-            ).reset_index().sort_values(["zero_events", "last_zero"], ascending=False)
-            st.dataframe(zero_summary, width="stretch", hide_index=True)
-
-with tab_meds:
-    med_frames = []
-    if not events.empty:
-        med_frames.append(events[events["is_refill"]].groupby(["device", "med_id", "med_desc"]).agg(refill_rows=("pk", "count"), refill_qty=("abs_qty", "sum"), last_refill=("dt", "max")).reset_index())
-    if not audit_usage.empty:
-        med_frames.append(audit_usage.groupby(["device", "med_id", "med_desc"]).agg(usage_rows=("pk", "count"), usage_qty=("abs_qty", "sum"), last_usage=("dt", "max")).reset_index())
-    if not orders.empty:
-        med_frames.append(
-            orders[orders["is_stockout"]].groupby(["destination", "med_id", "med_desc"]).agg(
-                stockout_orders=("pk", "count"),
-                stockout_qty=("abs_qty", "sum"),
-                last_stockout_order=("dt", "max"),
-            ).reset_index().rename(columns={"destination": "device"})
-        )
-    med_frames = [frame for frame in med_frames if not frame.empty]
-    if med_frames:
-        med_detail = med_frames[0]
-        for frame in med_frames[1:]:
-            med_detail = med_detail.merge(frame, on=["device", "med_id", "med_desc"], how="outer")
-        med_detail = med_detail.fillna({
-            "refill_rows": 0,
-            "refill_qty": 0,
-            "usage_rows": 0,
-            "usage_qty": 0,
-            "stockout_orders": 0,
-            "stockout_qty": 0,
-        })
-        sort_cols = [col for col in ["stockout_orders", "usage_qty", "refill_qty"] if col in med_detail.columns]
-        med_detail = med_detail.sort_values(sort_cols, ascending=False)
-        st.dataframe(med_detail, width="stretch", hide_index=True)
+        st.subheader("Top Problem Meds")
+        st.caption("Ranked by stockouts, clinical vend-to-zero events, usage volume, and zero-to-staff gap length.")
+        show_cols = [
+            "device", "med_id", "med_desc", "problem_score", "usage_events", "usage_qty",
+            "stockout_orders", "clinical_zero_events", "max_zero_gap_hours",
+            "refill_qty", "current_quantity", "min_qty", "max_qty", "standard_stock", "days_unused",
+        ]
+        st.dataframe(med_signal_detail[[c for c in show_cols if c in med_signal_detail.columns]].head(50), width="stretch", hide_index=True)
         st.download_button(
-            "Download medication detail",
-            data=med_detail.to_csv(index=False).encode("utf-8"),
-            file_name="device_utilization_med_detail.csv",
+            "Download problem med detail",
+            data=med_signal_detail.to_csv(index=False).encode("utf-8"),
+            file_name="device_utilization_problem_meds.csv",
             mime="text/csv",
         )
-    else:
-        st.info("No medication-level detail found for the selected devices.")
+
+with tab_inventory:
+    sub_cross, sub_config = st.tabs(["Days Unused Cross-Check", "Stock Configuration"])
+    with sub_cross:
+        crosscheck = build_inventory_crosscheck(audit_usage, inventory)
+        if crosscheck.empty:
+            st.info("No Device Inventory rows found for the selected devices.")
+        else:
+            st.dataframe(
+                crosscheck[[
+                    "device", "med_id", "med_desc", "crosscheck_status", "days_unused",
+                    "audit_usage_events", "audit_usage_qty", "audit_last_usage",
+                    "current_quantity", "min_qty", "max_qty", "standard_stock", "pocket_location",
+                ]],
+                width="stretch",
+                hide_index=True,
+            )
+    with sub_config:
+        config_review = build_stock_config_review(med_signal_detail)
+        if config_review.empty:
+            st.info("No stock configuration review is available for these devices.")
+        else:
+            config_cols = [
+                "device", "med_id", "med_desc", "config_review", "config_score",
+                "current_quantity", "min_qty", "max_qty", "standard_stock",
+                "days_unused", "usage_events", "stockout_orders", "clinical_zero_events",
+                "pocket_location", "outdate_tracking",
+            ]
+            st.dataframe(
+                config_review[[c for c in config_cols if c in config_review.columns]],
+                width="stretch",
+                hide_index=True,
+            )
+            st.download_button(
+                "Download stock configuration review",
+                data=config_review.to_csv(index=False).encode("utf-8"),
+                file_name="device_utilization_stock_config_review.csv",
+                mime="text/csv",
+            )
 
 with tab_raw:
     raw_choice = st.segmented_control(
         "Raw table",
-        ["Audit Usage", "Inventory Events", "Pharmacy Orders"],
+        ["Audit Usage", "Inventory Events", "Pharmacy Orders", "Device Inventory"],
         default="Audit Usage",
         key="device_utilization_raw_choice",
     )
@@ -851,8 +1134,13 @@ with tab_raw:
             st.info("No inventory events found for the selected devices.")
         else:
             st.dataframe(events.sort_values("dt", ascending=False), width="stretch", hide_index=True)
-    else:
+    elif raw_choice == "Pharmacy Orders":
         if orders.empty:
             st.info("No pharmacy orders found for the selected devices.")
         else:
             st.dataframe(orders.sort_values("dt", ascending=False), width="stretch", hide_index=True)
+    else:
+        if inventory.empty:
+            st.info("No Device Inventory rows found for the selected devices.")
+        else:
+            st.dataframe(inventory, width="stretch", hide_index=True)
