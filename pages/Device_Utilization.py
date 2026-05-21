@@ -49,22 +49,19 @@ def _clean_device_name(value):
 
 
 @st.cache_data(ttl=300)
-def load_device_candidates(start, end):
-    start_ts, end_exclusive = _date_bounds(start, end)
+def load_device_candidates():
     frames = []
     with engine.connect() as conn:
         queries = [
             """
             SELECT DISTINCT device AS device
             FROM events
-            WHERE dt >= :start_ts AND dt < :end_exclusive
-              AND device IS NOT NULL
+            WHERE device IS NOT NULL
             """,
             """
             SELECT DISTINCT destination AS device
             FROM pharmacy_orders
-            WHERE dt >= :start_ts AND dt < :end_exclusive
-              AND destination IS NOT NULL
+            WHERE destination IS NOT NULL
             """,
             """
             SELECT DISTINCT device AS device
@@ -74,7 +71,7 @@ def load_device_candidates(start, end):
         ]
         for sql in queries:
             try:
-                frames.append(pd.read_sql(text(sql), conn, params={"start_ts": start_ts, "end_exclusive": end_exclusive}))
+                frames.append(pd.read_sql(text(sql), conn))
             except Exception:
                 continue
     if not frames:
@@ -253,7 +250,7 @@ def summarize_window(events, orders):
     }
 
 
-candidate_devices = load_device_candidates(start_date, end_date)
+candidate_devices = load_device_candidates()
 default_devices = [device for device in DEFAULT_CATHLAB_DEVICES if device in candidate_devices]
 if not default_devices:
     default_devices = [
@@ -265,14 +262,15 @@ with st.expander("Device selection", expanded=True):
     c1, c2 = st.columns([1, 2])
     with c1:
         search_text = st.text_input(
-            "Find devices",
-            value="CATH",
-            help="Type part of a device name, then choose the exact devices to analyze.",
+            "Filter device dropdown",
+            value="",
+            help="Optional. Leave blank to show every device in the dropdown.",
             key="device_utilization_search",
         ).strip().upper()
     device_options = [d for d in candidate_devices if not search_text or search_text in d]
     if not device_options and candidate_devices:
         device_options = candidate_devices
+        st.warning("No devices matched that filter, so the full device list is shown.")
     with c2:
         selected_devices = st.multiselect(
             "Devices",
@@ -280,7 +278,7 @@ with st.expander("Device selection", expanded=True):
             default=[d for d in default_devices if d in device_options],
             key="device_utilization_devices",
         )
-    st.caption("Default focus is Cath Lab 8 and Cath Lab 12 when those devices exist in your uploaded data.")
+    st.caption("The dropdown includes every device found in Events, Pharmacy Orders, or Device Inventory.")
 
 if not selected_devices:
     st.warning("Choose at least one device to analyze.")
