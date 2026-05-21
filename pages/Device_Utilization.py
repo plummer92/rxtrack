@@ -356,34 +356,55 @@ def build_hourly_usage(audit_usage):
 def build_zero_gap_analysis(events, audit_usage):
     if audit_usage.empty:
         return pd.DataFrame()
+    event_text = audit_usage["event_type"].fillna("").astype(str)
+    removal_mask = event_text.str.contains(r"vend|remove|dispense|withdraw", case=False, regex=True, na=False)
     clinical_zero = audit_usage[
         audit_usage["ending_qty"].fillna(1).le(0)
         & audit_usage["user_type"].str.contains(CLINICAL_USER_PATTERN, case=False, regex=True, na=False)
+        & removal_mask
+        & audit_usage["abs_qty"].fillna(0).gt(0)
     ].copy()
     if clinical_zero.empty:
         return pd.DataFrame()
 
-    pharmacy_zero = pd.DataFrame()
+    pharmacy_verify_zero = pd.DataFrame()
+    pharmacy_refills = pd.DataFrame()
     if not events.empty:
         verify_mask = events["event_type"].str.contains(r"verify|count|inventory", case=False, regex=True, na=False)
         refill_mask = events["is_refill"]
-        pharmacy_zero = events[
-            (events["ending_qty"].fillna(1).le(0) & verify_mask) | refill_mask
-        ].copy()
+        pharmacy_verify_zero = events[events["ending_qty"].fillna(1).le(0) & verify_mask].copy()
+        pharmacy_refills = events[refill_mask].copy()
 
     rows = []
     for _, zero_row in clinical_zero.sort_values("dt").iterrows():
-        matches = pd.DataFrame()
-        if not pharmacy_zero.empty:
-            matches = pharmacy_zero[
-                (pharmacy_zero["device"] == zero_row["device"])
-                & (pharmacy_zero["med_id"] == zero_row["med_id"])
-                & (pharmacy_zero["dt"] >= zero_row["dt"])
+        verify_matches = pd.DataFrame()
+        if not pharmacy_verify_zero.empty:
+            verify_matches = pharmacy_verify_zero[
+                (pharmacy_verify_zero["device"] == zero_row["device"])
+                & (pharmacy_verify_zero["med_id"] == zero_row["med_id"])
+                & (pharmacy_verify_zero["dt"] >= zero_row["dt"])
             ].sort_values("dt")
-        next_staff = matches.iloc[0] if not matches.empty else None
-        gap_hours = None
-        if next_staff is not None:
-            gap_hours = (next_staff["dt"] - zero_row["dt"]).total_seconds() / 3600.0
+        refill_matches = pd.DataFrame()
+        if not pharmacy_refills.empty:
+            refill_matches = pharmacy_refills[
+                (pharmacy_refills["device"] == zero_row["device"])
+                & (pharmacy_refills["med_id"] == zero_row["med_id"])
+                & (pharmacy_refills["dt"] >= zero_row["dt"])
+            ].sort_values("dt")
+        next_verify = verify_matches.iloc[0] if not verify_matches.empty else None
+        next_refill = refill_matches.iloc[0] if not refill_matches.empty else None
+        verify_gap_hours = None
+        refill_gap_hours = None
+        if next_verify is not None:
+            verify_gap_hours = (next_verify["dt"] - zero_row["dt"]).total_seconds() / 3600.0
+        if next_refill is not None:
+            refill_gap_hours = (next_refill["dt"] - zero_row["dt"]).total_seconds() / 3600.0
+        if next_refill is not None:
+            gap_status = "Restocked after clinical zero"
+        elif next_verify is not None:
+            gap_status = "Verified zero only, no later refill found"
+        else:
+            gap_status = "No later verify/refill found"
         rows.append({
             "device": zero_row["device"],
             "med_id": zero_row["med_id"],
@@ -393,13 +414,18 @@ def build_zero_gap_analysis(events, audit_usage):
             "clinical_user_type": zero_row["user_type"],
             "clinical_event": zero_row["event_type"],
             "clinical_qty": zero_row["abs_qty"],
-            "next_staff_zero_or_refill": next_staff["dt"] if next_staff is not None else pd.NaT,
-            "staff_user": next_staff["user_name"] if next_staff is not None else "",
-            "staff_event": next_staff["event_type"] if next_staff is not None else "",
-            "gap_hours": gap_hours,
-            "gap_status": "No later staff zero/refill found" if next_staff is None else "Matched",
+            "next_staff_verify_zero": next_verify["dt"] if next_verify is not None else pd.NaT,
+            "verify_user": next_verify["user_name"] if next_verify is not None else "",
+            "verify_event": next_verify["event_type"] if next_verify is not None else "",
+            "verify_gap_hours": verify_gap_hours,
+            "next_refill": next_refill["dt"] if next_refill is not None else pd.NaT,
+            "refill_user": next_refill["user_name"] if next_refill is not None else "",
+            "refill_event": next_refill["event_type"] if next_refill is not None else "",
+            "refill_gap_hours": refill_gap_hours,
+            "gap_hours": refill_gap_hours,
+            "gap_status": gap_status,
         })
-    return pd.DataFrame(rows).sort_values(["gap_hours", "clinical_zero_time"], ascending=[False, False])
+    return pd.DataFrame(rows).sort_values(["refill_gap_hours", "verify_gap_hours", "clinical_zero_time"], ascending=[False, False, False])
 
 
 def _is_blocked_hour(hour, blocked_start, blocked_end):
@@ -623,8 +649,8 @@ def build_med_signal_detail(events, orders, audit_usage, inventory, gap_df):
     if not gap_df.empty:
         frames.append(gap_df.groupby(["device", "med_id", "med_desc"]).agg(
             clinical_zero_events=("clinical_zero_time", "count"),
-            max_zero_gap_hours=("gap_hours", "max"),
-            median_zero_gap_hours=("gap_hours", "median"),
+            max_zero_gap_hours=("refill_gap_hours", "max"),
+            median_zero_gap_hours=("refill_gap_hours", "median"),
         ).reset_index())
     inv_summary = pd.DataFrame()
     if not inventory.empty:
@@ -732,7 +758,7 @@ def build_recommendation_summary(selected_devices, current_summary, prior_summar
                 device_suggestion = matches.iloc[0]
         device_meds = med_detail[med_detail["device"] == device] if not med_detail.empty else pd.DataFrame()
         device_gaps = gap_df[gap_df["device"] == device] if not gap_df.empty else pd.DataFrame()
-        long_gap_count = int((device_gaps["gap_hours"].fillna(0) >= 4).sum()) if not device_gaps.empty else 0
+        long_gap_count = int((device_gaps["refill_gap_hours"].fillna(0) >= 4).sum()) if not device_gaps.empty else 0
         stockout_orders = int(device_meds["stockout_orders"].sum()) if not device_meds.empty else 0
         problem_meds = int((device_meds["problem_score"] >= 10).sum()) if not device_meds.empty else 0
         usage_qty = float(device_meds["usage_qty"].sum()) if not device_meds.empty else 0
@@ -1006,13 +1032,13 @@ with tab_zero_gap:
         g1, g2, g3 = st.columns(3)
         matched_gaps = gap_df[gap_df["gap_hours"].notna()]
         g1.metric("Clinical Vend-to-Zero Rows", f"{len(gap_df):,}")
-        g2.metric("Matched to Staff Zero/Refill", f"{len(matched_gaps):,}")
+        g2.metric("Matched to Refill/Load", f"{len(matched_gaps):,}")
         g3.metric(
-            "Median Gap",
-            f"{matched_gaps['gap_hours'].median():.1f}h" if not matched_gaps.empty else "-",
+            "Median Zero-to-Refill",
+            f"{matched_gaps['refill_gap_hours'].median():.1f}h" if not matched_gaps.empty else "-",
         )
         st.caption(
-            "This pairs a clinical Audit Transaction Detail row that ended at zero with the next pharmacy verify-zero/refill row for the same device and med."
+            "This pairs a clinical Audit Transaction Detail removal/vend/dispense/withdraw that ended at zero with the next pharmacy verify-zero and refill/load for the same device and med. Waste-only rows are excluded."
         )
         st.dataframe(
             gap_df,
@@ -1020,8 +1046,10 @@ with tab_zero_gap:
             hide_index=True,
             column_config={
                 "clinical_zero_time": st.column_config.DatetimeColumn("Clinical Zero Time", format="MM/DD/YY HH:mm"),
-                "next_staff_zero_or_refill": st.column_config.DatetimeColumn("Next Staff Zero/Refill", format="MM/DD/YY HH:mm"),
-                "gap_hours": st.column_config.NumberColumn("Gap Hours", format="%.1f"),
+                "next_staff_verify_zero": st.column_config.DatetimeColumn("Next Staff Verify Zero", format="MM/DD/YY HH:mm"),
+                "verify_gap_hours": st.column_config.NumberColumn("Zero-to-Verify Hours", format="%.1f"),
+                "next_refill": st.column_config.DatetimeColumn("Next Refill/Load", format="MM/DD/YY HH:mm"),
+                "refill_gap_hours": st.column_config.NumberColumn("Zero-to-Refill Hours", format="%.1f"),
                 "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
             },
         )
