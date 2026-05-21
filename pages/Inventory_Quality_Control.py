@@ -1094,6 +1094,27 @@ def build_overmax_review(device_inventory, physical_inventory):
         na=False,
     )
     review.loc[patient_cassette_mask, "overmax_exclusion_reason"] = "Patient cassette/workflow supply"
+    central_supply_fluid_mask = (
+        review["inventory_source"].fillna("").astype(str).eq("Physical Inventory / Carousel")
+        & review["site"].fillna("").astype(str).str.upper().eq("SHELF")
+        & (
+            med_id_text.str.contains(r"NS|NACL|D5|D10|LR|PLASMALYTE|ELECTROLYTE|KCL", regex=True, na=False)
+            | med_desc_text.str.contains(r"NACL|SODIUM CHLORIDE|D5|D10|LR|LACTATED|PLASMALYTE|ELECTROLYTE|KCL|MINIBAG|1000ML|500ML|250ML|100ML", regex=True, na=False)
+        )
+    )
+    review.loc[
+        central_supply_fluid_mask & review["overmax_exclusion_reason"].eq(""),
+        "overmax_exclusion_reason",
+    ] = "Central supply fluid placeholder"
+    key_placeholder_mask = med_id_text.str.contains(r"\bKEY", regex=True, na=False) | med_desc_text.str.contains(
+        r"\bKEY\b|CABINET KEY",
+        regex=True,
+        na=False,
+    )
+    review.loc[
+        key_placeholder_mask & review["overmax_exclusion_reason"].eq(""),
+        "overmax_exclusion_reason",
+    ] = "Operational key/workflow placeholder"
     review["review_priority"] = "Review"
     review.loc[review["over_max_qty"].ge(10) | review["over_max_pct"].ge(1), "review_priority"] = "High"
     review.loc[review["over_max_qty"].ge(25) | review["over_max_pct"].ge(2), "review_priority"] = "Very High"
