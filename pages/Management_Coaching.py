@@ -215,9 +215,12 @@ with list_col:
                 except Exception:
                     evidence = pd.DataFrame()
                 if not evidence.empty:
+                    source_page = str(selected_note.get("source_page") or "").lower()
                     evidence_title = (
                         "Clinical Chain Evidence"
-                        if str(selected_note.get("source_page") or "").lower().find("clinical") >= 0
+                        if source_page.find("clinical") >= 0
+                        else "Pend Transaction Evidence"
+                        if source_page.find("pends") >= 0
                         else "Strong Pattern Evidence"
                     )
                     st.markdown(f"**{evidence_title}**")
@@ -230,7 +233,11 @@ with list_col:
                         "Later Verify Off", "Verify User", "Inventory Events Since",
                     ]
                     visible_cols = [col for col in chain_cols if col in evidence.columns]
-                    st.dataframe(evidence[visible_cols], width="stretch", hide_index=True)
+                    st.dataframe(
+                        evidence[visible_cols] if visible_cols else evidence,
+                        width="stretch",
+                        hide_index=True,
+                    )
 
                     chart_cols = [
                         col for col in [

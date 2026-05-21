@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import io
+import json
+import re
+from datetime import date
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 import App
@@ -30,6 +33,111 @@ def read_sql_with_retry(sql, params=None, attempts=2):
                 break
             engine.dispose()
     raise last_error
+
+
+CONTROLLED_MED_PATTERN = re.compile(
+    r"\b("
+    r"LACOSA|LACOSAMIDE|MIDAZ|LORAZ|DIAZ|FENT|HYDROMOR|MORPH|OXYCOD|"
+    r"HYDROCOD|METHADONE|KETAMINE|PHENOBARB|AMPHET|METHYLPHEN|CODEINE"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def is_lidded_cubie_location(location) -> bool:
+    loc = str(location or "").upper()
+    return bool(re.search(r"\bPKT\s*[-#]?\s*[A-Z]\s*\d+\b", loc))
+
+
+def is_open_matrix_location(location) -> bool:
+    loc = str(location or "").upper()
+    has_numeric_pocket = bool(re.search(r"\bPKT\s*[-#]?\s*\d+\b", loc))
+    return has_numeric_pocket and not is_lidded_cubie_location(loc)
+
+
+def is_controlled_pend(row) -> bool:
+    if bool(row.get("is_controlled", False)):
+        return True
+    med_text = " ".join(
+        str(row.get(col) or "")
+        for col in ["med_id", "display_name", "drug_name", "trade_name"]
+    )
+    return bool(CONTROLLED_MED_PATTERN.search(med_text))
+
+
+def build_pend_coaching_payload(row, coaching_note):
+    event_dt = pd.to_datetime(row.get("dt"), errors="coerce")
+    return [{
+        "Pend Time": event_dt.strftime("%Y-%m-%d %H:%M") if pd.notna(event_dt) else "",
+        "User": str(row.get("user_name") or ""),
+        "Device": str(row.get("device") or ""),
+        "Med ID": str(row.get("med_id") or ""),
+        "Medication": str(row.get("display_name") or row.get("drug_name") or ""),
+        "Location": str(row.get("location") or ""),
+        "Pocket Type": "Open matrix pocket",
+        "Action": str(row.get("action_type") or ""),
+        "Min": row.get("min_qty"),
+        "Max": row.get("max_qty"),
+        "Coaching Note": coaching_note,
+    }]
+
+
+def save_pend_coaching_note(row, coaching_date, follow_up_date, status, coaching_note):
+    source_id = row.get("pk")
+    if pd.isna(source_id) or str(source_id).strip() == "":
+        source_id = "|".join(
+            str(row.get(col) or "")
+            for col in ["dt", "user_name", "device", "med_id", "location", "action_type"]
+        )
+    source_key = f"pends-open-matrix-pocket:{source_id}"
+    payload = build_pend_coaching_payload(row, coaching_note)
+    med_name = str(row.get("display_name") or row.get("drug_name") or row.get("med_id") or "").strip()
+    location = str(row.get("location") or "").strip()
+    staff_name = str(row.get("user_name") or "").strip() or "Unknown"
+    summary = (
+        f"Documented coaching for {staff_name}: {med_name} was pended to {location}, "
+        "which appears to be an open matrix pocket. Reviewed that controlled medications "
+        "must be pended to a lidded cubie pocket."
+    )
+    next_steps = (
+        coaching_note.strip()
+        or "Use lidded cubie pockets for controlled medications and avoid open matrix pockets."
+    )
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO management_coaching_notes
+                    (staff_name, topic, coaching_date, follow_up_date, status,
+                     summary, next_steps, source_page, source_key, source_payload_json)
+                VALUES
+                    (:staff_name, :topic, :coaching_date, :follow_up_date, :status,
+                     :summary, :next_steps, :source_page, :source_key, :source_payload_json)
+                ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
+                    staff_name = EXCLUDED.staff_name,
+                    topic = EXCLUDED.topic,
+                    coaching_date = EXCLUDED.coaching_date,
+                    follow_up_date = EXCLUDED.follow_up_date,
+                    status = EXCLUDED.status,
+                    summary = EXCLUDED.summary,
+                    next_steps = EXCLUDED.next_steps,
+                    source_payload_json = EXCLUDED.source_payload_json,
+                    updated_at = NOW()
+                """
+            ),
+            {
+                "staff_name": staff_name,
+                "topic": "Workflow",
+                "coaching_date": coaching_date,
+                "follow_up_date": follow_up_date,
+                "status": status,
+                "summary": summary,
+                "next_steps": next_steps,
+                "source_page": "Pends Analyzer",
+                "source_key": source_key,
+                "source_payload_json": json.dumps(payload, default=str),
+            },
+        )
 
 st.set_page_config(
     page_title="Pends Analyzer",
@@ -944,12 +1052,13 @@ def add_prior_pend_context(par_events, pend_history, reload_history, unload_hist
     return enriched
 
 
-tab8, tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab8, tab1, tab2, tab3, tab4, tab9, tab5, tab6, tab7 = st.tabs([
     "84-Day No Unload",
     "📋 Par Audit",
     "👤 By User",
     "🖥️ By Device",
     "🔍 Raw Detail",
+    "Coaching Docs",
     "🚨 Outlier Detector",
     "🔬 Med Lifecycle",
     "📝 Par Change Audit Trail",
@@ -1447,6 +1556,126 @@ with tab4:
         file_name="pends_raw_detail.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 4B — COACHING DOCUMENTATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+with tab9:
+    st.subheader("Controlled Pocket Coaching")
+    st.caption(
+        "Document pends where a controlled med appears to have been placed in an open matrix pocket "
+        "instead of a lidded cubie."
+    )
+
+    coaching_view = filtered.copy()
+    if coaching_view.empty:
+        st.info("No pends match the current filters.")
+    else:
+        coaching_view["open_matrix_pocket"] = coaching_view["location"].apply(is_open_matrix_location)
+        coaching_view["controlled_review"] = coaching_view.apply(is_controlled_pend, axis=1)
+        only_controlled = st.checkbox(
+            "Only show controlled-med open matrix pocket pends",
+            value=True,
+            key="pends_coaching_only_controlled",
+        )
+        if only_controlled:
+            coaching_view = coaching_view[
+                coaching_view["open_matrix_pocket"] & coaching_view["controlled_review"]
+            ].copy()
+        else:
+            coaching_view = coaching_view[coaching_view["open_matrix_pocket"]].copy()
+
+        coaching_display_cols = [c for c in [
+            "dt", "user_name", "device", "med_id", "display_name", "location",
+            "action_type", "min_qty", "max_qty", "is_controlled", "controlled_review",
+        ] if c in coaching_view.columns]
+
+        if coaching_view.empty:
+            st.success("No open matrix pocket coaching candidates match the current filters.")
+        else:
+            st.dataframe(
+                coaching_view[coaching_display_cols].sort_values("dt", ascending=False),
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "dt": st.column_config.DatetimeColumn("Date/Time", format="MM/DD/YY HH:mm"),
+                    "display_name": st.column_config.TextColumn("Medication"),
+                    "location": st.column_config.TextColumn("Pend Location"),
+                    "controlled_review": st.column_config.CheckboxColumn("Controlled Review"),
+                    "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
+                    "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
+                },
+            )
+
+            coaching_rows = coaching_view.sort_values("dt", ascending=False).reset_index(drop=True)
+            def format_coaching_transaction(idx):
+                event_dt = pd.to_datetime(coaching_rows.loc[idx, "dt"], errors="coerce")
+                event_label = event_dt.strftime("%Y-%m-%d %H:%M") if pd.notna(event_dt) else "Unknown time"
+                return (
+                    f"{event_label} | "
+                    f"{coaching_rows.loc[idx, 'user_name']} | "
+                    f"{coaching_rows.loc[idx, 'device']} | "
+                    f"{coaching_rows.loc[idx, 'med_id']} | "
+                    f"{coaching_rows.loc[idx, 'location']}"
+                )
+
+            selected_idx = st.selectbox(
+                "Transaction to document",
+                list(coaching_rows.index),
+                format_func=format_coaching_transaction,
+                key="pends_coaching_selected_row",
+            )
+            selected_row = coaching_rows.loc[selected_idx]
+
+            with st.form("pends_controlled_pocket_coaching_form"):
+                c1, c2, c3 = st.columns(3)
+                coaching_date = c1.date_input(
+                    "Coaching date",
+                    value=date.today(),
+                    key="pends_coaching_date",
+                )
+                status = c2.selectbox(
+                    "Status",
+                    ["Closed", "Follow Up", "Open"],
+                    index=0,
+                    key="pends_coaching_status",
+                )
+                needs_follow_up = c3.checkbox(
+                    "Add follow-up",
+                    value=False,
+                    key="pends_coaching_needs_follow_up",
+                )
+                follow_up_date = (
+                    st.date_input("Follow-up date", value=date.today(), key="pends_coaching_follow_up_date")
+                    if needs_follow_up
+                    else None
+                )
+                coaching_note = st.text_area(
+                    "Coaching notes",
+                    value=(
+                        "Reviewed with staff that controlled medications must be pended to a lidded cubie pocket, "
+                        "not an open matrix drawer/pocket. Staff acknowledged."
+                    ),
+                    height=120,
+                    key="pends_coaching_note_text",
+                )
+                submitted = st.form_submit_button("Save to Coaching Page")
+
+            if submitted:
+                if not str(selected_row.get("user_name") or "").strip():
+                    st.warning("This transaction does not have a user name to attach the coaching note to.")
+                elif not coaching_note.strip():
+                    st.warning("Add a coaching note before saving.")
+                else:
+                    save_pend_coaching_note(
+                        selected_row,
+                        coaching_date=coaching_date,
+                        follow_up_date=follow_up_date,
+                        status=status,
+                        coaching_note=coaching_note,
+                    )
+                    st.success("Coaching note saved with the pend transaction attached as evidence.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 5 — OUTLIER DETECTOR
