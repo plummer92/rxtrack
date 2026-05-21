@@ -13,6 +13,11 @@ App.apply_global_styles()
 engine = App.engine
 start_date, end_date = App.render_sidebar()
 
+
+def to_csv_bytes(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Inventory Quality Control",
@@ -943,6 +948,51 @@ def prep_device_inventory(df):
     return out
 
 
+def build_controlled_open_pocket_audit(device_inventory):
+    if device_inventory.empty:
+        return pd.DataFrame()
+
+    out = device_inventory.copy()
+    for col in ["med_class", "med_desc", "med_id", "device", "zone", "pocket_location", "status", "brand_name"]:
+        if col not in out.columns:
+            out[col] = ""
+        out[col] = out[col].fillna("").astype(str).str.strip()
+
+    med_class_text = out["med_class"].str.upper()
+    med_desc_text = out["med_desc"].str.upper()
+    control_class_pattern = r"\b(C[-\s]?(II|III|IV|V|2|3|4|5)|SCH(EDULE)?\s*(II|III|IV|V|2|3|4|5)|NARC(OTIC)?|CONTROL(LED)?|DEA)\b"
+    control_med_pattern = (
+        r"\b("
+        r"FENTANYL|HYDROMORPHONE|MORPHINE|OXYCODONE|HYDROCODONE|METHADONE|"
+        r"LORAZEPAM|MIDAZOLAM|DIAZEPAM|ALPRAZOLAM|CLONAZEPAM|PHENOBARBITAL|"
+        r"KETAMINE|LACOSAMIDE|PREGABALIN|TESTOSTERONE|CODEINE|TRAMADOL"
+        r")\b"
+    )
+    class_control = med_class_text.str.contains(control_class_pattern, regex=True, na=False)
+    desc_control = med_desc_text.str.contains(control_med_pattern, regex=True, na=False)
+    out["controlled_source"] = ""
+    out.loc[class_control, "controlled_source"] = "Med class"
+    out.loc[~class_control & desc_control, "controlled_source"] = "Medication name review"
+    out["is_controlled_review"] = class_control | desc_control
+
+    pocket_text = out["pocket_location"].str.upper()
+    out["is_matrix_open_pocket"] = pocket_text.str.contains(r"\bPKT\s*[-#]?\s*\d+\b", regex=True, na=False)
+    out["is_cubie_lidded_pocket"] = pocket_text.str.contains(r"\bPKT\s*[-#]?\s*[A-Z]\s*\d+\b", regex=True, na=False)
+    out["controlled_pocket_issue"] = out["is_controlled_review"] & out["is_matrix_open_pocket"] & ~out["is_cubie_lidded_pocket"]
+    out["pocket_safety_status"] = "OK"
+    out.loc[out["is_controlled_review"] & out["is_cubie_lidded_pocket"], "pocket_safety_status"] = "Controlled in cubie/lidded pocket"
+    out.loc[out["controlled_pocket_issue"], "pocket_safety_status"] = "Control in open matrix pocket"
+    out.loc[
+        out["is_controlled_review"] & ~out["is_matrix_open_pocket"] & ~out["is_cubie_lidded_pocket"],
+        "pocket_safety_status",
+    ] = "Controlled pocket type unclear"
+
+    return out[out["is_controlled_review"]].sort_values(
+        ["controlled_pocket_issue", "pocket_safety_status", "device", "pocket_location", "med_desc"],
+        ascending=[False, True, True, True, True],
+    )
+
+
 def prep_med_costs(df):
     if df.empty:
         return pd.DataFrame(columns=["med_id", "cost_per_unit"])
@@ -1504,6 +1554,7 @@ inventory_counts = load_inventory_counts()
 pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
 packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
+controlled_pocket_audit = build_controlled_open_pocket_audit(device_inventory)
 device_inventory_snapshot_dates = load_device_inventory_snapshot_dates()
 device_inventory_daily_delta = load_device_inventory_daily_delta()
 clinical_pyxis_activity = load_clinical_pyxis_activity(start_date, end_date)
@@ -1574,9 +1625,10 @@ for col in ["active_bud_review_dt", "reviewed_active_bud_date"]:
     isa_lifecycle[col] = pd.to_datetime(isa_lifecycle[col], errors="coerce")
 isa_lifecycle["active_bud_reviewed"] = isa_lifecycle["active_bud_review_dt"].notna()
 
-tab_lifecycle, tab_unload, tab_outdate, tab_buyer_review, tab_turns, tab_savings = st.tabs([
+tab_lifecycle, tab_unload, tab_control_pockets, tab_outdate, tab_buyer_review, tab_turns, tab_savings = st.tabs([
     "ISA Receiving Lifecycle",
     "Pyxis 28-Day Unload",
+    "Controlled Pocket Safety",
     "Outdate Tracking Audit",
     "Buyer No-Inventory Review",
     "Inventory Turns",
@@ -2503,6 +2555,102 @@ with tab_unload:
                         "waste_amount": st.column_config.NumberColumn("Waste", format="%.0f"),
                     },
                 )
+
+
+with tab_control_pockets:
+    st.subheader("Controlled Pocket Safety")
+    st.caption(
+        "Flags controlled-med rows in matrix/open pockets like `Pkt 2`. Controlled meds should be in cubie/lidded "
+        "pockets such as `Pkt C2` where the pocket has a lid."
+    )
+
+    if device_inventory.empty:
+        st.warning("No Device Inventory List rows are loaded yet. Upload the Device Inventory List first.")
+    elif controlled_pocket_audit.empty:
+        st.success("No controlled-med pocket rows were detected in the current Device Inventory List.")
+    else:
+        issue_rows = controlled_pocket_audit[controlled_pocket_audit["controlled_pocket_issue"]].copy()
+        unclear_rows = controlled_pocket_audit[
+            controlled_pocket_audit["pocket_safety_status"].eq("Controlled pocket type unclear")
+        ].copy()
+        lidded_rows = controlled_pocket_audit[
+            controlled_pocket_audit["pocket_safety_status"].eq("Controlled in cubie/lidded pocket")
+        ].copy()
+
+        cp1, cp2, cp3, cp4 = st.columns(4)
+        cp1.metric("Open Matrix Issues", f"{len(issue_rows):,}")
+        cp2.metric("Unclear Pocket Type", f"{len(unclear_rows):,}")
+        cp3.metric("Cubie/Lidded", f"{len(lidded_rows):,}")
+        cp4.metric("Controlled Review Rows", f"{len(controlled_pocket_audit):,}")
+
+        status_options = [
+            "Control in open matrix pocket",
+            "Controlled pocket type unclear",
+            "Controlled in cubie/lidded pocket",
+        ]
+        selected_statuses = st.multiselect(
+            "Pocket safety status",
+            status_options,
+            default=["Control in open matrix pocket", "Controlled pocket type unclear"],
+            key="controlled_pocket_status_filter",
+        )
+        device_options = sorted(controlled_pocket_audit["device"].dropna().unique().tolist())
+        selected_devices = st.multiselect(
+            "Device",
+            device_options,
+            default=device_options,
+            key="controlled_pocket_device_filter",
+        )
+        search = st.text_input(
+            "Search med, pocket, or class",
+            key="controlled_pocket_search",
+        )
+
+        audit_view = controlled_pocket_audit.copy()
+        if selected_statuses:
+            audit_view = audit_view[audit_view["pocket_safety_status"].isin(selected_statuses)]
+        if selected_devices:
+            audit_view = audit_view[audit_view["device"].isin(selected_devices)]
+        if search:
+            audit_view = audit_view[
+                audit_view["med_desc"].str.contains(search, case=False, na=False)
+                | audit_view["med_id"].str.contains(search, case=False, na=False)
+                | audit_view["pocket_location"].str.contains(search, case=False, na=False)
+                | audit_view["med_class"].str.contains(search, case=False, na=False)
+            ]
+
+        display_cols = [
+            "pocket_safety_status", "controlled_source", "device", "zone", "pocket_location",
+            "med_id", "med_desc", "med_class", "current_quantity", "min_qty", "max_qty",
+            "standard_stock", "active_orders", "status", "brand_name",
+        ]
+        st.dataframe(
+            audit_view[[c for c in display_cols if c in audit_view.columns]],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "pocket_safety_status": "Safety Status",
+                "controlled_source": "Controlled Source",
+                "device": "Device",
+                "zone": "Zone",
+                "pocket_location": "Pocket",
+                "med_id": "Med ID",
+                "med_desc": "Medication",
+                "med_class": "Med Class",
+                "current_quantity": st.column_config.NumberColumn("Qty", format="%.0f"),
+                "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
+                "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
+                "standard_stock": "Standard Stock",
+                "active_orders": "Active Orders",
+            },
+        )
+
+        st.download_button(
+            "Export controlled pocket safety audit",
+            data=to_csv_bytes(audit_view[[c for c in display_cols if c in audit_view.columns]]),
+            file_name="controlled_pocket_safety_audit.csv",
+            mime="text/csv",
+        )
 
 
 with tab_outdate:
