@@ -599,6 +599,37 @@ def load_inventory_counts():
 
 
 @st.cache_data(ttl=60)
+def load_latest_physical_inventory_snapshots():
+    sql = text("""
+        WITH latest AS (
+            SELECT MAX(snapshot_date) AS snapshot_date
+            FROM physical_inventory_snapshots
+        )
+        SELECT
+            p.snapshot_date,
+            p.source_filename,
+            p.isa_name,
+            p.med_id,
+            p.med_desc,
+            p.min_qty,
+            p.max_qty,
+            p.on_hand_qty,
+            p.location,
+            p.unit_cost,
+            p.extended_cost,
+            p.uploaded_at
+        FROM physical_inventory_snapshots p
+        JOIN latest l ON p.snapshot_date = l.snapshot_date
+        ORDER BY p.isa_name, p.med_desc, p.location
+    """)
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(sql, conn)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
 def load_current_pyxis_inventory():
     sql = text("""
         SELECT
@@ -991,6 +1022,73 @@ def build_controlled_open_pocket_audit(device_inventory):
         ["controlled_pocket_issue", "pocket_safety_status", "device", "pocket_location", "med_desc"],
         ascending=[False, True, True, True, True],
     )
+
+
+def prep_physical_inventory_snapshots(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    for col in ["isa_name", "med_id", "med_desc", "location", "source_filename"]:
+        if col not in out.columns:
+            out[col] = ""
+        out[col] = out[col].fillna("").astype(str).str.strip()
+    out["med_id"] = out["med_id"].str.upper()
+    for col in ["min_qty", "max_qty", "on_hand_qty", "unit_cost", "extended_cost"]:
+        if col not in out.columns:
+            out[col] = 0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+    for col in ["snapshot_date", "uploaded_at"]:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce")
+    return out
+
+
+def build_overmax_review(device_inventory, physical_inventory):
+    frames = []
+    if not device_inventory.empty:
+        pyxis = device_inventory.copy()
+        for col in ["current_quantity", "min_qty", "max_qty", "days_unused"]:
+            pyxis[col] = pd.to_numeric(pyxis[col], errors="coerce").fillna(0)
+        pyxis = pyxis[pyxis["max_qty"].gt(0) & pyxis["current_quantity"].gt(pyxis["max_qty"])].copy()
+        if not pyxis.empty:
+            pyxis["inventory_source"] = "Pyxis Device Inventory"
+            pyxis["site"] = pyxis["device"]
+            pyxis["quantity_on_hand"] = pyxis["current_quantity"]
+            pyxis["over_max_qty"] = pyxis["quantity_on_hand"] - pyxis["max_qty"]
+            pyxis["over_max_pct"] = pyxis["over_max_qty"] / pyxis["max_qty"].replace(0, pd.NA)
+            pyxis["review_location"] = pyxis["pocket_location"]
+            pyxis["snapshot_date"] = pyxis.get("snapshot_dt", pd.NaT)
+            frames.append(pyxis[[
+                "inventory_source", "site", "med_id", "med_desc", "review_location",
+                "quantity_on_hand", "min_qty", "max_qty", "over_max_qty", "over_max_pct",
+                "standard_stock", "days_unused", "status", "snapshot_date",
+            ]])
+    if not physical_inventory.empty:
+        car = physical_inventory.copy()
+        car = car[car["max_qty"].gt(0) & car["on_hand_qty"].gt(car["max_qty"])].copy()
+        if not car.empty:
+            car["inventory_source"] = "Physical Inventory / Carousel"
+            car["site"] = car["isa_name"]
+            car["quantity_on_hand"] = car["on_hand_qty"]
+            car["over_max_qty"] = car["quantity_on_hand"] - car["max_qty"]
+            car["over_max_pct"] = car["over_max_qty"] / car["max_qty"].replace(0, pd.NA)
+            car["review_location"] = car["location"]
+            car["standard_stock"] = ""
+            car["days_unused"] = pd.NA
+            car["status"] = ""
+            frames.append(car[[
+                "inventory_source", "site", "med_id", "med_desc", "review_location",
+                "quantity_on_hand", "min_qty", "max_qty", "over_max_qty", "over_max_pct",
+                "standard_stock", "days_unused", "status", "snapshot_date",
+            ]])
+    if not frames:
+        return pd.DataFrame()
+    review = pd.concat(frames, ignore_index=True)
+    review["over_max_pct"] = pd.to_numeric(review["over_max_pct"], errors="coerce").fillna(0)
+    review["review_priority"] = "Review"
+    review.loc[review["over_max_qty"].ge(10) | review["over_max_pct"].ge(1), "review_priority"] = "High"
+    review.loc[review["over_max_qty"].ge(25) | review["over_max_pct"].ge(2), "review_priority"] = "Very High"
+    return review.sort_values(["review_priority", "over_max_qty", "site", "med_desc"], ascending=[False, False, True, True])
 
 
 def prep_med_costs(df):
@@ -1551,6 +1649,7 @@ qc_actions = load_inventory_qc_actions()
 no_inventory_buyer_review = load_no_inventory_buyer_review()
 isa_items = prep_isa_items(load_latest_isa_items())
 inventory_counts = load_inventory_counts()
+physical_inventory = prep_physical_inventory_snapshots(load_latest_physical_inventory_snapshots())
 pyxis_inventory = prep_pyxis_inventory(load_current_pyxis_inventory())
 packaging = prep_packaging(load_packaging_history())
 device_inventory = prep_device_inventory(load_device_inventory())
@@ -1596,6 +1695,7 @@ inventory_turns_summary, inventory_turns_detail = build_inventory_turns(
     start_date,
     end_date,
 )
+overmax_review = build_overmax_review(device_inventory, physical_inventory)
 pyxis_exposure_summary = build_pyxis_exposure_summary(pyxis_inventory)
 packaging_summary = build_packaging_summary(packaging)
 manual_bud_summary = build_manual_bud_summary(qc_actions)
@@ -1625,13 +1725,14 @@ for col in ["active_bud_review_dt", "reviewed_active_bud_date"]:
     isa_lifecycle[col] = pd.to_datetime(isa_lifecycle[col], errors="coerce")
 isa_lifecycle["active_bud_reviewed"] = isa_lifecycle["active_bud_review_dt"].notna()
 
-tab_lifecycle, tab_unload, tab_control_pockets, tab_outdate, tab_buyer_review, tab_turns, tab_savings = st.tabs([
+tab_lifecycle, tab_unload, tab_control_pockets, tab_outdate, tab_buyer_review, tab_turns, tab_overmax, tab_savings = st.tabs([
     "ISA Receiving Lifecycle",
     "Pyxis 28-Day Unload",
     "Controlled Pocket Safety",
     "Outdate Tracking Audit",
     "Buyer No-Inventory Review",
     "Inventory Turns",
+    "Over Max Review",
     "Pyxis Overstock Savings",
 ])
 
@@ -2921,6 +3022,129 @@ with tab_turns:
             "Download inventory turns CSV",
             data=turns_view.to_csv(index=False).encode("utf-8"),
             file_name="pharmacy_inventory_turns.csv",
+            mime="text/csv",
+        )
+
+
+with tab_overmax:
+    st.subheader("Over Max Review")
+    st.caption(
+        "Shows Pyxis pockets and carousel/ISA physical inventory rows where quantity on hand is above the configured max."
+    )
+
+    if overmax_review.empty:
+        st.success("No over-max rows found in the currently loaded Device Inventory or Physical Inventory snapshot.")
+    else:
+        overmax_view = overmax_review.copy()
+        source_options = sorted(overmax_view["inventory_source"].dropna().unique())
+        priority_options = ["Very High", "High", "Review"]
+        o1, o2, o3, o4 = st.columns(4)
+        selected_sources = o1.multiselect(
+            "Inventory source",
+            source_options,
+            default=source_options,
+            key="overmax_source_filter",
+        )
+        selected_priorities = o2.multiselect(
+            "Priority",
+            priority_options,
+            default=priority_options,
+            key="overmax_priority_filter",
+        )
+        min_over_qty = o3.number_input(
+            "Minimum over max qty",
+            min_value=0,
+            value=1,
+            step=1,
+            key="overmax_min_qty",
+        )
+        overmax_search = o4.text_input("Med/site search", key="overmax_search")
+
+        if selected_sources:
+            overmax_view = overmax_view[overmax_view["inventory_source"].isin(selected_sources)]
+        if selected_priorities:
+            overmax_view = overmax_view[overmax_view["review_priority"].isin(selected_priorities)]
+        overmax_view = overmax_view[overmax_view["over_max_qty"].ge(min_over_qty)]
+        if overmax_search:
+            search_mask = (
+                overmax_view["site"].str.contains(overmax_search, case=False, na=False)
+                | overmax_view["med_id"].str.contains(overmax_search, case=False, na=False)
+                | overmax_view["med_desc"].str.contains(overmax_search, case=False, na=False)
+                | overmax_view["review_location"].str.contains(overmax_search, case=False, na=False)
+            )
+            overmax_view = overmax_view[search_mask]
+
+        om1, om2, om3, om4 = st.columns(4)
+        om1.metric("Over-Max Rows", f"{len(overmax_view):,}")
+        om2.metric("Total Over-Max Qty", f"{overmax_view['over_max_qty'].sum():,.0f}")
+        om3.metric("Sites Affected", f"{overmax_view['site'].nunique():,}")
+        om4.metric("Unique Meds", f"{overmax_view['med_id'].nunique():,}")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            source_summary = (
+                overmax_view.groupby("inventory_source", dropna=False)["over_max_qty"]
+                .sum()
+                .reset_index()
+            )
+            st.markdown("##### Over-Max Qty by Source")
+            if source_summary.empty:
+                st.info("No rows match the current filters.")
+            else:
+                st.plotly_chart(px.bar(source_summary, x="inventory_source", y="over_max_qty"), width="stretch")
+        with c2:
+            site_summary = (
+                overmax_view.groupby("site", dropna=False)["over_max_qty"]
+                .sum()
+                .sort_values(ascending=False)
+                .head(20)
+                .reset_index()
+            )
+            st.markdown("##### Top Sites by Over-Max Qty")
+            if site_summary.empty:
+                st.info("No sites match the current filters.")
+            else:
+                st.plotly_chart(px.bar(site_summary.sort_values("over_max_qty"), x="over_max_qty", y="site", orientation="h"), width="stretch")
+
+        display_cols = [
+            "review_priority",
+            "inventory_source",
+            "site",
+            "review_location",
+            "med_id",
+            "med_desc",
+            "quantity_on_hand",
+            "min_qty",
+            "max_qty",
+            "over_max_qty",
+            "over_max_pct",
+            "standard_stock",
+            "days_unused",
+            "status",
+            "snapshot_date",
+        ]
+        st.markdown("##### Over-Max Detail")
+        st.dataframe(
+            overmax_view.sort_values(["review_priority", "over_max_qty"], ascending=[False, False])[display_cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "review_priority": "Priority",
+                "inventory_source": "Source",
+                "review_location": "Location",
+                "quantity_on_hand": st.column_config.NumberColumn("Qty On Hand", format="%.0f"),
+                "min_qty": st.column_config.NumberColumn("Min", format="%.0f"),
+                "max_qty": st.column_config.NumberColumn("Max", format="%.0f"),
+                "over_max_qty": st.column_config.NumberColumn("Over Max Qty", format="%.0f"),
+                "over_max_pct": st.column_config.NumberColumn("Over Max %", format="%.0%"),
+                "days_unused": st.column_config.NumberColumn("Days Unused", format="%.0f"),
+                "snapshot_date": st.column_config.DateColumn("Snapshot", format="MM/DD/YYYY"),
+            },
+        )
+        st.download_button(
+            "Download over-max review CSV",
+            data=overmax_view.to_csv(index=False).encode("utf-8"),
+            file_name="inventory_over_max_review.csv",
             mime="text/csv",
         )
 
