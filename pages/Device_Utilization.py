@@ -85,12 +85,12 @@ def load_device_events(start, end, selected_devices):
         "devices": [_clean_device_name(d) for d in selected_devices],
     }
     sql = text("""
-        SELECT pk, dt, user_name, UPPER(TRIM(device)) AS device, med_id, med_desc,
+        SELECT pk, dt::timestamp AS dt, user_name, UPPER(TRIM(device)) AS device, med_id, med_desc,
                event_type, qty, beginning_qty, ending_qty, discrepancy_qty
         FROM events
-        WHERE dt >= :start_ts AND dt < :end_exclusive
+        WHERE dt::timestamp >= :start_ts AND dt::timestamp < :end_exclusive
           AND UPPER(TRIM(device)) IN :devices
-        ORDER BY dt
+        ORDER BY dt::timestamp
     """).bindparams(bindparam("devices", expanding=True))
     with engine.connect() as conn:
         df = pd.read_sql(sql, conn, params=params)
@@ -115,12 +115,12 @@ def load_device_orders(start, end, selected_devices):
         "devices": [_clean_device_name(d) for d in selected_devices],
     }
     sql = text("""
-        SELECT pk, queue_id, priority, dt, med_id, med_desc,
+        SELECT pk, queue_id, priority, dt::timestamp AS dt, med_id, med_desc,
                UPPER(TRIM(destination)) AS destination, user_name, qty
         FROM pharmacy_orders
-        WHERE dt >= :start_ts AND dt < :end_exclusive
+        WHERE dt::timestamp >= :start_ts AND dt::timestamp < :end_exclusive
           AND UPPER(TRIM(destination)) IN :devices
-        ORDER BY dt
+        ORDER BY dt::timestamp
     """).bindparams(bindparam("devices", expanding=True))
     with engine.connect() as conn:
         df = pd.read_sql(sql, conn, params=params)
