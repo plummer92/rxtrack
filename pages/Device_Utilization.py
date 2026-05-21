@@ -58,6 +58,11 @@ def load_device_candidates():
             WHERE destination IS NOT NULL
             """,
             """
+            SELECT DISTINCT station_name AS device
+            FROM audit_transaction_detail_rc
+            WHERE station_name IS NOT NULL
+            """,
+            """
             SELECT DISTINCT device AS device
             FROM device_inventory
             WHERE device IS NOT NULL
@@ -133,6 +138,52 @@ def load_device_orders(start, end, selected_devices):
     return df
 
 
+@st.cache_data(ttl=300)
+def load_audit_usage(start, end, selected_devices):
+    if not selected_devices:
+        return pd.DataFrame()
+    start_ts, end_exclusive = _date_bounds(start, end)
+    params = {
+        "start_ts": start_ts,
+        "end_exclusive": end_exclusive,
+        "devices": [_clean_device_name(d) for d in selected_devices],
+    }
+    sql = text("""
+        SELECT pk, dt::timestamp AS dt, user_name, user_type,
+               UPPER(TRIM(station_name)) AS device, med_id, med_desc,
+               transaction_type AS event_type, qty, beginning_qty, ending_qty,
+               waste_amount, location, drawer_subdrawer_pocket
+        FROM audit_transaction_detail_rc
+        WHERE dt::timestamp >= :start_ts AND dt::timestamp < :end_exclusive
+          AND UPPER(TRIM(station_name)) IN :devices
+          AND (
+                transaction_type ILIKE '%vend%'
+             OR transaction_type ILIKE '%waste%'
+             OR transaction_type ILIKE '%remove%'
+             OR transaction_type ILIKE '%dispense%'
+             OR transaction_type ILIKE '%withdraw%'
+          )
+        ORDER BY dt::timestamp
+    """).bindparams(bindparam("devices", expanding=True))
+    with engine.connect() as conn:
+        df = pd.read_sql(sql, conn, params=params)
+    if df.empty:
+        return df
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    for col in ["qty", "beginning_qty", "ending_qty", "waste_amount"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    for col in ["user_name", "user_type", "device", "med_id", "med_desc", "event_type", "location", "drawer_subdrawer_pocket"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    df["event_date"] = df["dt"].dt.date
+    df["hour"] = df["dt"].dt.hour
+    df["daypart"] = df["hour"].apply(lambda h: "AM" if pd.notna(h) and h < 12 else "PM")
+    df["abs_qty"] = df["qty"].abs()
+    waste_qty = df["waste_amount"].abs()
+    df.loc[df["abs_qty"].fillna(0).eq(0) & waste_qty.fillna(0).gt(0), "abs_qty"] = waste_qty
+    df["is_usage"] = True
+    return df
+
+
 def classify_events(events):
     if events.empty:
         return events
@@ -175,7 +226,7 @@ def metric_delta(current, prior):
     return f"{change:+.1f}% vs prior window"
 
 
-def build_daily(events, orders):
+def build_daily(events, orders, audit_usage):
     days = pd.date_range(start_date, end_date, freq="D").date
     daily = pd.DataFrame({"event_date": days})
     expected_cols = [
@@ -191,17 +242,19 @@ def build_daily(events, orders):
             refill_qty=("abs_qty", "sum"),
             refill_meds=("med_id", "nunique"),
         ).reset_index()
-        usage = events[events["is_usage"]].groupby("event_date").agg(
-            usage_rows=("pk", "count"),
-            usage_qty=("abs_qty", "sum"),
-            usage_meds=("med_id", "nunique"),
-        ).reset_index()
         zero = events[events["is_zero_event"]].groupby("event_date").agg(
             zero_inventory_events=("pk", "count"),
             zero_inventory_meds=("med_id", "nunique"),
         ).reset_index()
-        for frame in [refill, usage, zero]:
+        for frame in [refill, zero]:
             daily = daily.merge(frame, on="event_date", how="left")
+    if not audit_usage.empty:
+        usage = audit_usage.groupby("event_date").agg(
+            usage_rows=("pk", "count"),
+            usage_qty=("abs_qty", "sum"),
+            usage_meds=("med_id", "nunique"),
+        ).reset_index()
+        daily = daily.merge(usage, on="event_date", how="left")
     if not orders.empty:
         stockout = orders[orders["is_stockout"]].groupby("event_date").agg(
             stockout_orders=("pk", "count"),
@@ -229,12 +282,13 @@ def build_prior_comparison(selected_devices):
     prior_start = prior_end - timedelta(days=selected_days - 1)
     prior_events = classify_events(load_device_events(prior_start.date(), prior_end.date(), selected_devices))
     prior_orders = classify_orders(load_device_orders(prior_start.date(), prior_end.date(), selected_devices))
-    return prior_start.date(), prior_end.date(), prior_events, prior_orders
+    prior_usage = load_audit_usage(prior_start.date(), prior_end.date(), selected_devices)
+    return prior_start.date(), prior_end.date(), prior_events, prior_orders, prior_usage
 
 
-def summarize_window(events, orders):
+def summarize_window(events, orders, audit_usage):
     refills = events[events["is_refill"]] if not events.empty else pd.DataFrame()
-    usage = events[events["is_usage"]] if not events.empty else pd.DataFrame()
+    usage = audit_usage if not audit_usage.empty else pd.DataFrame()
     zero = events[events["is_zero_event"]] if not events.empty else pd.DataFrame()
     stockouts = orders[orders["is_stockout"]] if not orders.empty else pd.DataFrame()
     pulls = orders[orders["is_pyxis_pull"]] if not orders.empty else pd.DataFrame()
@@ -250,10 +304,10 @@ def summarize_window(events, orders):
     }
 
 
-def build_hourly_usage(events):
-    if events.empty:
+def build_hourly_usage(audit_usage):
+    if audit_usage.empty:
         return pd.DataFrame()
-    usage = events[events["is_usage"]].copy()
+    usage = audit_usage.copy()
     if usage.empty:
         return pd.DataFrame()
     return usage.groupby(["device", "hour"]).agg(
@@ -264,15 +318,16 @@ def build_hourly_usage(events):
     ).reset_index().sort_values(["device", "hour"])
 
 
-def build_refill_time_suggestions(events, orders):
+def build_refill_time_suggestions(events, orders, audit_usage):
     rows = []
     for device in selected_devices:
         dev_events = events[events["device"] == device].copy() if not events.empty else pd.DataFrame()
         dev_orders = orders[orders["destination"] == device].copy() if not orders.empty else pd.DataFrame()
+        dev_usage = audit_usage[audit_usage["device"] == device].copy() if not audit_usage.empty else pd.DataFrame()
 
         usage_hour = pd.DataFrame()
-        if not dev_events.empty:
-            usage_hour = dev_events[dev_events["is_usage"]].groupby("hour").agg(
+        if not dev_usage.empty:
+            usage_hour = dev_usage.groupby("hour").agg(
                 usage_events=("pk", "count"),
                 usage_qty=("abs_qty", "sum"),
             ).reset_index()
@@ -390,12 +445,13 @@ if not selected_devices:
 
 events = classify_events(load_device_events(start_date, end_date, selected_devices))
 orders = classify_orders(load_device_orders(start_date, end_date, selected_devices))
-daily = build_daily(events, orders)
-prior_start, prior_end, prior_events, prior_orders = build_prior_comparison(selected_devices)
-current_summary = summarize_window(events, orders)
-prior_summary = summarize_window(prior_events, prior_orders)
+audit_usage = load_audit_usage(start_date, end_date, selected_devices)
+daily = build_daily(events, orders, audit_usage)
+prior_start, prior_end, prior_events, prior_orders, prior_usage = build_prior_comparison(selected_devices)
+current_summary = summarize_window(events, orders, audit_usage)
+prior_summary = summarize_window(prior_events, prior_orders, prior_usage)
 
-if events.empty and orders.empty:
+if events.empty and orders.empty and audit_usage.empty:
     st.info("No event or pharmacy order activity found for the selected devices and date range.")
     st.stop()
 
@@ -458,11 +514,12 @@ with tab_trend:
     )
 
 with tab_usage:
-    usage_events = events[events["is_usage"]].copy() if not events.empty else pd.DataFrame()
+    usage_events = audit_usage.copy()
     if usage_events.empty:
-        st.info("No removal/dispense-style usage rows found for the selected devices and dates.")
+        st.info("No Audit Transaction Detail vend/waste/remove rows found for the selected devices and dates.")
     else:
-        usage_by_hour = build_hourly_usage(events)
+        st.caption("Usage comes from Audit Transaction Detail RC, using station name as the device.")
+        usage_by_hour = build_hourly_usage(audit_usage)
         usage_by_med = usage_events.groupby(["device", "med_id", "med_desc"]).agg(
             usage_events=("pk", "count"),
             usage_qty=("abs_qty", "sum"),
@@ -487,7 +544,7 @@ with tab_usage:
             st.dataframe(usage_by_day.sort_values(["event_date", "device"], ascending=[False, True]), width="stretch", hide_index=True)
 
 with tab_refill_times:
-    suggestions = build_refill_time_suggestions(events, orders)
+    suggestions = build_refill_time_suggestions(events, orders, audit_usage)
     if suggestions.empty:
         st.info("Not enough usage or stockout data to suggest refill timing.")
     else:
@@ -509,12 +566,13 @@ with tab_refill_times:
             },
         )
         pressure_detail = []
+        if not audit_usage.empty:
+            usage_detail = audit_usage.copy()
+            usage_detail["pressure_type"] = "Audit usage"
+            pressure_detail.append(usage_detail[["dt", "device", "hour", "pressure_type", "med_id", "med_desc", "event_type", "abs_qty", "ending_qty"]])
         if not events.empty:
-            pressure_events = events[events["is_usage"] | events["is_zero_event"]].copy()
-            pressure_events["pressure_type"] = pressure_events.apply(
-                lambda row: "Zero inventory" if row["is_zero_event"] else "Usage",
-                axis=1,
-            )
+            pressure_events = events[events["is_zero_event"]].copy()
+            pressure_events["pressure_type"] = "Zero inventory"
             pressure_detail.append(pressure_events[["dt", "device", "hour", "pressure_type", "med_id", "med_desc", "event_type", "abs_qty", "ending_qty"]])
         if not orders.empty:
             stock_events = orders[orders["is_stockout"]].copy()
@@ -533,7 +591,8 @@ with tab_daypart:
     frames = []
     if not events.empty:
         frames.append(events[events["is_refill"]].groupby(["device", "daypart"]).agg(refill_rows=("pk", "count"), refill_qty=("abs_qty", "sum")).reset_index())
-        frames.append(events[events["is_usage"]].groupby(["device", "daypart"]).agg(usage_rows=("pk", "count"), usage_qty=("abs_qty", "sum")).reset_index())
+    if not audit_usage.empty:
+        frames.append(audit_usage.groupby(["device", "daypart"]).agg(usage_rows=("pk", "count"), usage_qty=("abs_qty", "sum")).reset_index())
     if not orders.empty:
         frames.append(
             orders[orders["is_stockout"]].groupby(["destination", "daypart"]).agg(
@@ -583,7 +642,8 @@ with tab_meds:
     med_frames = []
     if not events.empty:
         med_frames.append(events[events["is_refill"]].groupby(["device", "med_id", "med_desc"]).agg(refill_rows=("pk", "count"), refill_qty=("abs_qty", "sum"), last_refill=("dt", "max")).reset_index())
-        med_frames.append(events[events["is_usage"]].groupby(["device", "med_id", "med_desc"]).agg(usage_rows=("pk", "count"), usage_qty=("abs_qty", "sum"), last_usage=("dt", "max")).reset_index())
+    if not audit_usage.empty:
+        med_frames.append(audit_usage.groupby(["device", "med_id", "med_desc"]).agg(usage_rows=("pk", "count"), usage_qty=("abs_qty", "sum"), last_usage=("dt", "max")).reset_index())
     if not orders.empty:
         med_frames.append(
             orders[orders["is_stockout"]].groupby(["destination", "med_id", "med_desc"]).agg(
@@ -620,11 +680,16 @@ with tab_meds:
 with tab_raw:
     raw_choice = st.segmented_control(
         "Raw table",
-        ["Inventory Events", "Pharmacy Orders"],
-        default="Inventory Events",
+        ["Audit Usage", "Inventory Events", "Pharmacy Orders"],
+        default="Audit Usage",
         key="device_utilization_raw_choice",
     )
-    if raw_choice == "Inventory Events":
+    if raw_choice == "Audit Usage":
+        if audit_usage.empty:
+            st.info("No Audit Transaction Detail usage rows found for the selected devices.")
+        else:
+            st.dataframe(audit_usage.sort_values("dt", ascending=False), width="stretch", hide_index=True)
+    elif raw_choice == "Inventory Events":
         if events.empty:
             st.info("No inventory events found for the selected devices.")
         else:
