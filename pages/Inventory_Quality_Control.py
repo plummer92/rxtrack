@@ -2231,12 +2231,13 @@ with tab_unload:
 
         f1, f2, f3, f4 = st.columns(4)
         device_options = sorted(device_view["device"].dropna().unique())
-        selected_devices = f1.multiselect("Device", device_options)
+        selected_devices = f1.multiselect("Device", device_options, key="unload_review_device_filter")
         status_order = ["Clinical Use Review", "High Priority", "Unload Due", "Exempt", "Compliant"]
         selected_unload_statuses = f2.multiselect(
             "Unload status",
             status_order,
             default=["Clinical Use Review", "High Priority", "Unload Due"],
+            key="unload_review_status_filter",
         )
         min_days = int(device_view["days_unused"].max()) if device_view["days_unused"].notna().any() else 0
         days_floor = f3.number_input("Minimum days unused", min_value=0, max_value=max(min_days, 29), value=29, step=1)
@@ -2706,8 +2707,13 @@ with tab_outdate:
             "Audit priority",
             priority_options,
             default=["High Review - Clinical Use", "Review"],
+            key="outdate_tracking_audit_priority_filter",
         )
-        selected_devices = f2.multiselect("Device", sorted(outdate_view["device"].dropna().unique()))
+        selected_devices = f2.multiselect(
+            "Device",
+            sorted(outdate_view["device"].dropna().unique()),
+            key="outdate_tracking_audit_device_filter",
+        )
         outdate_search = f3.text_input("Med/device search", key="outdate_tracking_audit_search")
 
         audit_rows = outdate_view.copy()
