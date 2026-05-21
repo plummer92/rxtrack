@@ -250,6 +250,110 @@ def summarize_window(events, orders):
     }
 
 
+def build_hourly_usage(events):
+    if events.empty:
+        return pd.DataFrame()
+    usage = events[events["is_usage"]].copy()
+    if usage.empty:
+        return pd.DataFrame()
+    return usage.groupby(["device", "hour"]).agg(
+        usage_events=("pk", "count"),
+        usage_qty=("abs_qty", "sum"),
+        unique_meds=("med_id", "nunique"),
+        last_usage=("dt", "max"),
+    ).reset_index().sort_values(["device", "hour"])
+
+
+def build_refill_time_suggestions(events, orders):
+    rows = []
+    for device in selected_devices:
+        dev_events = events[events["device"] == device].copy() if not events.empty else pd.DataFrame()
+        dev_orders = orders[orders["destination"] == device].copy() if not orders.empty else pd.DataFrame()
+
+        usage_hour = pd.DataFrame()
+        if not dev_events.empty:
+            usage_hour = dev_events[dev_events["is_usage"]].groupby("hour").agg(
+                usage_events=("pk", "count"),
+                usage_qty=("abs_qty", "sum"),
+            ).reset_index()
+
+        zero_hour = pd.DataFrame()
+        if not dev_events.empty:
+            zero_hour = dev_events[dev_events["is_zero_event"]].groupby("hour").agg(
+                zero_inventory_events=("pk", "count"),
+            ).reset_index()
+
+        stock_hour = pd.DataFrame()
+        if not dev_orders.empty:
+            stock_hour = dev_orders[dev_orders["is_stockout"]].groupby("hour").agg(
+                stockout_orders=("pk", "count"),
+            ).reset_index()
+
+        hourly = pd.DataFrame({"hour": list(range(24))})
+        for frame in [usage_hour, zero_hour, stock_hour]:
+            if not frame.empty:
+                hourly = hourly.merge(frame, on="hour", how="left")
+        for col in ["usage_events", "usage_qty", "zero_inventory_events", "stockout_orders"]:
+            if col not in hourly.columns:
+                hourly[col] = 0
+        hourly = hourly.fillna(0)
+        hourly["pressure_score"] = (
+            hourly["usage_qty"].astype(float)
+            + hourly["usage_events"].astype(float)
+            + hourly["zero_inventory_events"].astype(float) * 5
+            + hourly["stockout_orders"].astype(float) * 8
+        )
+
+        pressure = hourly[hourly["pressure_score"] > 0].copy()
+        if pressure.empty:
+            rows.append({
+                "device": device,
+                "suggested_second_refill": "Not enough usage data",
+                "peak_pressure_hour": "",
+                "pressure_score": 0,
+                "usage_qty": 0,
+                "stockout_orders": 0,
+                "zero_inventory_events": 0,
+                "current_refill_pattern": "No refill/load rows found",
+                "rationale": "No usage, stockout, or zero-inventory pressure was found in the selected range.",
+            })
+            continue
+
+        pm_pressure = pressure[pressure["hour"] >= 10]
+        target_pool = pm_pressure if not pm_pressure.empty else pressure
+        peak = target_pool.sort_values(["pressure_score", "stockout_orders", "zero_inventory_events", "usage_qty"], ascending=False).iloc[0]
+        suggested_hour = max(int(peak["hour"]) - 1, 0)
+
+        refill_times = []
+        if not dev_events.empty:
+            refills = dev_events[dev_events["is_refill"]].copy()
+            if not refills.empty:
+                refill_counts = refills.groupby("hour").size().sort_values(ascending=False)
+                refill_times = [f"{int(hour):02d}:00 ({int(count)})" for hour, count in refill_counts.head(3).items()]
+
+        pressure_reasons = []
+        if peak["stockout_orders"] > 0:
+            pressure_reasons.append(f"{int(peak['stockout_orders'])} stockout order(s)")
+        if peak["zero_inventory_events"] > 0:
+            pressure_reasons.append(f"{int(peak['zero_inventory_events'])} zero-ending event(s)")
+        if peak["usage_qty"] > 0:
+            pressure_reasons.append(f"{peak['usage_qty']:.0f} usage qty")
+
+        rows.append({
+            "device": device,
+            "suggested_second_refill": f"{suggested_hour:02d}:00",
+            "peak_pressure_hour": f"{int(peak['hour']):02d}:00",
+            "pressure_score": peak["pressure_score"],
+            "usage_qty": peak["usage_qty"],
+            "stockout_orders": peak["stockout_orders"],
+            "zero_inventory_events": peak["zero_inventory_events"],
+            "current_refill_pattern": ", ".join(refill_times) if refill_times else "No refill/load rows found",
+            "rationale": "Peak pressure around " + f"{int(peak['hour']):02d}:00 from " + ", ".join(pressure_reasons) + ".",
+        })
+
+    return pd.DataFrame(rows)
+
+
 candidate_devices = load_device_candidates()
 default_devices = [device for device in DEFAULT_CATHLAB_DEVICES if device in candidate_devices]
 if not default_devices:
@@ -318,8 +422,10 @@ elif refill_up or usage_up:
 else:
     st.success("No clear demand increase versus the prior comparable window for the selected devices.")
 
-tab_trend, tab_daypart, tab_stockout, tab_meds, tab_raw = st.tabs([
+tab_trend, tab_usage, tab_refill_times, tab_daypart, tab_stockout, tab_meds, tab_raw = st.tabs([
     "Daily Trend",
+    "Usage",
+    "Optimal Refill Times",
     "AM / PM Split",
     "Stockout Pressure",
     "Medication Detail",
@@ -350,6 +456,78 @@ with tab_trend:
             "pyxis_pull_qty": st.column_config.NumberColumn("Pyxis Pull Qty", format="%.0f"),
         },
     )
+
+with tab_usage:
+    usage_events = events[events["is_usage"]].copy() if not events.empty else pd.DataFrame()
+    if usage_events.empty:
+        st.info("No removal/dispense-style usage rows found for the selected devices and dates.")
+    else:
+        usage_by_hour = build_hourly_usage(events)
+        usage_by_med = usage_events.groupby(["device", "med_id", "med_desc"]).agg(
+            usage_events=("pk", "count"),
+            usage_qty=("abs_qty", "sum"),
+            first_usage=("dt", "min"),
+            last_usage=("dt", "max"),
+        ).reset_index().sort_values(["usage_qty", "usage_events"], ascending=False)
+        usage_by_day = usage_events.groupby(["device", "event_date"]).agg(
+            usage_events=("pk", "count"),
+            usage_qty=("abs_qty", "sum"),
+            unique_meds=("med_id", "nunique"),
+        ).reset_index()
+        st.plotly_chart(
+            px.bar(usage_by_hour, x="hour", y="usage_qty", color="device", barmode="group"),
+            width="stretch",
+        )
+        u1, u2 = st.columns(2)
+        with u1:
+            st.subheader("Usage by Medication")
+            st.dataframe(usage_by_med, width="stretch", hide_index=True)
+        with u2:
+            st.subheader("Daily Usage")
+            st.dataframe(usage_by_day.sort_values(["event_date", "device"], ascending=[False, True]), width="stretch", hide_index=True)
+
+with tab_refill_times:
+    suggestions = build_refill_time_suggestions(events, orders)
+    if suggestions.empty:
+        st.info("Not enough usage or stockout data to suggest refill timing.")
+    else:
+        st.caption("Suggestion is one hour before the highest weighted pressure hour. Stockout orders and zero-ending inventory events count more heavily than normal usage.")
+        st.dataframe(
+            suggestions,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "device": st.column_config.TextColumn("Device"),
+                "suggested_second_refill": st.column_config.TextColumn("Suggested Second Refill"),
+                "peak_pressure_hour": st.column_config.TextColumn("Peak Pressure Hour"),
+                "pressure_score": st.column_config.NumberColumn("Pressure Score", format="%.1f"),
+                "usage_qty": st.column_config.NumberColumn("Usage Qty At Peak", format="%.0f"),
+                "stockout_orders": st.column_config.NumberColumn("Stockouts At Peak", format="%.0f"),
+                "zero_inventory_events": st.column_config.NumberColumn("Zero Events At Peak", format="%.0f"),
+                "current_refill_pattern": st.column_config.TextColumn("Current Refill Pattern"),
+                "rationale": st.column_config.TextColumn("Why"),
+            },
+        )
+        pressure_detail = []
+        if not events.empty:
+            pressure_events = events[events["is_usage"] | events["is_zero_event"]].copy()
+            pressure_events["pressure_type"] = pressure_events.apply(
+                lambda row: "Zero inventory" if row["is_zero_event"] else "Usage",
+                axis=1,
+            )
+            pressure_detail.append(pressure_events[["dt", "device", "hour", "pressure_type", "med_id", "med_desc", "event_type", "abs_qty", "ending_qty"]])
+        if not orders.empty:
+            stock_events = orders[orders["is_stockout"]].copy()
+            if not stock_events.empty:
+                stock_events = stock_events.rename(columns={"destination": "device"})
+                stock_events["pressure_type"] = "Stockout order"
+                stock_events["event_type"] = stock_events["priority"]
+                stock_events["ending_qty"] = pd.NA
+                pressure_detail.append(stock_events[["dt", "device", "hour", "pressure_type", "med_id", "med_desc", "event_type", "abs_qty", "ending_qty"]])
+        if pressure_detail:
+            detail = pd.concat(pressure_detail, ignore_index=True).sort_values("dt", ascending=False)
+            with st.expander("Rows behind the timing suggestion", expanded=False):
+                st.dataframe(detail, width="stretch", hide_index=True)
 
 with tab_daypart:
     frames = []
