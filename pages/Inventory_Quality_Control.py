@@ -1085,6 +1085,15 @@ def build_overmax_review(device_inventory, physical_inventory):
         return pd.DataFrame()
     review = pd.concat(frames, ignore_index=True)
     review["over_max_pct"] = pd.to_numeric(review["over_max_pct"], errors="coerce").fillna(0)
+    med_id_text = review["med_id"].fillna("").astype(str).str.upper()
+    med_desc_text = review["med_desc"].fillna("").astype(str).str.upper()
+    review["overmax_exclusion_reason"] = ""
+    patient_cassette_mask = med_id_text.eq("PATCAS") | med_desc_text.str.contains(
+        r"PATIENT\s*CASSETTE|CASSETTE\s*PATIENT",
+        regex=True,
+        na=False,
+    )
+    review.loc[patient_cassette_mask, "overmax_exclusion_reason"] = "Patient cassette/workflow supply"
     review["review_priority"] = "Review"
     review.loc[review["over_max_qty"].ge(10) | review["over_max_pct"].ge(1), "review_priority"] = "High"
     review.loc[review["over_max_qty"].ge(25) | review["over_max_pct"].ge(2), "review_priority"] = "Very High"
@@ -3059,11 +3068,19 @@ with tab_overmax:
             key="overmax_min_qty",
         )
         overmax_search = o4.text_input("Med/site search", key="overmax_search")
+        show_excluded_overmax = st.toggle(
+            "Show excluded workflow/supply rows",
+            value=False,
+            key="overmax_show_excluded",
+            help="Patient cassette rows are hidden by default because they are workflow supplies, not medication over-max cleanup.",
+        )
 
         if selected_sources:
             overmax_view = overmax_view[overmax_view["inventory_source"].isin(selected_sources)]
         if selected_priorities:
             overmax_view = overmax_view[overmax_view["review_priority"].isin(selected_priorities)]
+        if not show_excluded_overmax and "overmax_exclusion_reason" in overmax_view.columns:
+            overmax_view = overmax_view[overmax_view["overmax_exclusion_reason"].fillna("").eq("")]
         overmax_view = overmax_view[overmax_view["over_max_qty"].ge(min_over_qty)]
         if overmax_search:
             search_mask = (
@@ -3121,6 +3138,7 @@ with tab_overmax:
             "standard_stock",
             "days_unused",
             "status",
+            "overmax_exclusion_reason",
             "snapshot_date",
         ]
         st.markdown("##### Over-Max Detail")
