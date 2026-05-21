@@ -30,6 +30,7 @@ REFILL_EXCLUDE_PATTERN = r"cancel|unload|empty|outdate"
 USAGE_PATTERN = r"remove|dispense|vend|deduct|withdraw|issue|administer"
 USAGE_EXCLUDE_PATTERN = r"return|refill|restock|load|unload|verify|count|cancel|waste|outdate|expire"
 STOCKOUT_PATTERN = r"stock\s*out|stockout"
+CLINICAL_USER_PATTERN = r"nurse|anesthesia|respiratory|physician|provider"
 
 
 def _date_bounds(start, end):
@@ -318,7 +319,79 @@ def build_hourly_usage(audit_usage):
     ).reset_index().sort_values(["device", "hour"])
 
 
-def build_refill_time_suggestions(events, orders, audit_usage):
+def build_zero_gap_analysis(events, audit_usage):
+    if audit_usage.empty:
+        return pd.DataFrame()
+    clinical_zero = audit_usage[
+        audit_usage["ending_qty"].fillna(1).le(0)
+        & audit_usage["user_type"].str.contains(CLINICAL_USER_PATTERN, case=False, regex=True, na=False)
+    ].copy()
+    if clinical_zero.empty:
+        return pd.DataFrame()
+
+    pharmacy_zero = pd.DataFrame()
+    if not events.empty:
+        verify_mask = events["event_type"].str.contains(r"verify|count|inventory", case=False, regex=True, na=False)
+        refill_mask = events["is_refill"]
+        pharmacy_zero = events[
+            (events["ending_qty"].fillna(1).le(0) & verify_mask) | refill_mask
+        ].copy()
+
+    rows = []
+    for _, zero_row in clinical_zero.sort_values("dt").iterrows():
+        matches = pd.DataFrame()
+        if not pharmacy_zero.empty:
+            matches = pharmacy_zero[
+                (pharmacy_zero["device"] == zero_row["device"])
+                & (pharmacy_zero["med_id"] == zero_row["med_id"])
+                & (pharmacy_zero["dt"] >= zero_row["dt"])
+            ].sort_values("dt")
+        next_staff = matches.iloc[0] if not matches.empty else None
+        gap_hours = None
+        if next_staff is not None:
+            gap_hours = (next_staff["dt"] - zero_row["dt"]).total_seconds() / 3600.0
+        rows.append({
+            "device": zero_row["device"],
+            "med_id": zero_row["med_id"],
+            "med_desc": zero_row["med_desc"],
+            "clinical_zero_time": zero_row["dt"],
+            "clinical_user": zero_row["user_name"],
+            "clinical_user_type": zero_row["user_type"],
+            "clinical_event": zero_row["event_type"],
+            "clinical_qty": zero_row["abs_qty"],
+            "next_staff_zero_or_refill": next_staff["dt"] if next_staff is not None else pd.NaT,
+            "staff_user": next_staff["user_name"] if next_staff is not None else "",
+            "staff_event": next_staff["event_type"] if next_staff is not None else "",
+            "gap_hours": gap_hours,
+            "gap_status": "No later staff zero/refill found" if next_staff is None else "Matched",
+        })
+    return pd.DataFrame(rows).sort_values(["gap_hours", "clinical_zero_time"], ascending=[False, False])
+
+
+def _is_blocked_hour(hour, blocked_start, blocked_end):
+    if blocked_start == blocked_end:
+        return False
+    if blocked_start < blocked_end:
+        return blocked_start <= hour < blocked_end
+    return hour >= blocked_start or hour < blocked_end
+
+
+def _outside_blocked_hours(hours, blocked_start, blocked_end):
+    if not hours:
+        return set()
+    return {hour for hour in hours if not _is_blocked_hour(int(hour), blocked_start, blocked_end)}
+
+
+def _suggest_reachable_refill_label(pressure_hour, blocked_start, blocked_end):
+    pressure_hour = int(pressure_hour)
+    if _is_blocked_hour(pressure_hour, blocked_start, blocked_end):
+        pre_hour = max(int(blocked_start) - 1, 0)
+        post_hour = int(blocked_end) % 24
+        return f"{pre_hour:02d}:00 top-off or {post_hour:02d}:00 post-case"
+    return f"{max(pressure_hour - 1, 0):02d}:00"
+
+
+def build_refill_time_suggestions(events, orders, audit_usage, blocked_start, blocked_end):
     rows = []
     for device in selected_devices:
         dev_events = events[events["device"] == device].copy() if not events.empty else pd.DataFrame()
@@ -385,8 +458,10 @@ def build_refill_time_suggestions(events, orders, audit_usage):
                 refill_times = [f"{int(hour):02d}:00 ({int(count)})" for hour, count in refill_counts.head(3).items()]
                 current_refill_pattern = ", ".join(refill_times)
 
-        pm_pressure = pressure[pressure["hour"] >= 10]
-        target_pool = pm_pressure if not pm_pressure.empty else pressure
+        accessible_pressure = pressure[
+            ~pressure["hour"].astype(int).apply(lambda hour: _is_blocked_hour(hour, blocked_start, blocked_end))
+        ].copy()
+        target_pool = accessible_pressure if not accessible_pressure.empty else pressure
         if refill_hours:
             target_pool = target_pool[~target_pool["hour"].astype(int).isin(refill_hours)]
         if target_pool.empty:
@@ -395,14 +470,23 @@ def build_refill_time_suggestions(events, orders, audit_usage):
             rationale_prefix = "The strongest usage/stockout pressure falls inside the current refill pattern"
         else:
             peak = target_pool.sort_values(["pressure_score", "stockout_orders", "usage_qty"], ascending=False).iloc[0]
-            suggested_hour = max(int(peak["hour"]) - 1, 0)
-            overlaps_refill_window = bool(refill_hours) and any(abs(suggested_hour - hour) <= 1 for hour in refill_hours)
+            suggested_label = _suggest_reachable_refill_label(peak["hour"], blocked_start, blocked_end)
+            suggested_hours = {
+                int(part[:2])
+                for part in suggested_label.split()
+                if len(part) >= 5 and part[:2].isdigit() and part[2:3] == ":"
+            }
+            accessible_suggested_hours = _outside_blocked_hours(suggested_hours, blocked_start, blocked_end)
+            overlaps_refill_window = bool(refill_hours) and any(
+                abs(suggested_hour - refill_hour) <= 1
+                for suggested_hour in accessible_suggested_hours
+                for refill_hour in refill_hours
+            )
             if overlaps_refill_window:
                 suggested_label = "Already covered"
                 rationale_prefix = "The suggested hour overlaps the current refill window"
             else:
-                suggested_label = f"{suggested_hour:02d}:00"
-                rationale_prefix = "Candidate second refill time"
+                rationale_prefix = "Candidate reachable refill window"
 
         pressure_reasons = []
         if peak["stockout_orders"] > 0:
@@ -424,7 +508,8 @@ def build_refill_time_suggestions(events, orders, audit_usage):
             "current_refill_pattern": current_refill_pattern,
             "rationale": (
                 f"{rationale_prefix}: peak usage/stockout pressure around {int(peak['hour']):02d}:00 "
-                f"from {', '.join(pressure_reasons)}. Verified-zero rows ({verified_zero_total}) were not scored."
+                f"from {', '.join(pressure_reasons)}. Room access limited {int(blocked_start):02d}:00-"
+                f"{int(blocked_end):02d}:00. Verified-zero rows ({verified_zero_total}) were not scored."
             ),
         })
 
@@ -500,10 +585,11 @@ elif refill_up or usage_up:
 else:
     st.success("No clear demand increase versus the prior comparable window for the selected devices.")
 
-tab_trend, tab_usage, tab_refill_times, tab_daypart, tab_stockout, tab_meds, tab_raw = st.tabs([
+tab_trend, tab_usage, tab_refill_times, tab_zero_gap, tab_daypart, tab_stockout, tab_meds, tab_raw = st.tabs([
     "Daily Trend",
     "Usage",
     "Optimal Refill Times",
+    "Vend-to-Zero Gap",
     "AM / PM Split",
     "Stockout Pressure",
     "Medication Detail",
@@ -566,7 +652,28 @@ with tab_usage:
             st.dataframe(usage_by_day.sort_values(["event_date", "device"], ascending=[False, True]), width="stretch", hide_index=True)
 
 with tab_refill_times:
-    suggestions = build_refill_time_suggestions(events, orders, audit_usage)
+    a1, a2 = st.columns(2)
+    with a1:
+        blocked_start = st.number_input(
+            "Room limited-access start hour",
+            min_value=0,
+            max_value=23,
+            value=7,
+            step=1,
+            key="device_utilization_blocked_start",
+            help="Default assumes scheduled Cath Lab procedure activity starts around 07:00.",
+        )
+    with a2:
+        blocked_end = st.number_input(
+            "Room limited-access end hour",
+            min_value=0,
+            max_value=23,
+            value=17,
+            step=1,
+            key="device_utilization_blocked_end",
+            help="Default assumes the room is easier to access again around 17:00.",
+        )
+    suggestions = build_refill_time_suggestions(events, orders, audit_usage, int(blocked_start), int(blocked_end))
     if suggestions.empty:
         st.info("Not enough usage or stockout data to suggest refill timing.")
     else:
@@ -608,6 +715,34 @@ with tab_refill_times:
             detail = pd.concat(pressure_detail, ignore_index=True).sort_values("dt", ascending=False)
             with st.expander("Rows behind the timing suggestion", expanded=False):
                 st.dataframe(detail, width="stretch", hide_index=True)
+
+with tab_zero_gap:
+    gap_df = build_zero_gap_analysis(events, audit_usage)
+    if gap_df.empty:
+        st.info("No clinical Audit Detail rows were found where a vend/remove/waste left the device ending quantity at zero.")
+    else:
+        g1, g2, g3 = st.columns(3)
+        matched_gaps = gap_df[gap_df["gap_hours"].notna()]
+        g1.metric("Clinical Vend-to-Zero Rows", f"{len(gap_df):,}")
+        g2.metric("Matched to Staff Zero/Refill", f"{len(matched_gaps):,}")
+        g3.metric(
+            "Median Gap",
+            f"{matched_gaps['gap_hours'].median():.1f}h" if not matched_gaps.empty else "-",
+        )
+        st.caption(
+            "This pairs a clinical Audit Transaction Detail row that ended at zero with the next pharmacy verify-zero/refill row for the same device and med."
+        )
+        st.dataframe(
+            gap_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "clinical_zero_time": st.column_config.DatetimeColumn("Clinical Zero Time", format="MM/DD/YY HH:mm"),
+                "next_staff_zero_or_refill": st.column_config.DatetimeColumn("Next Staff Zero/Refill", format="MM/DD/YY HH:mm"),
+                "gap_hours": st.column_config.NumberColumn("Gap Hours", format="%.1f"),
+                "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
+            },
+        )
 
 with tab_daypart:
     frames = []
