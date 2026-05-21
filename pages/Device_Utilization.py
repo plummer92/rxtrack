@@ -355,55 +355,77 @@ def build_refill_time_suggestions(events, orders, audit_usage):
         hourly["pressure_score"] = (
             hourly["usage_qty"].astype(float)
             + hourly["usage_events"].astype(float)
-            + hourly["zero_inventory_events"].astype(float) * 5
             + hourly["stockout_orders"].astype(float) * 8
         )
 
         pressure = hourly[hourly["pressure_score"] > 0].copy()
         if pressure.empty:
+            verified_zero_total = int(hourly["zero_inventory_events"].sum())
             rows.append({
                 "device": device,
-                "suggested_second_refill": "Not enough usage data",
+                "suggested_second_refill": "No extra refill signal",
                 "peak_pressure_hour": "",
                 "pressure_score": 0,
                 "usage_qty": 0,
                 "stockout_orders": 0,
-                "zero_inventory_events": 0,
+                "verified_zero_events": verified_zero_total,
                 "current_refill_pattern": "No refill/load rows found",
-                "rationale": "No usage, stockout, or zero-inventory pressure was found in the selected range.",
+                "rationale": "No Audit Detail usage or stockout-order pressure was found. Verified-zero rows are context only.",
             })
             continue
 
-        pm_pressure = pressure[pressure["hour"] >= 10]
-        target_pool = pm_pressure if not pm_pressure.empty else pressure
-        peak = target_pool.sort_values(["pressure_score", "stockout_orders", "zero_inventory_events", "usage_qty"], ascending=False).iloc[0]
-        suggested_hour = max(int(peak["hour"]) - 1, 0)
-
+        refill_hours = set()
         refill_times = []
+        current_refill_pattern = "No refill/load rows found"
         if not dev_events.empty:
             refills = dev_events[dev_events["is_refill"]].copy()
             if not refills.empty:
                 refill_counts = refills.groupby("hour").size().sort_values(ascending=False)
+                refill_hours = {int(hour) for hour in refill_counts.index}
                 refill_times = [f"{int(hour):02d}:00 ({int(count)})" for hour, count in refill_counts.head(3).items()]
+                current_refill_pattern = ", ".join(refill_times)
+
+        pm_pressure = pressure[pressure["hour"] >= 10]
+        target_pool = pm_pressure if not pm_pressure.empty else pressure
+        if refill_hours:
+            target_pool = target_pool[~target_pool["hour"].astype(int).isin(refill_hours)]
+        if target_pool.empty:
+            peak = pressure.sort_values(["pressure_score", "stockout_orders", "usage_qty"], ascending=False).iloc[0]
+            suggested_label = "Already covered"
+            rationale_prefix = "The strongest usage/stockout pressure falls inside the current refill pattern"
+        else:
+            peak = target_pool.sort_values(["pressure_score", "stockout_orders", "usage_qty"], ascending=False).iloc[0]
+            suggested_hour = max(int(peak["hour"]) - 1, 0)
+            overlaps_refill_window = bool(refill_hours) and any(abs(suggested_hour - hour) <= 1 for hour in refill_hours)
+            if overlaps_refill_window:
+                suggested_label = "Already covered"
+                rationale_prefix = "The suggested hour overlaps the current refill window"
+            else:
+                suggested_label = f"{suggested_hour:02d}:00"
+                rationale_prefix = "Candidate second refill time"
 
         pressure_reasons = []
         if peak["stockout_orders"] > 0:
             pressure_reasons.append(f"{int(peak['stockout_orders'])} stockout order(s)")
-        if peak["zero_inventory_events"] > 0:
-            pressure_reasons.append(f"{int(peak['zero_inventory_events'])} zero-ending event(s)")
         if peak["usage_qty"] > 0:
             pressure_reasons.append(f"{peak['usage_qty']:.0f} usage qty")
+        if not pressure_reasons:
+            pressure_reasons.append("usage/stockout pressure")
+        verified_zero_total = int(hourly["zero_inventory_events"].sum())
 
         rows.append({
             "device": device,
-            "suggested_second_refill": f"{suggested_hour:02d}:00",
+            "suggested_second_refill": suggested_label,
             "peak_pressure_hour": f"{int(peak['hour']):02d}:00",
             "pressure_score": peak["pressure_score"],
             "usage_qty": peak["usage_qty"],
             "stockout_orders": peak["stockout_orders"],
-            "zero_inventory_events": peak["zero_inventory_events"],
-            "current_refill_pattern": ", ".join(refill_times) if refill_times else "No refill/load rows found",
-            "rationale": "Peak pressure around " + f"{int(peak['hour']):02d}:00 from " + ", ".join(pressure_reasons) + ".",
+            "verified_zero_events": verified_zero_total,
+            "current_refill_pattern": current_refill_pattern,
+            "rationale": (
+                f"{rationale_prefix}: peak usage/stockout pressure around {int(peak['hour']):02d}:00 "
+                f"from {', '.join(pressure_reasons)}. Verified-zero rows ({verified_zero_total}) were not scored."
+            ),
         })
 
     return pd.DataFrame(rows)
@@ -548,7 +570,7 @@ with tab_refill_times:
     if suggestions.empty:
         st.info("Not enough usage or stockout data to suggest refill timing.")
     else:
-        st.caption("Suggestion is one hour before the highest weighted pressure hour. Stockout orders and zero-ending inventory events count more heavily than normal usage.")
+        st.caption("Suggestion is one hour before the highest Audit Detail usage or stockout-order pressure outside the current refill window. Verified-zero rows are shown as context only.")
         st.dataframe(
             suggestions,
             width="stretch",
@@ -560,7 +582,7 @@ with tab_refill_times:
                 "pressure_score": st.column_config.NumberColumn("Pressure Score", format="%.1f"),
                 "usage_qty": st.column_config.NumberColumn("Usage Qty At Peak", format="%.0f"),
                 "stockout_orders": st.column_config.NumberColumn("Stockouts At Peak", format="%.0f"),
-                "zero_inventory_events": st.column_config.NumberColumn("Zero Events At Peak", format="%.0f"),
+                "verified_zero_events": st.column_config.NumberColumn("Verified Zero Rows", format="%.0f"),
                 "current_refill_pattern": st.column_config.TextColumn("Current Refill Pattern"),
                 "rationale": st.column_config.TextColumn("Why"),
             },
