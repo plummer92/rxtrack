@@ -428,6 +428,46 @@ def build_zero_gap_analysis(events, audit_usage):
     return pd.DataFrame(rows).sort_values(["refill_gap_hours", "verify_gap_hours", "clinical_zero_time"], ascending=[False, False, False])
 
 
+def add_daily_restock_expectation(gap_df, same_day_cutoff_hour, restock_due_hour):
+    if gap_df.empty:
+        return gap_df
+
+    df = gap_df.copy()
+    df["clinical_zero_time"] = pd.to_datetime(df["clinical_zero_time"], errors="coerce")
+    df["next_refill"] = pd.to_datetime(df["next_refill"], errors="coerce")
+
+    def expected_by(row):
+        zero_time = row["clinical_zero_time"]
+        if pd.isna(zero_time):
+            return pd.NaT
+        due_day = zero_time.normalize()
+        if zero_time.hour >= int(same_day_cutoff_hour):
+            due_day += pd.Timedelta(days=1)
+        return due_day + pd.Timedelta(hours=int(restock_due_hour))
+
+    df["expected_restock_by"] = df.apply(expected_by, axis=1)
+    df["hours_past_expected"] = (
+        df["next_refill"] - df["expected_restock_by"]
+    ).dt.total_seconds().div(3600)
+
+    def expectation_status(row):
+        expected = row["expected_restock_by"]
+        refill = row["next_refill"]
+        if pd.isna(expected):
+            return "Needs review"
+        if pd.isna(refill):
+            return "No refill found after clinical zero"
+        if refill <= expected:
+            return "Met expected restock window"
+        return "Missed expected restock window"
+
+    df["restock_expectation_status"] = df.apply(expectation_status, axis=1)
+    return df.sort_values(
+        ["restock_expectation_status", "hours_past_expected", "clinical_zero_time"],
+        ascending=[False, False, True],
+    )
+
+
 def _next_scheduled_pull_window(event_dt, pull_hour, window_hours):
     event_ts = pd.Timestamp(event_dt)
     scheduled = event_ts.normalize() + pd.Timedelta(hours=int(pull_hour))
@@ -1325,6 +1365,29 @@ with st.expander("Scheduled pull miss review assumptions", expanded=False):
             help="Looks this many hours before and after the scheduled pull hour for matching Pyxis pull rows.",
         )
 
+with st.expander("Daily restock expectation", expanded=False):
+    r1, r2 = st.columns(2)
+    with r1:
+        same_day_cutoff_hour = st.number_input(
+            "Same-day restock if zero before hour",
+            min_value=0,
+            max_value=23,
+            value=12,
+            step=1,
+            key="device_utilization_same_day_cutoff_hour",
+            help="A clinical zero before this hour is expected to be restocked the same day.",
+        )
+    with r2:
+        restock_due_hour = st.number_input(
+            "Expected restock complete by hour",
+            min_value=0,
+            max_value=23,
+            value=12,
+            step=1,
+            key="device_utilization_restock_due_hour",
+            help="The daily restock deadline used to flag late zero-to-restock rows.",
+        )
+
 events = classify_events(load_device_events(start_date, end_date, selected_devices))
 orders = classify_orders(load_device_orders(start_date, end_date, selected_devices))
 followup_end_date = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).date()
@@ -1336,7 +1399,11 @@ daily = build_daily(events, orders, audit_usage)
 prior_start, prior_end, prior_events, prior_orders, prior_usage = build_prior_comparison(selected_devices)
 current_summary = summarize_window(events, orders, audit_usage)
 prior_summary = summarize_window(prior_events, prior_orders, prior_usage)
-gap_df = build_zero_gap_analysis(followup_events, audit_usage)
+gap_df = add_daily_restock_expectation(
+    build_zero_gap_analysis(followup_events, audit_usage),
+    int(same_day_cutoff_hour),
+    int(restock_due_hour),
+)
 pull_miss_review = build_scheduled_pull_miss_review(
     gap_df,
     followup_orders,
@@ -1726,27 +1793,44 @@ with tab_zero_gap:
     if gap_df.empty:
         st.info("No clinical Audit Detail rows were found where a vend/remove/waste left the device ending quantity at zero.")
     else:
-        g1, g2, g3 = st.columns(3)
+        g1, g2, g3, g4 = st.columns(4)
         matched_gaps = gap_df[gap_df["gap_hours"].notna()]
+        missed_expected = gap_df[gap_df["restock_expectation_status"].eq("Missed expected restock window")]
         g1.metric("Clinical Vend-to-Zero Rows", f"{len(gap_df):,}")
         g2.metric("Matched to Refill/Load", f"{len(matched_gaps):,}")
         g3.metric(
             "Median Zero-to-Refill",
             f"{matched_gaps['refill_gap_hours'].median():.1f}h" if not matched_gaps.empty else "-",
         )
+        g4.metric("Missed Expected Restock", f"{len(missed_expected):,}")
         st.caption(
-            "This pairs a clinical Audit Transaction Detail removal/vend/dispense/withdraw that ended at zero with the next pharmacy verify-zero and refill/load for the same device and med. Waste-only rows are excluded."
+            "This pairs a clinical Audit Transaction Detail removal/vend/dispense/withdraw that ended at zero with the next pharmacy verify-zero and refill/load for the same device and med. "
+            f"Rows zeroed before {int(same_day_cutoff_hour):02d}:00 are expected by {int(restock_due_hour):02d}:00 the same day; later zeroes are expected by the next daily restock deadline."
         )
+        status_options = sorted(gap_df["restock_expectation_status"].dropna().unique())
+        default_status = ["Missed expected restock window"] if "Missed expected restock window" in status_options else status_options
+        restock_status_filter = st.multiselect(
+            "Restock expectation status",
+            status_options,
+            default=default_status,
+            key="device_utilization_gap_expectation_status",
+        )
+        gap_view = gap_df.copy()
+        if restock_status_filter:
+            gap_view = gap_view[gap_view["restock_expectation_status"].isin(restock_status_filter)].copy()
         st.dataframe(
-            gap_df,
+            gap_view,
             width="stretch",
             hide_index=True,
             column_config={
+                "restock_expectation_status": st.column_config.TextColumn("Expected Restock Status"),
                 "clinical_zero_time": st.column_config.DatetimeColumn("Clinical Zero Time", format="MM/DD/YY HH:mm"),
+                "expected_restock_by": st.column_config.DatetimeColumn("Expected Restock By", format="MM/DD/YY HH:mm"),
                 "next_staff_verify_zero": st.column_config.DatetimeColumn("Next Staff Verify Zero", format="MM/DD/YY HH:mm"),
                 "verify_gap_hours": st.column_config.NumberColumn("Zero-to-Verify Hours", format="%.1f"),
                 "next_refill": st.column_config.DatetimeColumn("Next Refill/Load", format="MM/DD/YY HH:mm"),
                 "refill_gap_hours": st.column_config.NumberColumn("Zero-to-Refill Hours", format="%.1f"),
+                "hours_past_expected": st.column_config.NumberColumn("Hours Past Expected", format="%.1f"),
                 "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
             },
         )
