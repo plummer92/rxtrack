@@ -1927,10 +1927,13 @@ with tab_pull_miss:
         p1.metric("Missing Next Pull", f"{miss_count:,}")
         p2.metric("Dropped Next Pull", f"{dropped_count:,}")
         p3.metric("Rows Reviewed", f"{len(pull_miss_review):,}")
-        st.warning(
-            "Rows marked missing are the ones to investigate for 11E/Tower-style issues: clinical use drove the pocket to zero, "
-            "but RxTrack did not find a matching Pyxis pull row for the next scheduled drop."
-        ) if miss_count else st.success("Every reviewed clinical zero had a matching pull row or was restocked before/inside the pull window.")
+        if miss_count:
+            st.warning(
+                "Rows marked missing are the ones to investigate for 11E/Tower-style issues: clinical use drove the pocket to zero, "
+                "but RxTrack did not find a matching Pyxis pull row for the next scheduled drop."
+            )
+        else:
+            st.success("Every reviewed clinical zero had a matching pull row or was restocked before/inside the pull window.")
 
         status_filter = st.multiselect(
             "Status",
