@@ -830,7 +830,7 @@ with tat_col:
         fig_tat.update_layout(height=360)
         st.plotly_chart(fig_tat, width="stretch")
 
-st.subheader("Workflow Timing Detail")
+st.subheader("Timing & Delays")
 if workflow_filtered.empty:
     st.info(
         "Upload the MedKeeper workflow detail exports as `IV Room Workflow Detail` to see initial creation, "
@@ -852,12 +852,25 @@ else:
         wf_timing = wf[timing_status].copy()
         working = wf_timing[wf_timing["category"].eq("Working")].copy()
         waiting = wf_timing[wf_timing["category"].eq("Waiting")].copy()
+        workflow_orders = wf_timing["order_lot_number"].nunique()
+        total_working_minutes = working["total_duration_minutes"].sum()
+        total_waiting_minutes = waiting["total_duration_minutes"].sum()
+        waiting_share = (
+            total_waiting_minutes / (total_working_minutes + total_waiting_minutes) * 100
+            if (total_working_minutes + total_waiting_minutes) > 0
+            else 0
+        )
 
         w1, w2, w3, w4 = st.columns(4)
-        w1.metric("Workflow Rows", f"{len(wf_timing):,}")
-        w2.metric("Working Minutes", f"{working['total_duration_minutes'].sum():,.1f}")
-        w3.metric("Waiting Minutes", f"{waiting['total_duration_minutes'].sum():,.1f}")
-        w4.metric("Orders/Lots", f"{wf_timing['order_lot_number'].nunique():,}")
+        w1.metric("Orders/Lots", f"{workflow_orders:,}")
+        w2.metric("Active Work Min", f"{total_working_minutes:,.1f}")
+        w3.metric("Queue / Waiting Min", f"{total_waiting_minutes:,.1f}")
+        w4.metric("Waiting Share", f"{waiting_share:.0f}%")
+
+        st.caption(
+            "Active work means someone was performing a workflow step. Queue / waiting means the order was sitting between steps "
+            "or waiting for the next person/action in MedKeeper."
+        )
 
         stage_summary = (
             wf_timing.groupby(["stage", "activity", "category"], as_index=False)
@@ -868,23 +881,151 @@ else:
                 p90_minutes=("total_duration_minutes", lambda s: s.quantile(0.90)),
             )
             .sort_values(["stage", "category", "total_minutes"], ascending=[True, True, False])
+            .rename(
+                columns={
+                    "stage": "Workflow Stage",
+                    "activity": "Step",
+                    "category": "Working vs Waiting",
+                    "rows": "Rows",
+                    "total_minutes": "Total Minutes",
+                    "median_minutes": "Median Minutes",
+                    "p90_minutes": "P90 Minutes",
+                }
+            )
         )
 
-        timing_tab, prep_tab, approve_tab, detail_tab = st.tabs(
-            ["Stage Timing", "Prepared By Working", "Approved By Working", "Order Timeline"]
+        longest_waits = waiting.sort_values("total_duration_minutes", ascending=False).copy()
+        wait_by_step = (
+            waiting.groupby(["stage", "activity"], as_index=False)
+            .agg(
+                waiting_rows=("pk", "count"),
+                total_wait_minutes=("total_duration_minutes", "sum"),
+                median_wait_minutes=("total_duration_minutes", "median"),
+                p90_wait_minutes=("total_duration_minutes", lambda s: s.quantile(0.90)),
+                orders=("order_lot_number", "nunique"),
+            )
+            .sort_values(["total_wait_minutes", "waiting_rows"], ascending=False)
+            .rename(columns={"stage": "Workflow Stage", "activity": "Step"})
+            if not waiting.empty
+            else pd.DataFrame()
+        )
+        prepare_delays = waiting[
+            waiting["activity"].str.contains("prepare|scan product|image preparation", case=False, na=False)
+            | waiting["stage"].str.contains("prepare", case=False, na=False)
+        ].copy()
+        approval_delays = waiting[
+            waiting["activity"].str.contains("approve|verification|secondary", case=False, na=False)
+            | waiting["stage"].str.contains("approve|verification|secondary", case=False, na=False)
+        ].copy()
+
+        timing_tab, waits_tab, prep_delay_tab, approve_delay_tab, prep_tab, approve_tab, detail_tab = st.tabs(
+            [
+                "Timing Summary",
+                "Longest Waits",
+                "Prepare Delays",
+                "Approval Delays",
+                "Preparer Work",
+                "Approver Work",
+                "Order Timeline",
+            ]
         )
         with timing_tab:
+            if not wait_by_step.empty:
+                st.markdown("**Where orders waited the most**")
+                st.dataframe(
+                    wait_by_step,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "waiting_rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                        "total_wait_minutes": st.column_config.NumberColumn("Total Wait Min", format="%.1f"),
+                        "median_wait_minutes": st.column_config.NumberColumn("Median Wait Min", format="%.1f"),
+                        "p90_wait_minutes": st.column_config.NumberColumn("P90 Wait Min", format="%.1f"),
+                        "orders": st.column_config.NumberColumn("Orders/Lots", format="%.0f"),
+                    },
+                )
+            st.markdown("**All workflow timing rows by step**")
             st.dataframe(
                 stage_summary,
                 width="stretch",
                 hide_index=True,
                 column_config={
-                    "rows": st.column_config.NumberColumn("Rows", format="%.0f"),
-                    "total_minutes": st.column_config.NumberColumn("Total Min", format="%.1f"),
-                    "median_minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
-                    "p90_minutes": st.column_config.NumberColumn("P90 Min", format="%.1f"),
+                    "Rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                    "Total Minutes": st.column_config.NumberColumn("Total Min", format="%.1f"),
+                    "Median Minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
+                    "P90 Minutes": st.column_config.NumberColumn("P90 Min", format="%.1f"),
                 },
             )
+
+        with waits_tab:
+            if longest_waits.empty:
+                st.info("No queue/waiting rows are loaded for the selected range.")
+            else:
+                wait_cols = [
+                    "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                    "stage", "activity", "total_duration_minutes", "prepared_by", "approved_by",
+                ]
+                st.caption("These are the individual orders/lots that sat the longest between workflow actions.")
+                st.dataframe(
+                    longest_waits[[c for c in wait_cols if c in longest_waits.columns]].head(50),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "start_dt": st.column_config.DatetimeColumn("Wait Start", format="MM/DD/YY HH:mm"),
+                        "stop_dt": st.column_config.DatetimeColumn("Wait End", format="MM/DD/YY HH:mm"),
+                        "stage": st.column_config.TextColumn("Workflow Stage"),
+                        "activity": st.column_config.TextColumn("Waiting For Step"),
+                        "total_duration_minutes": st.column_config.NumberColumn("Wait Min", format="%.1f"),
+                    },
+                )
+
+        with prep_delay_tab:
+            if prepare_delays.empty:
+                st.info("No prepare-related waiting rows are loaded for the selected range.")
+            else:
+                st.caption("Prepare delays are waiting rows tied to prepare / scan product / image preparation steps.")
+                prep_delay_cols = [
+                    "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                    "stage", "activity", "total_duration_minutes", "prepared_by",
+                ]
+                st.dataframe(
+                    prepare_delays.sort_values("total_duration_minutes", ascending=False)[
+                        [c for c in prep_delay_cols if c in prepare_delays.columns]
+                    ].head(50),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "start_dt": st.column_config.DatetimeColumn("Wait Start", format="MM/DD/YY HH:mm"),
+                        "stop_dt": st.column_config.DatetimeColumn("Wait End", format="MM/DD/YY HH:mm"),
+                        "stage": st.column_config.TextColumn("Workflow Stage"),
+                        "activity": st.column_config.TextColumn("Waiting For Step"),
+                        "total_duration_minutes": st.column_config.NumberColumn("Wait Min", format="%.1f"),
+                    },
+                )
+
+        with approve_delay_tab:
+            if approval_delays.empty:
+                st.info("No approval-related waiting rows are loaded for the selected range.")
+            else:
+                st.caption("Approval delays are waiting rows tied to approve, verification, or secondary approval steps.")
+                approve_delay_cols = [
+                    "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
+                    "stage", "activity", "total_duration_minutes", "approved_by",
+                ]
+                st.dataframe(
+                    approval_delays.sort_values("total_duration_minutes", ascending=False)[
+                        [c for c in approve_delay_cols if c in approval_delays.columns]
+                    ].head(50),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "start_dt": st.column_config.DatetimeColumn("Wait Start", format="MM/DD/YY HH:mm"),
+                        "stop_dt": st.column_config.DatetimeColumn("Wait End", format="MM/DD/YY HH:mm"),
+                        "stage": st.column_config.TextColumn("Workflow Stage"),
+                        "activity": st.column_config.TextColumn("Waiting For Step"),
+                        "total_duration_minutes": st.column_config.NumberColumn("Wait Min", format="%.1f"),
+                    },
+                )
 
         with prep_tab:
             prep_work = working[working["prepared_by"].ne("None") & working["prepared_by"].ne("Unknown")].copy()
@@ -961,6 +1102,9 @@ else:
                     column_config={
                         "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
                         "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                        "stage": st.column_config.TextColumn("Workflow Stage"),
+                        "activity": st.column_config.TextColumn("Step"),
+                        "category": st.column_config.TextColumn("Working vs Waiting"),
                         "total_duration_minutes": st.column_config.NumberColumn("Minutes", format="%.2f"),
                     },
                 )
