@@ -451,6 +451,24 @@ def _suggest_reachable_refill_label(pressure_hour, blocked_start, blocked_end):
     return f"{max(pressure_hour - 1, 0):02d}:00"
 
 
+def _hour_label(hour):
+    if pd.isna(hour):
+        return ""
+    return f"{int(hour) % 24:02d}:00"
+
+
+def _hours_between(start_hour, end_hour):
+    return (int(end_hour) - int(start_hour)) % 24
+
+
+def _first_hour_from_label(label):
+    text_value = str(label or "")
+    for token in text_value.replace("/", " ").split():
+        if len(token) >= 5 and token[:2].isdigit() and token[2:3] == ":":
+            return int(token[:2])
+    return None
+
+
 def _case_window_label(hour, blocked_start, blocked_end):
     if pd.isna(hour):
         return "Unknown"
@@ -582,6 +600,81 @@ def build_refill_time_suggestions(events, orders, audit_usage, blocked_start, bl
                 f"from {', '.join(pressure_reasons)}. Room access limited {int(blocked_start):02d}:00-"
                 f"{int(blocked_end):02d}:00. Verified-zero rows ({verified_zero_total}) were not scored."
             ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def build_refill_workflow_plan(
+    suggestions,
+    pull_lead_hours,
+    overnight_pull_hour,
+    prior_night_pull_hour,
+    max_staged_hours,
+):
+    rows = []
+    if suggestions.empty:
+        return pd.DataFrame()
+
+    blocked_hours = {
+        int(overnight_pull_hour - 1) % 24,
+        int(overnight_pull_hour) % 24,
+        int(overnight_pull_hour + 1) % 24,
+    }
+    for _, row in suggestions.iterrows():
+        suggested = str(row.get("suggested_second_refill") or "")
+        delivery_hour = _first_hour_from_label(suggested)
+        if delivery_hour is None or suggested in {"Already covered", "No extra refill signal"}:
+            rows.append({
+                "device": row.get("device"),
+                "suggested_delivery": suggested,
+                "prep_plan": "No added delivery plan",
+                "pull_check_start": "",
+                "staged_hours": None,
+                "workflow_risk": "No extra refill timing selected",
+                "workflow_note": "Timing signal does not currently require an added pull/check/delivery workflow.",
+            })
+            continue
+
+        same_day_pull_hour = int(delivery_hour - pull_lead_hours) % 24
+        same_day_gap = _hours_between(same_day_pull_hour, delivery_hour)
+        conflicts_with_big_pull = same_day_pull_hour in blocked_hours
+        if conflicts_with_big_pull:
+            pull_hour = int(prior_night_pull_hour) % 24
+            staged_hours = _hours_between(pull_hour, delivery_hour)
+            prep_plan = "Night-before pull/check"
+            if staged_hours > max_staged_hours:
+                workflow_risk = "Staging gap too long"
+                note = (
+                    f"{_hour_label(delivery_hour)} delivery would need a prior-night pull around "
+                    f"{_hour_label(pull_hour)}, leaving meds staged about {staged_hours:.0f} hours. "
+                    f"That is over the {max_staged_hours:.0f} hour review limit."
+                )
+            else:
+                workflow_risk = "Review staging controls"
+                note = (
+                    f"{_hour_label(delivery_hour)} delivery avoids room access problems, but the pull/check work "
+                    f"would likely need to happen around {_hour_label(pull_hour)} before the 04:00 carousel pull. "
+                    f"Estimated staged time is about {staged_hours:.0f} hours."
+                )
+        else:
+            pull_hour = same_day_pull_hour
+            staged_hours = same_day_gap
+            prep_plan = "Same-shift pull/check"
+            workflow_risk = "Operationally reachable"
+            note = (
+                f"{_hour_label(delivery_hour)} delivery can be supported by starting the carousel pull/check "
+                f"around {_hour_label(pull_hour)} with about {staged_hours:.0f} hours lead time."
+            )
+
+        rows.append({
+            "device": row.get("device"),
+            "suggested_delivery": _hour_label(delivery_hour),
+            "prep_plan": prep_plan,
+            "pull_check_start": _hour_label(pull_hour),
+            "staged_hours": staged_hours,
+            "workflow_risk": workflow_risk,
+            "workflow_note": note,
         })
 
     return pd.DataFrame(rows)
@@ -843,6 +936,49 @@ with st.expander("Cath Lab access assumptions", expanded=False):
             help="Default assumes the room is easier to access again around 17:00.",
         )
 
+with st.expander("Carousel pull/check workflow assumptions", expanded=False):
+    w1, w2, w3, w4 = st.columns(4)
+    with w1:
+        pull_lead_hours = st.number_input(
+            "Pull/check lead time hours",
+            min_value=1,
+            max_value=12,
+            value=2,
+            step=1,
+            key="device_utilization_pull_lead_hours",
+            help="How much time to allow for carousel pull, pharmacist check, and staging before delivery.",
+        )
+    with w2:
+        overnight_pull_hour = st.number_input(
+            "Large overnight pull hour",
+            min_value=0,
+            max_value=23,
+            value=4,
+            step=1,
+            key="device_utilization_overnight_pull_hour",
+            help="The hour that is already occupied by the major overnight pull.",
+        )
+    with w3:
+        prior_night_pull_hour = st.number_input(
+            "Prior-night pull option",
+            min_value=0,
+            max_value=23,
+            value=22,
+            step=1,
+            key="device_utilization_prior_night_pull_hour",
+            help="Fallback time if the suggested delivery would require pulling during the major overnight pull.",
+        )
+    with w4:
+        max_staged_hours = st.number_input(
+            "Review if staged over hours",
+            min_value=1,
+            max_value=24,
+            value=8,
+            step=1,
+            key="device_utilization_max_staged_hours",
+            help="Flags suggested workflows where meds would sit staged longer than this.",
+        )
+
 events = classify_events(load_device_events(start_date, end_date, selected_devices))
 orders = classify_orders(load_device_orders(start_date, end_date, selected_devices))
 audit_usage = load_audit_usage(start_date, end_date, selected_devices)
@@ -853,6 +989,13 @@ current_summary = summarize_window(events, orders, audit_usage)
 prior_summary = summarize_window(prior_events, prior_orders, prior_usage)
 gap_df = build_zero_gap_analysis(events, audit_usage)
 suggestions = build_refill_time_suggestions(events, orders, audit_usage, int(blocked_start), int(blocked_end))
+workflow_plan = build_refill_workflow_plan(
+    suggestions,
+    int(pull_lead_hours),
+    int(overnight_pull_hour),
+    int(prior_night_pull_hour),
+    int(max_staged_hours),
+)
 med_signal_detail = build_med_signal_detail(events, orders, audit_usage, inventory, gap_df)
 recommendation_summary = build_recommendation_summary(
     selected_devices, current_summary, prior_summary, suggestions, med_signal_detail, gap_df
@@ -885,12 +1028,13 @@ elif refill_up or usage_up:
 else:
     st.success("No clear demand increase versus the prior comparable window for the selected devices.")
 
-tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_zero_gap, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
+tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_workflow, tab_zero_gap, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
     "Recommendation",
     "Daily Trend",
     "Case Window",
     "Usage",
     "Optimal Refill Times",
+    "Pull & Delivery Feasibility",
     "Vend-to-Zero Gap",
     "Weekend / Weekday",
     "Problem Meds",
@@ -901,6 +1045,17 @@ tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab
 with tab_recommendation:
     st.subheader("Twice-Daily Refill Recommendation")
     st.caption("This rolls up usage, stockout pressure, vend-to-zero gaps, and current suggested timing into one manager-facing table.")
+    if not workflow_plan.empty:
+        staged_review_count = int(
+            workflow_plan["workflow_risk"]
+            .astype(str)
+            .str.contains("staging|staged", case=False, regex=True, na=False)
+            .sum()
+        )
+        if staged_review_count:
+            st.warning(
+                "At least one suggested delivery time needs workflow review because the carousel pull/check work may need to happen the night before."
+            )
     st.dataframe(
         recommendation_summary,
         width="stretch",
@@ -1024,6 +1179,33 @@ with tab_refill_times:
             detail = pd.concat(pressure_detail, ignore_index=True).sort_values("dt", ascending=False)
             with st.expander("Rows behind the timing suggestion", expanded=False):
                 st.dataframe(detail, width="stretch", hide_index=True)
+
+with tab_workflow:
+    st.subheader("Pull & Delivery Feasibility")
+    st.caption(
+        "This separates cabinet delivery time from the carousel pull/pharmacist-check work needed to make that delivery possible."
+    )
+    if workflow_plan.empty:
+        st.info("No refill workflow plan is available yet.")
+    else:
+        st.dataframe(
+            workflow_plan,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "device": st.column_config.TextColumn("Device"),
+                "suggested_delivery": st.column_config.TextColumn("Suggested Delivery"),
+                "prep_plan": st.column_config.TextColumn("Prep Plan"),
+                "pull_check_start": st.column_config.TextColumn("Pull/Check Start"),
+                "staged_hours": st.column_config.NumberColumn("Staged Hours", format="%.0f"),
+                "workflow_risk": st.column_config.TextColumn("Workflow Risk"),
+                "workflow_note": st.column_config.TextColumn("Why"),
+            },
+        )
+        st.info(
+            "A 05:00 refill should be treated as a delivery target, not proof the pull can happen at 05:00. "
+            "If the needed pull/check start collides with the 04:00 overnight pull, this tab calls out the prior-night staging tradeoff."
+        )
 
 with tab_zero_gap:
     if gap_df.empty:
