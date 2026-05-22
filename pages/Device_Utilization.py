@@ -428,6 +428,81 @@ def build_zero_gap_analysis(events, audit_usage):
     return pd.DataFrame(rows).sort_values(["refill_gap_hours", "verify_gap_hours", "clinical_zero_time"], ascending=[False, False, False])
 
 
+def _next_scheduled_pull_window(event_dt, pull_hour, window_hours):
+    event_ts = pd.Timestamp(event_dt)
+    scheduled = event_ts.normalize() + pd.Timedelta(hours=int(pull_hour))
+    if event_ts >= scheduled:
+        scheduled += pd.Timedelta(days=1)
+    window = pd.Timedelta(hours=int(window_hours))
+    return scheduled, scheduled - window, scheduled + window
+
+
+def build_scheduled_pull_miss_review(gap_df, orders, scheduled_pull_hour, pull_window_hours):
+    if gap_df.empty:
+        return pd.DataFrame()
+
+    pyxis_pulls = pd.DataFrame()
+    if not orders.empty and "is_pyxis_pull" in orders.columns:
+        pyxis_pulls = orders[orders["is_pyxis_pull"]].copy()
+
+    rows = []
+    for _, zero_row in gap_df.sort_values("clinical_zero_time").iterrows():
+        scheduled, window_start, window_end = _next_scheduled_pull_window(
+            zero_row["clinical_zero_time"],
+            scheduled_pull_hour,
+            pull_window_hours,
+        )
+        matches = pd.DataFrame()
+        if not pyxis_pulls.empty:
+            matches = pyxis_pulls[
+                (pyxis_pulls["destination"] == zero_row["device"])
+                & (pyxis_pulls["med_id"] == zero_row["med_id"])
+                & (pyxis_pulls["dt"] >= window_start)
+                & (pyxis_pulls["dt"] <= window_end)
+            ].sort_values("dt")
+
+        first_match = matches.iloc[0] if not matches.empty else None
+        next_refill = pd.to_datetime(zero_row.get("next_refill"), errors="coerce")
+        clinical_zero_time = pd.to_datetime(zero_row["clinical_zero_time"], errors="coerce")
+        if first_match is not None:
+            status = "Dropped on next scheduled pull"
+        elif pd.notna(next_refill) and next_refill <= window_end:
+            status = "Restocked before/inside pull window"
+        else:
+            status = "Missing from next scheduled pull"
+
+        rows.append({
+            "status": status,
+            "device": zero_row["device"],
+            "med_id": zero_row["med_id"],
+            "med_desc": zero_row["med_desc"],
+            "clinical_zero_time": clinical_zero_time,
+            "clinical_user": zero_row.get("clinical_user", ""),
+            "clinical_event": zero_row.get("clinical_event", ""),
+            "clinical_qty": zero_row.get("clinical_qty", 0),
+            "scheduled_pull_time": scheduled,
+            "pull_window_start": window_start,
+            "pull_window_end": window_end,
+            "pull_order_time": first_match["dt"] if first_match is not None else pd.NaT,
+            "pull_order_qty": first_match["abs_qty"] if first_match is not None else 0,
+            "pull_order_priority": first_match["priority"] if first_match is not None else "",
+            "next_staff_verify_zero": zero_row.get("next_staff_verify_zero", pd.NaT),
+            "verify_gap_hours": zero_row.get("verify_gap_hours"),
+            "next_refill": next_refill,
+            "refill_gap_hours": zero_row.get("refill_gap_hours"),
+            "hours_zero_before_scheduled_pull": (
+                (scheduled - clinical_zero_time).total_seconds() / 3600.0
+                if pd.notna(clinical_zero_time)
+                else None
+            ),
+        })
+
+    return pd.DataFrame(rows).sort_values(
+        ["status", "scheduled_pull_time", "clinical_zero_time"],
+        ascending=[False, True, True],
+    )
+
+
 def _is_blocked_hour(hour, blocked_start, blocked_end):
     if blocked_start == blocked_end:
         return False
@@ -1227,15 +1302,47 @@ with st.expander("Twice-daily optimizer assumptions", expanded=False):
             help="Hours the optimizer should score as possible second-delivery targets.",
         )
 
+with st.expander("Scheduled pull miss review assumptions", expanded=False):
+    s1, s2 = st.columns(2)
+    with s1:
+        scheduled_pull_hour = st.number_input(
+            "Scheduled pull hour",
+            min_value=0,
+            max_value=23,
+            value=4,
+            step=1,
+            key="device_utilization_scheduled_pull_hour",
+            help="Used to check whether a med that hit zero dropped on the next scheduled carousel/Pyxis pull.",
+        )
+    with s2:
+        scheduled_pull_window = st.number_input(
+            "Scheduled pull match window hours",
+            min_value=0,
+            max_value=6,
+            value=1,
+            step=1,
+            key="device_utilization_scheduled_pull_window",
+            help="Looks this many hours before and after the scheduled pull hour for matching Pyxis pull rows.",
+        )
+
 events = classify_events(load_device_events(start_date, end_date, selected_devices))
 orders = classify_orders(load_device_orders(start_date, end_date, selected_devices))
+followup_end_date = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).date()
+followup_events = classify_events(load_device_events(start_date, followup_end_date, selected_devices))
+followup_orders = classify_orders(load_device_orders(start_date, followup_end_date, selected_devices))
 audit_usage = load_audit_usage(start_date, end_date, selected_devices)
 inventory = load_device_inventory_current(selected_devices)
 daily = build_daily(events, orders, audit_usage)
 prior_start, prior_end, prior_events, prior_orders, prior_usage = build_prior_comparison(selected_devices)
 current_summary = summarize_window(events, orders, audit_usage)
 prior_summary = summarize_window(prior_events, prior_orders, prior_usage)
-gap_df = build_zero_gap_analysis(events, audit_usage)
+gap_df = build_zero_gap_analysis(followup_events, audit_usage)
+pull_miss_review = build_scheduled_pull_miss_review(
+    gap_df,
+    followup_orders,
+    int(scheduled_pull_hour),
+    int(scheduled_pull_window),
+)
 suggestions = build_refill_time_suggestions(events, orders, audit_usage, int(blocked_start), int(blocked_end))
 workflow_plan = build_refill_workflow_plan(
     suggestions,
@@ -1295,7 +1402,7 @@ elif refill_up or usage_up:
 else:
     st.success("No clear demand increase versus the prior comparable window for the selected devices.")
 
-tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_optimizer, tab_workflow, tab_zero_gap, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
+tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_optimizer, tab_workflow, tab_zero_gap, tab_pull_miss, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
     "Recommendation",
     "Daily Trend",
     "Case Window",
@@ -1304,6 +1411,7 @@ tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab
     "Twice-Daily Optimizer",
     "Pull & Delivery Feasibility",
     "Vend-to-Zero Gap",
+    "Scheduled Pull Misses",
     "Weekend / Weekday",
     "Problem Meds",
     "Inventory Cross-Check",
@@ -1640,6 +1748,54 @@ with tab_zero_gap:
                 "next_refill": st.column_config.DatetimeColumn("Next Refill/Load", format="MM/DD/YY HH:mm"),
                 "refill_gap_hours": st.column_config.NumberColumn("Zero-to-Refill Hours", format="%.1f"),
                 "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
+            },
+        )
+
+with tab_pull_miss:
+    st.subheader("Scheduled Pull Miss Review")
+    st.caption(
+        "Finds meds brought to zero by clinical vending, then checks whether that same med/device appeared on the next scheduled Pyxis pull."
+    )
+    if pull_miss_review.empty:
+        st.info("No clinical vend-to-zero rows were available to compare against the next scheduled pull.")
+    else:
+        miss_count = int(pull_miss_review["status"].eq("Missing from next scheduled pull").sum())
+        dropped_count = int(pull_miss_review["status"].eq("Dropped on next scheduled pull").sum())
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Missing Next Pull", f"{miss_count:,}")
+        p2.metric("Dropped Next Pull", f"{dropped_count:,}")
+        p3.metric("Rows Reviewed", f"{len(pull_miss_review):,}")
+        st.warning(
+            "Rows marked missing are the ones to investigate for 11E/Tower-style issues: clinical use drove the pocket to zero, "
+            "but RxTrack did not find a matching Pyxis pull row for the next scheduled drop."
+        ) if miss_count else st.success("Every reviewed clinical zero had a matching pull row or was restocked before/inside the pull window.")
+
+        status_filter = st.multiselect(
+            "Status",
+            sorted(pull_miss_review["status"].dropna().unique()),
+            default=["Missing from next scheduled pull"] if miss_count else sorted(pull_miss_review["status"].dropna().unique()),
+            key="device_utilization_pull_miss_status",
+        )
+        view = pull_miss_review.copy()
+        if status_filter:
+            view = view[view["status"].isin(status_filter)].copy()
+        st.dataframe(
+            view,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "clinical_zero_time": st.column_config.DatetimeColumn("Clinical Zero Time", format="MM/DD/YY HH:mm"),
+                "scheduled_pull_time": st.column_config.DatetimeColumn("Next Scheduled Pull", format="MM/DD/YY HH:mm"),
+                "pull_window_start": st.column_config.DatetimeColumn("Window Start", format="MM/DD/YY HH:mm"),
+                "pull_window_end": st.column_config.DatetimeColumn("Window End", format="MM/DD/YY HH:mm"),
+                "pull_order_time": st.column_config.DatetimeColumn("Pull Order Time", format="MM/DD/YY HH:mm"),
+                "next_staff_verify_zero": st.column_config.DatetimeColumn("Verify Zero", format="MM/DD/YY HH:mm"),
+                "next_refill": st.column_config.DatetimeColumn("Next Refill", format="MM/DD/YY HH:mm"),
+                "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
+                "pull_order_qty": st.column_config.NumberColumn("Pull Qty", format="%.0f"),
+                "verify_gap_hours": st.column_config.NumberColumn("Zero-to-Verify Hours", format="%.1f"),
+                "refill_gap_hours": st.column_config.NumberColumn("Zero-to-Refill Hours", format="%.1f"),
+                "hours_zero_before_scheduled_pull": st.column_config.NumberColumn("Hours Zero Before Pull", format="%.1f"),
             },
         )
 
