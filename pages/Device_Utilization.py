@@ -680,6 +680,56 @@ def build_refill_workflow_plan(
     return pd.DataFrame(rows)
 
 
+def build_refill_delivery_profile(events):
+    if events.empty or "is_refill" not in events.columns:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    refills = events[events["is_refill"]].copy()
+    if refills.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    refills["time_minutes"] = refills["dt"].dt.hour.mul(60).add(refills["dt"].dt.minute)
+    refills["delivery_hour"] = refills["dt"].dt.hour
+    refills["delivery_time"] = refills["dt"].dt.strftime("%H:%M")
+    refills["event_day"] = refills["dt"].dt.date
+
+    def avg_clock_time(series):
+        clean = pd.to_numeric(series, errors="coerce").dropna()
+        if clean.empty:
+            return ""
+        minutes = int(round(float(clean.mean()))) % (24 * 60)
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+    summary = refills.groupby("device").agg(
+        refill_events=("pk", "count"),
+        refill_days=("event_day", "nunique"),
+        average_delivery_time=("time_minutes", avg_clock_time),
+        median_delivery_time=("time_minutes", lambda s: avg_clock_time(pd.Series([pd.to_numeric(s, errors="coerce").median()]))),
+        earliest_delivery=("delivery_time", "min"),
+        latest_delivery=("delivery_time", "max"),
+        refill_qty=("abs_qty", "sum"),
+        unique_meds=("med_id", "nunique"),
+    ).reset_index()
+
+    by_hour = refills.groupby(["device", "delivery_hour"]).agg(
+        refill_events=("pk", "count"),
+        refill_qty=("abs_qty", "sum"),
+        unique_meds=("med_id", "nunique"),
+    ).reset_index().sort_values(["device", "delivery_hour"])
+    by_hour["delivery_hour_label"] = by_hour["delivery_hour"].apply(_hour_label)
+
+    by_user = refills.groupby(["device", "user_name"]).agg(
+        refill_events=("pk", "count"),
+        refill_qty=("abs_qty", "sum"),
+        unique_meds=("med_id", "nunique"),
+        average_delivery_time=("time_minutes", avg_clock_time),
+        first_delivery=("dt", "min"),
+        last_delivery=("dt", "max"),
+    ).reset_index().sort_values(["device", "refill_events", "refill_qty"], ascending=[True, False, False])
+
+    return summary, by_hour, by_user
+
+
 def build_case_window_summary(events, orders, audit_usage, blocked_start, blocked_end):
     frames = []
     if not audit_usage.empty:
@@ -996,6 +1046,7 @@ workflow_plan = build_refill_workflow_plan(
     int(prior_night_pull_hour),
     int(max_staged_hours),
 )
+delivery_summary, delivery_by_hour, delivery_by_user = build_refill_delivery_profile(events)
 med_signal_detail = build_med_signal_detail(events, orders, audit_usage, inventory, gap_df)
 recommendation_summary = build_recommendation_summary(
     selected_devices, current_summary, prior_summary, suggestions, med_signal_detail, gap_df
@@ -1206,6 +1257,74 @@ with tab_workflow:
             "A 05:00 refill should be treated as a delivery target, not proof the pull can happen at 05:00. "
             "If the needed pull/check start collides with the 04:00 overnight pull, this tab calls out the prior-night staging tradeoff."
         )
+
+    st.divider()
+    st.subheader("Actual Refill Delivery Pattern")
+    st.caption(
+        "Based on refill/load/restock rows in Events for the selected devices and date range. "
+        "This is the best proxy for when the Pyxis tech actually services the cabinet."
+    )
+    if delivery_summary.empty:
+        st.info("No refill/load/restock rows were found for the selected devices and dates.")
+    else:
+        st.dataframe(
+            delivery_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "device": st.column_config.TextColumn("Device"),
+                "refill_events": st.column_config.NumberColumn("Refill Rows", format="%d"),
+                "refill_days": st.column_config.NumberColumn("Days With Refills", format="%d"),
+                "average_delivery_time": st.column_config.TextColumn("Average Delivery"),
+                "median_delivery_time": st.column_config.TextColumn("Median Delivery"),
+                "earliest_delivery": st.column_config.TextColumn("Earliest"),
+                "latest_delivery": st.column_config.TextColumn("Latest"),
+                "refill_qty": st.column_config.NumberColumn("Refill Qty", format="%.0f"),
+                "unique_meds": st.column_config.NumberColumn("Unique Meds", format="%d"),
+            },
+        )
+        if not delivery_by_hour.empty:
+            st.plotly_chart(
+                px.bar(
+                    delivery_by_hour,
+                    x="delivery_hour_label",
+                    y="refill_events",
+                    color="device",
+                    barmode="group",
+                    labels={"delivery_hour_label": "Delivery Hour", "refill_events": "Refill Rows"},
+                ),
+                width="stretch",
+            )
+        d1, d2 = st.columns(2)
+        with d1:
+            st.markdown("**By Hour**")
+            st.dataframe(
+                delivery_by_hour[["device", "delivery_hour_label", "refill_events", "refill_qty", "unique_meds"]],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "delivery_hour_label": st.column_config.TextColumn("Hour"),
+                    "refill_events": st.column_config.NumberColumn("Refill Rows", format="%d"),
+                    "refill_qty": st.column_config.NumberColumn("Refill Qty", format="%.0f"),
+                    "unique_meds": st.column_config.NumberColumn("Unique Meds", format="%d"),
+                },
+            )
+        with d2:
+            st.markdown("**By Tech**")
+            st.dataframe(
+                delivery_by_user,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "user_name": st.column_config.TextColumn("Tech"),
+                    "refill_events": st.column_config.NumberColumn("Refill Rows", format="%d"),
+                    "refill_qty": st.column_config.NumberColumn("Refill Qty", format="%.0f"),
+                    "unique_meds": st.column_config.NumberColumn("Unique Meds", format="%d"),
+                    "average_delivery_time": st.column_config.TextColumn("Average Delivery"),
+                    "first_delivery": st.column_config.DatetimeColumn("First", format="MM/DD/YY HH:mm"),
+                    "last_delivery": st.column_config.DatetimeColumn("Last", format="MM/DD/YY HH:mm"),
+                },
+            )
 
 with tab_zero_gap:
     if gap_df.empty:
