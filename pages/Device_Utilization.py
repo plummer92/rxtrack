@@ -504,10 +504,13 @@ def build_scheduled_pull_miss_review(gap_df, orders, scheduled_pull_hour, pull_w
         first_match = matches.iloc[0] if not matches.empty else None
         next_refill = pd.to_datetime(zero_row.get("next_refill"), errors="coerce")
         clinical_zero_time = pd.to_datetime(zero_row["clinical_zero_time"], errors="coerce")
+        inferred_pull_restock_deadline = scheduled + pd.Timedelta(hours=8)
         if first_match is not None:
             status = "Dropped on next scheduled pull"
         elif pd.notna(next_refill) and next_refill <= window_end:
             status = "Restocked before/inside pull window"
+        elif pd.notna(next_refill) and window_end < next_refill <= inferred_pull_restock_deadline:
+            status = "Likely covered by scheduled pull"
         else:
             status = "Missing from next scheduled pull"
 
@@ -523,6 +526,7 @@ def build_scheduled_pull_miss_review(gap_df, orders, scheduled_pull_hour, pull_w
             "scheduled_pull_time": scheduled,
             "pull_window_start": window_start,
             "pull_window_end": window_end,
+            "inferred_pull_restock_deadline": inferred_pull_restock_deadline,
             "pull_order_time": first_match["dt"] if first_match is not None else pd.NaT,
             "pull_order_qty": first_match["abs_qty"] if first_match is not None else 0,
             "pull_order_priority": first_match["priority"] if first_match is not None else "",
@@ -1916,17 +1920,20 @@ with tab_zero_gap:
 with tab_pull_miss:
     st.subheader("Scheduled Pull Miss Review")
     st.caption(
-        "Finds meds brought to zero by clinical vending, then checks whether that same med/device appeared on the next scheduled Pyxis pull."
+        "Finds meds brought to zero by clinical vending, then checks whether that same med/device appeared on the next scheduled Pyxis pull. "
+        "If no pull row is visible but the med is refilled within 8 hours after the scheduled pull, RxTrack treats it as likely covered by that pull."
     )
     if pull_miss_review.empty:
         st.info("No clinical vend-to-zero rows were available to compare against the next scheduled pull.")
     else:
         miss_count = int(pull_miss_review["status"].eq("Missing from next scheduled pull").sum())
         dropped_count = int(pull_miss_review["status"].eq("Dropped on next scheduled pull").sum())
-        p1, p2, p3 = st.columns(3)
+        likely_count = int(pull_miss_review["status"].eq("Likely covered by scheduled pull").sum())
+        p1, p2, p3, p4 = st.columns(4)
         p1.metric("Missing Next Pull", f"{miss_count:,}")
         p2.metric("Dropped Next Pull", f"{dropped_count:,}")
-        p3.metric("Rows Reviewed", f"{len(pull_miss_review):,}")
+        p3.metric("Likely Covered", f"{likely_count:,}")
+        p4.metric("Rows Reviewed", f"{len(pull_miss_review):,}")
         if miss_count:
             st.warning(
                 "Rows marked missing are the ones to investigate for 11E/Tower-style issues: clinical use drove the pocket to zero, "
@@ -1953,6 +1960,7 @@ with tab_pull_miss:
                 "scheduled_pull_time": st.column_config.DatetimeColumn("Next Scheduled Pull", format="MM/DD/YY HH:mm"),
                 "pull_window_start": st.column_config.DatetimeColumn("Window Start", format="MM/DD/YY HH:mm"),
                 "pull_window_end": st.column_config.DatetimeColumn("Window End", format="MM/DD/YY HH:mm"),
+                "inferred_pull_restock_deadline": st.column_config.DatetimeColumn("Likely Pull Restock Deadline", format="MM/DD/YY HH:mm"),
                 "pull_order_time": st.column_config.DatetimeColumn("Pull Order Time", format="MM/DD/YY HH:mm"),
                 "next_staff_verify_zero": st.column_config.DatetimeColumn("Verify Zero", format="MM/DD/YY HH:mm"),
                 "next_refill": st.column_config.DatetimeColumn("Next Refill", format="MM/DD/YY HH:mm"),
