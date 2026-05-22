@@ -730,6 +730,172 @@ def build_refill_delivery_profile(events):
     return summary, by_hour, by_user
 
 
+def build_pyxis_pull_workload(orders, pull_hour, hour_window):
+    if orders.empty or "is_pyxis_pull" not in orders.columns:
+        return pd.DataFrame(), pd.DataFrame()
+
+    pulls = orders[orders["is_pyxis_pull"]].copy()
+    if pulls.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    target_hours = {
+        int((int(pull_hour) + offset) % 24)
+        for offset in range(-int(hour_window), int(hour_window) + 1)
+    }
+    pulls = pulls[pulls["hour"].astype(int).isin(target_hours)].copy()
+    if pulls.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    pulls["pull_date"] = pulls["dt"].dt.date
+    daily_pull = pulls.groupby(["destination", "pull_date"]).agg(
+        pull_lines=("pk", "count"),
+        pull_qty=("abs_qty", "sum"),
+        unique_meds=("med_id", "nunique"),
+        first_pull_row=("dt", "min"),
+        last_pull_row=("dt", "max"),
+    ).reset_index().rename(columns={"destination": "device"})
+    daily_pull["pull_span_minutes"] = (
+        daily_pull["last_pull_row"] - daily_pull["first_pull_row"]
+    ).dt.total_seconds().div(60).fillna(0)
+
+    summary = daily_pull.groupby("device").agg(
+        pull_days=("pull_date", "nunique"),
+        avg_pull_lines=("pull_lines", "mean"),
+        avg_pull_qty=("pull_qty", "mean"),
+        avg_unique_meds=("unique_meds", "mean"),
+        avg_pull_span_minutes=("pull_span_minutes", "mean"),
+        max_pull_lines=("pull_lines", "max"),
+        max_pull_qty=("pull_qty", "max"),
+    ).reset_index()
+    return summary, daily_pull.sort_values(["pull_date", "device"], ascending=[False, True])
+
+
+def build_twice_daily_optimizer(
+    selected_devices,
+    audit_usage,
+    med_detail,
+    pull_workload,
+    blocked_start,
+    blocked_end,
+    pull_lead_hours,
+    overnight_pull_hour,
+    prior_night_pull_hour,
+    max_staged_hours,
+    candidate_hours,
+):
+    rows = []
+    workload_lookup = (
+        pull_workload.set_index("device").to_dict("index")
+        if not pull_workload.empty and "device" in pull_workload.columns
+        else {}
+    )
+
+    for device in selected_devices:
+        dev_usage = audit_usage[audit_usage["device"] == device].copy() if not audit_usage.empty else pd.DataFrame()
+        dev_meds = med_detail[med_detail["device"] == device].copy() if not med_detail.empty else pd.DataFrame()
+        workload = workload_lookup.get(device, {})
+
+        usage_qty_total = float(dev_usage["abs_qty"].sum()) if not dev_usage.empty else 0.0
+        avg_pull_lines = float(workload.get("avg_pull_lines") or 0)
+        avg_pull_qty = float(workload.get("avg_pull_qty") or 0)
+        avg_pull_span = float(workload.get("avg_pull_span_minutes") or 0)
+
+        space_pressure_meds = 0
+        if not dev_meds.empty:
+            max_qty = pd.to_numeric(dev_meds.get("max_qty"), errors="coerce").fillna(0)
+            usage_qty = pd.to_numeric(dev_meds.get("usage_qty"), errors="coerce").fillna(0)
+            clinical_zero = pd.to_numeric(dev_meds.get("clinical_zero_events"), errors="coerce").fillna(0)
+            space_pressure_meds = int(((max_qty > 0) & ((usage_qty >= max_qty) | (clinical_zero > 0))).sum())
+
+        for hour in candidate_hours:
+            hour = int(hour)
+            if _is_blocked_hour(hour, blocked_start, blocked_end):
+                continue
+
+            same_day_pull_hour = int(hour - pull_lead_hours) % 24
+            blocked_pull_hours = {
+                int(overnight_pull_hour - 1) % 24,
+                int(overnight_pull_hour) % 24,
+                int(overnight_pull_hour + 1) % 24,
+            }
+            conflicts_with_overnight_pull = same_day_pull_hour in blocked_pull_hours
+            if conflicts_with_overnight_pull:
+                pull_start_hour = int(prior_night_pull_hour) % 24
+                prep_plan = "Night-before pull/check"
+            else:
+                pull_start_hour = same_day_pull_hour
+                prep_plan = "Same-shift pull/check"
+
+            staged_hours = _hours_between(pull_start_hour, hour)
+            if not dev_usage.empty:
+                coverage_hours = {
+                    int((hour + offset) % 24)
+                    for offset in range(1, 7)
+                }
+                if hour < int(blocked_start):
+                    coverage_hours |= set(range(int(blocked_start), int(blocked_end)))
+                covered = dev_usage[dev_usage["hour"].astype(int).isin(coverage_hours)]
+                covered_usage_qty = float(covered["abs_qty"].sum())
+                covered_usage_events = int(len(covered))
+                covered_unique_meds = int(covered["med_id"].nunique())
+            else:
+                covered_usage_qty = 0.0
+                covered_usage_events = 0
+                covered_unique_meds = 0
+
+            demand_capture_pct = (covered_usage_qty / usage_qty_total * 100) if usage_qty_total else 0
+            staging_penalty = max(float(staged_hours) - float(max_staged_hours), 0) * 8
+            workload_penalty = (avg_pull_lines * 0.15) + (avg_pull_span * 0.1)
+            overnight_penalty = 8 if conflicts_with_overnight_pull else 0
+            space_bonus = space_pressure_meds * 2
+            optimizer_score = (
+                covered_usage_qty
+                + covered_usage_events
+                + covered_unique_meds * 3
+                + space_bonus
+                - staging_penalty
+                - workload_penalty
+                - overnight_penalty
+            )
+
+            if covered_usage_qty <= 0:
+                recommendation = "Low value"
+            elif staged_hours > max_staged_hours:
+                recommendation = "Possible, but staging gap is high"
+            elif conflicts_with_overnight_pull:
+                recommendation = "Good delivery target if staging is approved"
+            else:
+                recommendation = "Best operational fit"
+
+            rows.append({
+                "device": device,
+                "candidate_delivery": _hour_label(hour),
+                "recommendation": recommendation,
+                "optimizer_score": optimizer_score,
+                "prep_plan": prep_plan,
+                "pull_check_start": _hour_label(pull_start_hour),
+                "staged_hours": staged_hours,
+                "captured_usage_qty": covered_usage_qty,
+                "captured_usage_events": covered_usage_events,
+                "captured_unique_meds": covered_unique_meds,
+                "demand_capture_pct": demand_capture_pct,
+                "space_pressure_meds": space_pressure_meds,
+                "avg_1430_pull_lines": avg_pull_lines,
+                "avg_1430_pull_qty": avg_pull_qty,
+                "avg_1430_pull_span_min": avg_pull_span,
+                "why": (
+                    f"{_hour_label(hour)} captures about {covered_usage_qty:.0f} usage qty "
+                    f"({demand_capture_pct:.0f}% of selected-window usage) with {covered_unique_meds} meds touched. "
+                    f"Prep would start around {_hour_label(pull_start_hour)} and meds would be staged about {staged_hours:.0f} hours. "
+                    f"Average current Cath Lab pull workload near 14:30 is {avg_pull_lines:.1f} lines / {avg_pull_qty:.1f} qty."
+                ),
+            })
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values(["device", "optimizer_score"], ascending=[True, False])
+
+
 def build_case_window_summary(events, orders, audit_usage, blocked_start, blocked_end):
     frames = []
     if not audit_usage.empty:
@@ -1029,6 +1195,38 @@ with st.expander("Carousel pull/check workflow assumptions", expanded=False):
             help="Flags suggested workflows where meds would sit staged longer than this.",
         )
 
+with st.expander("Twice-daily optimizer assumptions", expanded=False):
+    o1, o2, o3 = st.columns(3)
+    with o1:
+        cath_pull_hour = st.number_input(
+            "Current Cath Lab pull hour",
+            min_value=0,
+            max_value=23,
+            value=14,
+            step=1,
+            key="device_utilization_cath_pull_hour",
+            help="Used to estimate the current 14:30-ish Cath Lab pull workload from Pharmacy Orders.",
+        )
+    with o2:
+        cath_pull_window = st.number_input(
+            "Pull hour window",
+            min_value=0,
+            max_value=4,
+            value=1,
+            step=1,
+            key="device_utilization_cath_pull_window",
+            help="Includes Pyxis pull rows within this many hours of the current pull hour.",
+        )
+    with o3:
+        candidate_delivery_hours = st.multiselect(
+            "Candidate delivery hours",
+            options=list(range(24)),
+            default=[5, 6, 17, 18, 22],
+            format_func=lambda h: f"{h:02d}:00",
+            key="device_utilization_optimizer_candidate_hours",
+            help="Hours the optimizer should score as possible second-delivery targets.",
+        )
+
 events = classify_events(load_device_events(start_date, end_date, selected_devices))
 orders = classify_orders(load_device_orders(start_date, end_date, selected_devices))
 audit_usage = load_audit_usage(start_date, end_date, selected_devices)
@@ -1048,6 +1246,24 @@ workflow_plan = build_refill_workflow_plan(
 )
 delivery_summary, delivery_by_hour, delivery_by_user = build_refill_delivery_profile(events)
 med_signal_detail = build_med_signal_detail(events, orders, audit_usage, inventory, gap_df)
+pull_workload_summary, pull_workload_daily = build_pyxis_pull_workload(
+    orders,
+    int(cath_pull_hour),
+    int(cath_pull_window),
+)
+optimizer_plan = build_twice_daily_optimizer(
+    selected_devices,
+    audit_usage,
+    med_signal_detail,
+    pull_workload_summary,
+    int(blocked_start),
+    int(blocked_end),
+    int(pull_lead_hours),
+    int(overnight_pull_hour),
+    int(prior_night_pull_hour),
+    int(max_staged_hours),
+    candidate_delivery_hours,
+)
 recommendation_summary = build_recommendation_summary(
     selected_devices, current_summary, prior_summary, suggestions, med_signal_detail, gap_df
 )
@@ -1079,12 +1295,13 @@ elif refill_up or usage_up:
 else:
     st.success("No clear demand increase versus the prior comparable window for the selected devices.")
 
-tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_workflow, tab_zero_gap, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
+tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_optimizer, tab_workflow, tab_zero_gap, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
     "Recommendation",
     "Daily Trend",
     "Case Window",
     "Usage",
     "Optimal Refill Times",
+    "Twice-Daily Optimizer",
     "Pull & Delivery Feasibility",
     "Vend-to-Zero Gap",
     "Weekend / Weekday",
@@ -1230,6 +1447,77 @@ with tab_refill_times:
             detail = pd.concat(pressure_detail, ignore_index=True).sort_values("dt", ascending=False)
             with st.expander("Rows behind the timing suggestion", expanded=False):
                 st.dataframe(detail, width="stretch", hide_index=True)
+
+with tab_optimizer:
+    st.subheader("Twice-Daily Delivery Optimizer")
+    st.caption(
+        "Scores possible second-delivery times using clinical usage pressure, cabinet space limits, current 14:30 Pyxis pull workload, "
+        "pull/check lead time, and staging risk. This is an explainable optimization model, not a black-box prediction."
+    )
+    if optimizer_plan.empty:
+        st.info("No optimizer rows are available. Check candidate delivery hours and make sure usage/order data exists for the selected devices.")
+    else:
+        best_plan = optimizer_plan.groupby("device", as_index=False).head(1)
+        st.markdown("**Best option by device**")
+        st.dataframe(
+            best_plan,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "candidate_delivery": st.column_config.TextColumn("Delivery"),
+                "optimizer_score": st.column_config.NumberColumn("Score", format="%.1f"),
+                "pull_check_start": st.column_config.TextColumn("Pull/Check Start"),
+                "staged_hours": st.column_config.NumberColumn("Staged Hours", format="%.0f"),
+                "captured_usage_qty": st.column_config.NumberColumn("Captured Usage Qty", format="%.0f"),
+                "captured_usage_events": st.column_config.NumberColumn("Captured Usage Rows", format="%d"),
+                "captured_unique_meds": st.column_config.NumberColumn("Captured Meds", format="%d"),
+                "demand_capture_pct": st.column_config.NumberColumn("Demand Capture", format="%.0f%%"),
+                "space_pressure_meds": st.column_config.NumberColumn("Space-Pressure Meds", format="%d"),
+                "avg_1430_pull_lines": st.column_config.NumberColumn("Avg 14:30 Pull Lines", format="%.1f"),
+                "avg_1430_pull_qty": st.column_config.NumberColumn("Avg 14:30 Pull Qty", format="%.1f"),
+                "avg_1430_pull_span_min": st.column_config.NumberColumn("Avg Pull Span Min", format="%.1f"),
+                "why": st.column_config.TextColumn("Why"),
+            },
+        )
+        st.markdown("**All scored delivery options**")
+        st.dataframe(
+            optimizer_plan,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "candidate_delivery": st.column_config.TextColumn("Delivery"),
+                "optimizer_score": st.column_config.NumberColumn("Score", format="%.1f"),
+                "staged_hours": st.column_config.NumberColumn("Staged Hours", format="%.0f"),
+                "captured_usage_qty": st.column_config.NumberColumn("Captured Usage Qty", format="%.0f"),
+                "demand_capture_pct": st.column_config.NumberColumn("Demand Capture", format="%.0f%%"),
+                "avg_1430_pull_lines": st.column_config.NumberColumn("Avg 14:30 Pull Lines", format="%.1f"),
+            },
+        )
+
+    st.divider()
+    st.subheader("Current Cath Lab Pull Workload")
+    st.caption(
+        f"Uses Pharmacy Orders marked as Pyxis pull within +/- {int(cath_pull_window)} hour(s) of {int(cath_pull_hour):02d}:00."
+    )
+    if pull_workload_summary.empty:
+        st.info("No Pyxis pull order rows matched the selected devices and current pull window.")
+    else:
+        st.dataframe(
+            pull_workload_summary,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "pull_days": st.column_config.NumberColumn("Pull Days", format="%d"),
+                "avg_pull_lines": st.column_config.NumberColumn("Avg Lines", format="%.1f"),
+                "avg_pull_qty": st.column_config.NumberColumn("Avg Qty", format="%.1f"),
+                "avg_unique_meds": st.column_config.NumberColumn("Avg Meds", format="%.1f"),
+                "avg_pull_span_minutes": st.column_config.NumberColumn("Avg Span Min", format="%.1f"),
+                "max_pull_lines": st.column_config.NumberColumn("Max Lines", format="%d"),
+                "max_pull_qty": st.column_config.NumberColumn("Max Qty", format="%.0f"),
+            },
+        )
+        with st.expander("Daily pull rows behind the workload estimate", expanded=False):
+            st.dataframe(pull_workload_daily, width="stretch", hide_index=True)
 
 with tab_workflow:
     st.subheader("Pull & Delivery Feasibility")
