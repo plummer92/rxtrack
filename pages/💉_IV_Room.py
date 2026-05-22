@@ -299,6 +299,146 @@ if "Made / Completion Time Missing" in set(filtered["order_status"].dropna().tol
         "The MedKeeper export did not provide a completed timestamp for those rows."
     )
 
+daily_overview = (
+    filtered.assign(day=filtered["order_date"].dt.date)
+    .groupby("day", as_index=False)
+    .agg(
+        iv_orders=("pk", "count"),
+        preparations=("num_preparations", "sum"),
+        stat_orders=("priority_name", lambda s: s.astype(str).str.upper().eq("STAT").sum()),
+        preparers=("prepared_by", "nunique"),
+    )
+    .sort_values("day")
+)
+top_preparer = (
+    filtered.groupby("prepared_by", as_index=False)
+    .agg(preparations=("num_preparations", "sum"), iv_orders=("pk", "count"))
+    .sort_values(["preparations", "iv_orders"], ascending=False)
+)
+top_compound = (
+    filtered.groupby("drug_name", as_index=False)
+    .agg(preparations=("num_preparations", "sum"), iv_orders=("pk", "count"))
+    .sort_values(["preparations", "iv_orders"], ascending=False)
+)
+long_tat_rows = pd.DataFrame()
+if not tat_ready.empty:
+    tat_threshold = tat_ready["prepare_tat_minutes"].quantile(0.90)
+    long_tat_rows = tat_ready[tat_ready["prepare_tat_minutes"].ge(tat_threshold)].copy()
+
+st.subheader("Manager Snapshot")
+snapshot_tab, action_tab, guide_tab = st.tabs(["Overview", "Action Queue", "How to Read"])
+
+with snapshot_tab:
+    story_col, signal_col = st.columns([1.2, 1])
+    with story_col:
+        st.markdown("**What happened in this window**")
+        if daily_overview.empty:
+            st.info("No daily volume summary is available for the current filters.")
+        else:
+            busiest_day = daily_overview.sort_values("preparations", ascending=False).iloc[0]
+            avg_daily_preps = daily_overview["preparations"].mean()
+            st.write(
+                f"Across {len(daily_overview):,} day(s), the IV room produced "
+                f"{int(filtered['num_preparations'].sum()):,} preparation(s) across {len(filtered):,} order row(s). "
+                f"The busiest day was {pd.to_datetime(busiest_day['day']).strftime('%b %d')} with "
+                f"{int(busiest_day['preparations']):,} preparation(s). Average daily volume was "
+                f"{avg_daily_preps:,.1f} preparation(s)."
+            )
+        if not top_preparer.empty:
+            lead = top_preparer.iloc[0]
+            st.write(
+                f"Top preparer in the filtered view: **{lead['prepared_by']}** "
+                f"with {int(lead['preparations']):,} preparation(s)."
+            )
+        if not top_compound.empty:
+            compound = top_compound.iloc[0]
+            st.write(
+                f"Highest-volume compound: **{compound['drug_name']}** "
+                f"with {int(compound['preparations']):,} preparation(s)."
+            )
+    with signal_col:
+        st.markdown("**Data confidence**")
+        workflow_state = "Loaded" if not workflow_filtered.empty else "Not loaded"
+        tat_state = f"{len(tat_ready):,} TAT row(s)" if not tat_ready.empty else "No TAT rows"
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {"Signal": "Summary workload rows", "Status": f"{len(raw_filtered):,} raw / {len(filtered):,} display"},
+                    {"Signal": "Workflow detail", "Status": workflow_state},
+                    {"Signal": "Prepare TAT", "Status": tat_state},
+                    {"Signal": "Excluded setup/cancel", "Status": f"{len(canceled_review) + len(batch_staged_review):,} row(s)"},
+                ]
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+with action_tab:
+    action_rows = []
+    if not review_completion.empty:
+        action_rows.append({
+            "Priority": "High",
+            "Item": "Needs Completion Review",
+            "Count": len(review_completion),
+            "What it means": "Some prep or approval activity exists, but no completed timestamp was found.",
+            "Drilldown": "Open the Needs Completion Review expander below.",
+        })
+    missing_completion = filtered[filtered["order_status"].eq("Made / Completion Time Missing")].copy()
+    if not missing_completion.empty:
+        action_rows.append({
+            "Priority": "Medium",
+            "Item": "Made / Completion Time Missing",
+            "Count": len(missing_completion),
+            "What it means": "Rows look made, but the export did not provide a completed timestamp.",
+            "Drilldown": "Use the raw IV room log or workflow timing detail.",
+        })
+    if not long_tat_rows.empty:
+        action_rows.append({
+            "Priority": "Medium",
+            "Item": "Slowest Prepare TAT Rows",
+            "Count": len(long_tat_rows),
+            "What it means": "These rows are at or above the 90th percentile for prepare TAT in this filtered view.",
+            "Drilldown": "Use TAT by Technician, User Shift Drilldown, or Slowest/Fastest Batches.",
+        })
+    if not canceled_review.empty:
+        action_rows.append({
+            "Priority": "Context",
+            "Item": "Canceled / Not Made",
+            "Count": len(canceled_review),
+            "What it means": "Sent to MedKeeper but likely canceled before compounding.",
+            "Drilldown": "Open the Canceled / Not Made Order Review expander below.",
+        })
+    if not batch_staged_review.empty:
+        action_rows.append({
+            "Priority": "Context",
+            "Item": "Batch Ready / Staged",
+            "Count": len(batch_staged_review),
+            "What it means": "Overnight setup/handoff rows; useful workflow context but excluded from make-time workload.",
+            "Drilldown": "Use Batch Workflow Split > Overnight Setup.",
+        })
+    if action_rows:
+        st.dataframe(pd.DataFrame(action_rows), width="stretch", hide_index=True)
+    else:
+        st.success("No obvious review queue items are present with the current filters.")
+
+with guide_tab:
+    st.markdown(
+        """
+        **Start here:** use the metrics and Overview tab to understand the selected window.
+
+        **For daily volume:** use Daily IV Volume, then click a day or choose Selected day / Custom range.
+
+        **For people questions:** use Technician Preparation Load first, then User Shift Drilldown for the exact work behind a person.
+
+        **For timing questions:** use Workflow Timing Detail when workflow exports are loaded. That is stronger than the summary TAT field.
+
+        **For batch questions:** use Batch Workflow Split. Overnight Setup is the setup/handoff work; Batch Making by Tech is the actual started-prepare workload.
+
+        **For audit/proof:** use Raw IV Room Log after the summary sections point you to the right row.
+        """
+    )
+
+st.caption("The detailed workbench below keeps the full audit trail, charts, and drilldowns available after the guided snapshot.")
 st.divider()
 
 col1, col2 = st.columns(2)
@@ -327,7 +467,7 @@ with col1:
     fig_daily.update_layout(coloraxis_showscale=False, height=360)
     daily_event = st.plotly_chart(
         fig_daily,
-        use_container_width=True,
+        width="stretch",
         on_select="rerun",
         selection_mode="points",
         key="iv_daily_volume_chart",
@@ -417,7 +557,7 @@ with col2:
             labels={"hour": "Hour of Day", "preparations": "Preparations"},
         )
         fig_hour.update_layout(height=360)
-        st.plotly_chart(fig_hour, use_container_width=True)
+        st.plotly_chart(fig_hour, width="stretch")
 
 if detail_mode != "Summary only" and detail_start is not None and detail_end is not None:
     day_detail = filtered[
@@ -454,7 +594,7 @@ if detail_mode != "Summary only" and detail_start is not None and detail_end is 
             title="Day Mix",
         )
         fig_day_mix.update_layout(height=320, showlegend=False)
-        st.plotly_chart(fig_day_mix, use_container_width=True)
+        st.plotly_chart(fig_day_mix, width="stretch")
 
     with day_table_col:
         detail_cols = [
@@ -512,7 +652,7 @@ with col3:
         color_continuous_scale="Tealgrn",
     )
     fig_drugs.update_layout(coloraxis_showscale=False, height=420)
-    st.plotly_chart(fig_drugs, use_container_width=True)
+    st.plotly_chart(fig_drugs, width="stretch")
 
 with col4:
     st.subheader("Technician Preparation Load")
@@ -537,7 +677,7 @@ with col4:
         color_continuous_scale="Greens",
     )
     fig_tech.update_layout(coloraxis_showscale=False, height=420)
-    st.plotly_chart(fig_tech, use_container_width=True)
+    st.plotly_chart(fig_tech, width="stretch")
 
 canceled_cols = [
     "order_dt",
@@ -662,7 +802,7 @@ with stat_col:
         hole=0.45,
     )
     fig_priority.update_layout(height=360)
-    st.plotly_chart(fig_priority, use_container_width=True)
+    st.plotly_chart(fig_priority, width="stretch")
 
 with tat_col:
     st.subheader("TAT by Technician")
@@ -688,7 +828,7 @@ with tat_col:
             labels={"tat_records": "TAT Records", "median_tat": "Median TAT (min)", "p90_tat": "P90 TAT"},
         )
         fig_tat.update_layout(height=360)
-        st.plotly_chart(fig_tat, use_container_width=True)
+        st.plotly_chart(fig_tat, width="stretch")
 
 st.subheader("Workflow Timing Detail")
 if workflow_filtered.empty:
