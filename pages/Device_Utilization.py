@@ -1834,6 +1834,84 @@ with tab_zero_gap:
                 "clinical_qty": st.column_config.NumberColumn("Clinical Qty", format="%.0f"),
             },
         )
+        if not gap_view.empty:
+            st.divider()
+            st.subheader("Row Audit Trail")
+            audit_rows = gap_view.reset_index(drop=True)
+
+            def format_gap_audit_row(idx):
+                row = audit_rows.loc[idx]
+                zero_time = pd.to_datetime(row.get("clinical_zero_time"), errors="coerce")
+                time_label = zero_time.strftime("%Y-%m-%d %H:%M") if pd.notna(zero_time) else "Unknown time"
+                return f"{time_label} | {row.get('device')} | {row.get('med_id')} | {row.get('clinical_user')}"
+
+            selected_gap_idx = st.selectbox(
+                "Audit one zero-to-restock row",
+                list(audit_rows.index),
+                format_func=format_gap_audit_row,
+                key="device_utilization_gap_audit_row",
+            )
+            selected_gap = audit_rows.loc[selected_gap_idx]
+            zero_time = pd.to_datetime(selected_gap.get("clinical_zero_time"), errors="coerce")
+            refill_time = pd.to_datetime(selected_gap.get("next_refill"), errors="coerce")
+            expected_time = pd.to_datetime(selected_gap.get("expected_restock_by"), errors="coerce")
+            audit_end_time = refill_time if pd.notna(refill_time) else expected_time + pd.Timedelta(days=1)
+
+            if pd.isna(zero_time) or pd.isna(audit_end_time):
+                st.info("This row does not have enough timing detail for a raw audit trail.")
+            else:
+                device = str(selected_gap.get("device") or "")
+                med_id = str(selected_gap.get("med_id") or "")
+                matching_events = pd.DataFrame()
+                if not followup_events.empty:
+                    matching_events = followup_events[
+                        followup_events["device"].eq(device)
+                        & followup_events["med_id"].eq(med_id)
+                        & followup_events["dt"].ge(zero_time)
+                        & followup_events["dt"].le(audit_end_time)
+                    ].copy()
+                matching_orders = pd.DataFrame()
+                if not followup_orders.empty:
+                    matching_orders = followup_orders[
+                        followup_orders["destination"].eq(device)
+                        & followup_orders["med_id"].eq(med_id)
+                        & followup_orders["dt"].ge(zero_time)
+                        & followup_orders["dt"].le(audit_end_time)
+                    ].copy()
+
+                e1, e2 = st.columns(2)
+                with e1:
+                    st.markdown("**Events Between Zero and Refill**")
+                    if matching_events.empty:
+                        st.warning("No matching Events rows were found between the clinical zero and the refill/expected deadline.")
+                    else:
+                        event_cols = [
+                            "dt", "user_name", "event_type", "qty",
+                            "beginning_qty", "ending_qty", "discrepancy_qty",
+                        ]
+                        st.dataframe(
+                            matching_events[[c for c in event_cols if c in matching_events.columns]].sort_values("dt"),
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "dt": st.column_config.DatetimeColumn("Date/Time", format="MM/DD/YY HH:mm"),
+                            },
+                        )
+                with e2:
+                    st.markdown("**Pharmacy Orders / Pull Rows Between Zero and Refill**")
+                    if matching_orders.empty:
+                        st.warning("No matching Pharmacy Orders rows were found for this med/device in the same interval.")
+                    else:
+                        order_cols = ["dt", "queue_id", "priority", "user_name", "qty", "is_pyxis_pull"]
+                        st.dataframe(
+                            matching_orders[[c for c in order_cols if c in matching_orders.columns]].sort_values("dt"),
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "dt": st.column_config.DatetimeColumn("Date/Time", format="MM/DD/YY HH:mm"),
+                                "is_pyxis_pull": st.column_config.CheckboxColumn("Pyxis Pull"),
+                            },
+                        )
 
 with tab_pull_miss:
     st.subheader("Scheduled Pull Miss Review")
