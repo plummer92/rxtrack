@@ -3233,6 +3233,7 @@ def render_page_links():
         safe_page_link("pages/Management_Coaching.py", label="Coaching", icon="📝")
         st.markdown('<div class="rx-nav-label">Performance</div>', unsafe_allow_html=True)
         safe_page_link("pages/2_🔍_Session_Explorer.py", label="Session Explorer", icon="🔍")
+        safe_page_link("pages/Position_KPIs.py", label="Position KPIs", icon="📏")
         safe_page_link("pages/📈_Shift_Audit_Monitor.py", label="Shift Audit Monitor", icon="📈")
         safe_page_link("pages/📊_Workforce_Intelligence.py", label="Workforce Intelligence", icon="📊")
         safe_page_link("pages/📥_Pends_Analyzer.py", label="Pends Analyzer", icon="📥")
