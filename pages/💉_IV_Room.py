@@ -24,6 +24,7 @@ def load_iv_recipe_log():
             drug_name,
             recipe_status,
             epic_recipe_text,
+            recipe_source,
             base_solution,
             additives_components,
             supplies_needed,
@@ -55,18 +56,19 @@ def load_iv_recipe_log():
 def save_iv_recipe(row):
     sql = text("""
         INSERT INTO iv_recipe_log (
-            drug_name, recipe_status, epic_recipe_text, base_solution, additives_components,
+            drug_name, recipe_status, epic_recipe_text, recipe_source, base_solution, additives_components,
             supplies_needed, step_1, step_2, step_3, step_4, labeling_notes,
             verification_notes, stability_bud_source, no_epic_cnr_record, approved_by, last_reviewed
         )
         VALUES (
-            :drug_name, :recipe_status, :epic_recipe_text, :base_solution, :additives_components,
+            :drug_name, :recipe_status, :epic_recipe_text, :recipe_source, :base_solution, :additives_components,
             :supplies_needed, :step_1, :step_2, :step_3, :step_4, :labeling_notes,
             :verification_notes, :stability_bud_source, :no_epic_cnr_record, :approved_by, :last_reviewed
         )
         ON CONFLICT (drug_name) DO UPDATE SET
             recipe_status = EXCLUDED.recipe_status,
             epic_recipe_text = EXCLUDED.epic_recipe_text,
+            recipe_source = EXCLUDED.recipe_source,
             base_solution = EXCLUDED.base_solution,
             additives_components = EXCLUDED.additives_components,
             supplies_needed = EXCLUDED.supplies_needed,
@@ -683,7 +685,7 @@ else:
             recipe_log[
                 [
                     "drug_name", "recipe_status", "epic_recipe_text", "base_solution", "additives_components",
-                    "supplies_needed", "step_1", "step_2", "step_3", "step_4",
+                    "recipe_source", "supplies_needed", "step_1", "step_2", "step_3", "step_4",
                     "labeling_notes", "verification_notes", "stability_bud_source",
                     "no_epic_cnr_record", "approved_by", "last_reviewed",
                 ]
@@ -694,7 +696,7 @@ else:
     else:
         recipe_top["recipe_status"] = None
     for col in [
-        "recipe_status", "epic_recipe_text", "base_solution", "additives_components", "supplies_needed",
+        "recipe_status", "epic_recipe_text", "recipe_source", "base_solution", "additives_components", "supplies_needed",
         "step_1", "step_2", "step_3", "step_4", "labeling_notes", "verification_notes",
         "stability_bud_source", "no_epic_cnr_record", "approved_by", "last_reviewed",
     ]:
@@ -810,6 +812,12 @@ else:
         if epic_recipe_text.strip():
             with st.expander("Autofill preview from pasted Epic recipe", expanded=False):
                 st.write(parsed_recipe)
+        recipe_source = st.text_input(
+            "Recipe source",
+            value=str(existing.get("recipe_source") or ""),
+            help="Examples: Epic CNR, ASHP Injectable Drug Information, King Guide, Lexicomp, package insert, local policy.",
+            key=recipe_widget_key(key_prefix, "recipe_source"),
+        )
         base_solution = st.text_input(
             "Base solution / final volume",
             value=str(existing.get("base_solution") or parsed_recipe.get("base_solution") or ""),
@@ -880,6 +888,7 @@ else:
                 "drug_name": selected_recipe_drug,
                 "recipe_status": recipe_status,
                 "epic_recipe_text": epic_recipe_text,
+                "recipe_source": recipe_source,
                 "base_solution": base_solution,
                 "additives_components": additives_components,
                 "supplies_needed": supplies_needed,
@@ -922,7 +931,7 @@ else:
                 review_queue[
                     [
                         "recipe_status", "drug_name", "no_epic_cnr_record", "preparations",
-                        "base_solution", "last_reviewed",
+                        "recipe_source", "base_solution", "last_reviewed",
                     ]
                 ],
                 width="stretch",
@@ -980,6 +989,12 @@ else:
                     key=recipe_widget_key(key_prefix, "epic_recipe_text"),
                 )
                 pharmacist_parsed = parse_epic_recipe_text(pharmacist_epic_text)
+                pharmacist_recipe_source = st.text_input(
+                    "Recipe source",
+                    value=str(review_existing.get("recipe_source") or ""),
+                    help="Examples: Epic CNR, ASHP Injectable Drug Information, King Guide, Lexicomp, package insert, local policy.",
+                    key=recipe_widget_key(key_prefix, "recipe_source"),
+                )
                 pharmacist_base_solution = st.text_input(
                     "Base solution / final volume",
                     value=str(review_existing.get("base_solution") or pharmacist_parsed.get("base_solution") or ""),
@@ -1054,16 +1069,20 @@ else:
                     and not pharmacist_no_cnr
                     and not str(pharmacist_epic_text or "").strip()
                 )
+                missing_source = final_decision and not str(pharmacist_recipe_source or "").strip()
                 if missing_reviewer:
                     st.error("Enter the pharmacist reviewer name before saving as reviewed or approved.")
                 elif missing_recipe_source:
                     st.error("Paste the Epic CNR recipe text or check No Epic CNR before saving as reviewed or approved.")
+                elif missing_source:
+                    st.error("Enter the recipe source before saving as reviewed or approved.")
                 else:
                     save_iv_recipe(
                         {
                             "drug_name": selected_review_drug,
                             "recipe_status": pharmacist_status,
                             "epic_recipe_text": pharmacist_epic_text,
+                            "recipe_source": pharmacist_recipe_source,
                             "base_solution": pharmacist_base_solution,
                             "additives_components": pharmacist_additives,
                             "supplies_needed": pharmacist_supplies,
@@ -1085,7 +1104,7 @@ else:
         st.markdown("**Recipe Library**")
         review_cols = [
             "recipe_status", "drug_name", "no_epic_cnr_record", "preparations",
-            "approved_by", "last_reviewed", "base_solution", "epic_recipe_text",
+            "approved_by", "last_reviewed", "recipe_source", "base_solution", "epic_recipe_text",
         ]
         st.dataframe(
             review_library[[c for c in review_cols if c in review_library.columns]].sort_values(
