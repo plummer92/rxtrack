@@ -288,6 +288,23 @@ def init_db():
             ON iv_room_workflow_detail (start_date);""",
         """CREATE INDEX IF NOT EXISTS idx_iv_room_workflow_detail_order_lot
             ON iv_room_workflow_detail (order_lot_number, dose_number);""",
+        """CREATE TABLE IF NOT EXISTS iv_recipe_log (
+            drug_name TEXT PRIMARY KEY,
+            recipe_status TEXT,
+            base_solution TEXT,
+            additives_components TEXT,
+            supplies_needed TEXT,
+            step_1 TEXT,
+            step_2 TEXT,
+            step_3 TEXT,
+            step_4 TEXT,
+            labeling_notes TEXT,
+            verification_notes TEXT,
+            stability_bud_source TEXT,
+            approved_by TEXT,
+            last_reviewed DATE,
+            updated_at TIMESTAMP DEFAULT NOW()
+        );""",
         """CREATE TABLE IF NOT EXISTS wcc_compounding_stats (
             pk TEXT PRIMARY KEY,
             component_name TEXT,

@@ -1,6 +1,7 @@
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from sqlalchemy import text
 
 import App
 
@@ -10,6 +11,72 @@ _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
 def to_csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8")
+
+
+@st.cache_data(ttl=60)
+def load_iv_recipe_log():
+    sql = text("""
+        SELECT
+            drug_name,
+            recipe_status,
+            base_solution,
+            additives_components,
+            supplies_needed,
+            step_1,
+            step_2,
+            step_3,
+            step_4,
+            labeling_notes,
+            verification_notes,
+            stability_bud_source,
+            approved_by,
+            last_reviewed,
+            updated_at
+        FROM iv_recipe_log
+        ORDER BY drug_name
+    """)
+    try:
+        with App.engine.connect() as conn:
+            df = pd.read_sql(sql, conn)
+        for col in ["last_reviewed", "updated_at"]:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def save_iv_recipe(row):
+    sql = text("""
+        INSERT INTO iv_recipe_log (
+            drug_name, recipe_status, base_solution, additives_components,
+            supplies_needed, step_1, step_2, step_3, step_4, labeling_notes,
+            verification_notes, stability_bud_source, approved_by, last_reviewed
+        )
+        VALUES (
+            :drug_name, :recipe_status, :base_solution, :additives_components,
+            :supplies_needed, :step_1, :step_2, :step_3, :step_4, :labeling_notes,
+            :verification_notes, :stability_bud_source, :approved_by, :last_reviewed
+        )
+        ON CONFLICT (drug_name) DO UPDATE SET
+            recipe_status = EXCLUDED.recipe_status,
+            base_solution = EXCLUDED.base_solution,
+            additives_components = EXCLUDED.additives_components,
+            supplies_needed = EXCLUDED.supplies_needed,
+            step_1 = EXCLUDED.step_1,
+            step_2 = EXCLUDED.step_2,
+            step_3 = EXCLUDED.step_3,
+            step_4 = EXCLUDED.step_4,
+            labeling_notes = EXCLUDED.labeling_notes,
+            verification_notes = EXCLUDED.verification_notes,
+            stability_bud_source = EXCLUDED.stability_bud_source,
+            approved_by = EXCLUDED.approved_by,
+            last_reviewed = EXCLUDED.last_reviewed,
+            updated_at = NOW()
+    """)
+    with App.engine.begin() as conn:
+        conn.execute(sql, row)
+    load_iv_recipe_log.clear()
 
 
 def collapse_iv_display_rows(df):
@@ -321,6 +388,7 @@ if selected_statuses:
 workflow_filtered = workflow_detail.copy()
 if not workflow_filtered.empty and selected_facilities and "facility_name" in workflow_filtered.columns:
     workflow_filtered = workflow_filtered[workflow_filtered["facility_name"].isin(selected_facilities)]
+recipe_log = load_iv_recipe_log()
 
 if filtered.empty:
     st.warning("No IV room records match the current filters.")
@@ -433,14 +501,32 @@ else:
         recipe_top = recipe_top.merge(recipe_steps, on="drug_name", how="left")
     else:
         recipe_top["workflow_steps_seen"] = ""
+    if not recipe_log.empty:
+        recipe_top = recipe_top.merge(
+            recipe_log[
+                [
+                    "drug_name", "recipe_status", "base_solution", "additives_components",
+                    "supplies_needed", "step_1", "step_2", "step_3", "step_4",
+                    "labeling_notes", "verification_notes", "stability_bud_source",
+                    "approved_by", "last_reviewed",
+                ]
+            ],
+            on="drug_name",
+            how="left",
+        )
+    else:
+        recipe_top["recipe_status"] = None
     for col in [
         "recipe_status", "base_solution", "additives_components", "supplies_needed",
         "step_1", "step_2", "step_3", "step_4", "labeling_notes", "verification_notes",
+        "stability_bud_source", "approved_by", "last_reviewed",
     ]:
-        recipe_top[col] = "" if col != "recipe_status" else "Needs recipe"
+        if col not in recipe_top.columns:
+            recipe_top[col] = None
+    recipe_top["recipe_status"] = recipe_top["recipe_status"].fillna("Needs recipe")
 
     st.caption(
-        "Ranks patient-specific, non-batch compounds by preparation volume. Use the blank columns as the starter recipe-log fields."
+        "Ranks patient-specific, non-batch compounds by preparation volume and shows saved recipe-log status."
     )
     st.dataframe(
         recipe_top,
@@ -449,6 +535,7 @@ else:
         column_config={
             "first_seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
             "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
+            "last_reviewed": st.column_config.DateColumn("Last Reviewed"),
             "median_tat_minutes": st.column_config.NumberColumn("Median TAT Min", format="%.1f"),
             "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
         },
@@ -459,6 +546,82 @@ else:
         file_name="iv_room_top_100_patient_specific_recipe_log_starter.csv",
         mime="text/csv",
     )
+
+    st.markdown("**Recipe Log Builder**")
+    selected_recipe_drug = st.selectbox(
+        "Select compound",
+        recipe_top["drug_name"].tolist(),
+        key="iv_recipe_builder_drug",
+    )
+    existing = {}
+    if not recipe_log.empty:
+        match = recipe_log[recipe_log["drug_name"].eq(selected_recipe_drug)]
+        if not match.empty:
+            existing = match.iloc[0].to_dict()
+    step_hint = recipe_top.loc[
+        recipe_top["drug_name"].eq(selected_recipe_drug), "workflow_steps_seen"
+    ].fillna("").astype(str)
+    if not step_hint.empty and step_hint.iloc[0]:
+        st.caption(f"Workflow steps seen: {step_hint.iloc[0]}")
+
+    with st.form("iv_recipe_log_form"):
+        r1, r2, r3 = st.columns(3)
+        recipe_status = r1.selectbox(
+            "Status",
+            ["Needs recipe", "Draft", "Needs pharmacist review", "Approved"],
+            index=["Needs recipe", "Draft", "Needs pharmacist review", "Approved"].index(
+                existing.get("recipe_status", "Needs recipe")
+                if existing.get("recipe_status", "Needs recipe") in ["Needs recipe", "Draft", "Needs pharmacist review", "Approved"]
+                else "Needs recipe"
+            ),
+        )
+        approved_by = r2.text_input("Approved by", value=str(existing.get("approved_by") or ""))
+        last_reviewed_value = existing.get("last_reviewed")
+        if pd.isna(last_reviewed_value) or last_reviewed_value is None:
+            last_reviewed_value = pd.Timestamp.today().date()
+        else:
+            last_reviewed_value = pd.to_datetime(last_reviewed_value, errors="coerce").date()
+        last_reviewed = r3.date_input("Last reviewed", value=last_reviewed_value)
+        base_solution = st.text_input("Base solution / final volume", value=str(existing.get("base_solution") or ""))
+        additives_components = st.text_area("Additives / components", value=str(existing.get("additives_components") or ""), height=90)
+        supplies_needed = st.text_area("Supplies needed", value=str(existing.get("supplies_needed") or ""), height=80)
+        s1, s2 = st.columns(2)
+        step_1 = s1.text_area("Step 1", value=str(existing.get("step_1") or ""), height=90)
+        step_2 = s2.text_area("Step 2", value=str(existing.get("step_2") or ""), height=90)
+        s3, s4 = st.columns(2)
+        step_3 = s3.text_area("Step 3", value=str(existing.get("step_3") or ""), height=90)
+        step_4 = s4.text_area("Step 4", value=str(existing.get("step_4") or ""), height=90)
+        stability_bud_source = st.text_area(
+            "Stability / BUD source",
+            value=str(existing.get("stability_bud_source") or ""),
+            height=80,
+            help="Examples: ASHP Injectable Drug Information, King Guide, Lexicomp, package insert, local policy.",
+        )
+        labeling_notes = st.text_area("Labeling notes", value=str(existing.get("labeling_notes") or ""), height=80)
+        verification_notes = st.text_area("Verification notes", value=str(existing.get("verification_notes") or ""), height=80)
+        submitted = st.form_submit_button("Save recipe log")
+
+    if submitted:
+        save_iv_recipe(
+            {
+                "drug_name": selected_recipe_drug,
+                "recipe_status": recipe_status,
+                "base_solution": base_solution,
+                "additives_components": additives_components,
+                "supplies_needed": supplies_needed,
+                "step_1": step_1,
+                "step_2": step_2,
+                "step_3": step_3,
+                "step_4": step_4,
+                "labeling_notes": labeling_notes,
+                "verification_notes": verification_notes,
+                "stability_bud_source": stability_bud_source,
+                "approved_by": approved_by,
+                "last_reviewed": last_reviewed,
+            }
+        )
+        st.success(f"Saved recipe log for {selected_recipe_drug}.")
+        st.rerun()
 
 st.subheader("Manager Snapshot")
 snapshot_tab, action_tab, guide_tab = st.tabs(["Overview", "Action Queue", "How to Read"])
