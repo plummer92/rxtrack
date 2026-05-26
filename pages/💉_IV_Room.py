@@ -17,8 +17,19 @@ def to_csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8")
 
 
+def ensure_iv_recipe_log_schema():
+    try:
+        App.init_db()
+        with App.engine.begin() as conn:
+            conn.execute(text("ALTER TABLE iv_recipe_log ADD COLUMN IF NOT EXISTS recipe_source TEXT;"))
+        return True
+    except Exception:
+        return False
+
+
 @st.cache_data(ttl=60)
 def load_iv_recipe_log():
+    ensure_iv_recipe_log_schema()
     sql = text("""
         SELECT
             drug_name,
@@ -50,10 +61,42 @@ def load_iv_recipe_log():
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         return df
     except Exception:
-        return pd.DataFrame()
+        legacy_sql = text("""
+            SELECT
+                drug_name,
+                recipe_status,
+                epic_recipe_text,
+                NULL::text AS recipe_source,
+                base_solution,
+                additives_components,
+                supplies_needed,
+                step_1,
+                step_2,
+                step_3,
+                step_4,
+                labeling_notes,
+                verification_notes,
+                stability_bud_source,
+                COALESCE(no_epic_cnr_record, FALSE) AS no_epic_cnr_record,
+                approved_by,
+                last_reviewed,
+                updated_at
+            FROM iv_recipe_log
+            ORDER BY drug_name
+        """)
+        try:
+            with App.engine.connect() as conn:
+                df = pd.read_sql(legacy_sql, conn)
+            for col in ["last_reviewed", "updated_at"]:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+            return df
+        except Exception:
+            return pd.DataFrame()
 
 
 def save_iv_recipe(row):
+    ensure_iv_recipe_log_schema()
     sql = text("""
         INSERT INTO iv_recipe_log (
             drug_name, recipe_status, epic_recipe_text, recipe_source, base_solution, additives_components,
