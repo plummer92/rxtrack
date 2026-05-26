@@ -695,9 +695,13 @@ else:
     )
 
     st.markdown("**Recipe Log Builder**")
+    recipe_work_queue = recipe_top[recipe_top["recipe_status"].eq("Needs recipe")].copy()
+    if recipe_work_queue.empty:
+        st.success("All current Top 100 patient-specific compounds have a saved recipe-log status.")
+        recipe_work_queue = recipe_top.copy()
     selected_recipe_drug = st.selectbox(
-        "Select compound",
-        recipe_top["drug_name"].tolist(),
+        "Select compound needing recipe",
+        recipe_work_queue["drug_name"].tolist(),
         key="iv_recipe_builder_drug",
     )
     existing = {}
@@ -805,6 +809,36 @@ else:
         )
         st.success(f"Saved recipe log for {selected_recipe_drug}.")
         st.rerun()
+
+    review_library = recipe_top[
+        recipe_top["recipe_status"].ne("Needs recipe") | recipe_top["no_epic_cnr_record"]
+    ].copy()
+    st.markdown("**Pharmacist Review & Recipe Library**")
+    if review_library.empty:
+        st.info("No saved recipes are waiting for pharmacist review yet.")
+    else:
+        review_cols = [
+            "recipe_status", "drug_name", "no_epic_cnr_record", "preparations",
+            "approved_by", "last_reviewed", "base_solution", "epic_recipe_text",
+        ]
+        st.dataframe(
+            review_library[[c for c in review_cols if c in review_library.columns]].sort_values(
+                ["recipe_status", "preparations"], ascending=[True, False]
+            ),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "no_epic_cnr_record": st.column_config.CheckboxColumn("No Epic CNR"),
+                "last_reviewed": st.column_config.DateColumn("Last Reviewed"),
+                "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+            },
+        )
+        st.download_button(
+            "Download pharmacist review recipe library CSV",
+            data=to_csv_bytes(review_library),
+            file_name="iv_room_pharmacist_recipe_review_library.csv",
+            mime="text/csv",
+        )
 
 st.subheader("Manager Snapshot")
 snapshot_tab, action_tab, guide_tab = st.tabs(["Overview", "Action Queue", "How to Read"])
