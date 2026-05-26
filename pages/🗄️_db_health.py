@@ -57,14 +57,14 @@ def get_table_health():
         ("pharmacy_orders",     "Pharmacy Orders",              "dt",        "Pharmacy Workflow Report"),
         ("staff_schedule",      "Staff Schedule",               "dt",        "Staff Schedule"),
         ("attendance_punches",  "Attendance Punches",           "dt_date",   "Attendance Tracking"),
-        ("med_costs",           "Med Cost Prices",              None,        "Inventory Audit (Prices)"),
+        ("med_costs",           "Med Cost Prices",              None,        "Audit Transaction Detail RC or Med Cost Prices (Legacy)"),
         ("carousel_master_mapping","Carousel Master Mapping",   None,        "Admin Upload"),
         ("cycle_count_variances","Cycle Count Variances",       "dt",        "Cycle Count Variance Report"),
         ("cycle_count_status",  "Cycle Count Status Snapshot",  "snapshot_date", "Days Since Last Cycle Count Report"),
         ("buyer_formulary_listing","Buyer Formulary Listing",   "snapshot_date", "Buyer Formulary Listing Report"),
         ("physical_inventory_snapshots","Physical Inventory Snapshots", "snapshot_date", "Physical Inventory Report"),
         ("audit_transaction_detail_rc","Audit Transaction Detail RC", "dt", "Audit Transaction Detail RC"),
-        ("inventory_detailed",  "Detailed Inventory",           None,        "Inventory Audit (Detailed RC)"),
+        ("inventory_detailed",  "Detailed Inventory",           None,        "Detailed Inventory Snapshot (Legacy RC)"),
     ]
 
     results = []
@@ -418,7 +418,7 @@ if cost_cov["missing"] > 0:
             },
             hide_index=True
         )
-        st.caption("Fix by uploading an Inventory Audit (Prices), Inventory Audit (Detailed RC), or Physical Inventory Report file.")
+        st.caption("Fix by uploading Audit Transaction Detail RC, Med Cost Prices (Legacy), or Physical Inventory Report.")
 else:
     st.success("✅ All medications have a cost price loaded.")
 

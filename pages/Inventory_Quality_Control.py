@@ -587,12 +587,13 @@ def load_latest_isa_items():
 def load_inventory_counts():
     sql = text("""
         SELECT
-            station AS isa_name,
-            med_id,
-            SUM(current_count) AS current_count,
+            device AS isa_name,
+            UPPER(TRIM(med_id)) AS med_id,
+            SUM(COALESCE(current_quantity, 0)) AS current_count,
             COUNT(*) AS pocket_count
-        FROM inventory_detailed
-        GROUP BY station, med_id
+        FROM device_inventory
+        WHERE COALESCE(TRIM(med_id), '') <> ''
+        GROUP BY device, UPPER(TRIM(med_id))
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn)
@@ -633,17 +634,19 @@ def load_latest_physical_inventory_snapshots():
 def load_current_pyxis_inventory():
     sql = text("""
         SELECT
-            station,
-            med_id,
-            med_desc,
-            current_count,
-            pocket_location,
-            unit_cost,
-            current_count * COALESCE(unit_cost, 0) AS inventory_value
-        FROM inventory_detailed
-        WHERE COALESCE(current_count, 0) > 0
-          AND COALESCE(station, '') NOT ILIKE 'CAR%%'
-        ORDER BY station, pocket_location
+            d.device AS station,
+            UPPER(TRIM(d.med_id)) AS med_id,
+            d.med_desc,
+            d.current_quantity AS current_count,
+            d.pocket_location,
+            c.cost_per_unit AS unit_cost,
+            d.current_quantity * COALESCE(c.cost_per_unit, 0) AS inventory_value
+        FROM device_inventory d
+        LEFT JOIN med_costs c ON UPPER(TRIM(d.med_id)) = UPPER(TRIM(c.med_id))
+        WHERE COALESCE(d.current_quantity, 0) > 0
+          AND COALESCE(d.device, '') NOT ILIKE 'CAR%%'
+          AND COALESCE(TRIM(d.med_id), '') <> ''
+        ORDER BY d.device, d.pocket_location
     """)
     with engine.connect() as conn:
         return pd.read_sql(sql, conn)
@@ -2992,7 +2995,7 @@ with tab_turns:
     )
 
     if inventory_turns_summary.empty:
-        st.warning("Inventory turns need Pharmacy Workflow deduction rows plus either Detailed Inventory or Inventory Audit rows.")
+        st.warning("Inventory turns need Pharmacy Workflow deduction rows plus a current Device Inventory List and med costs.")
     else:
         period_days = max((pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 1, 1)
         st.caption(f"Analysis window: {start_date:%m/%d/%Y} through {end_date:%m/%d/%Y} ({period_days} day{'s' if period_days != 1 else ''})")

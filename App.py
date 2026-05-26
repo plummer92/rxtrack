@@ -1492,6 +1492,28 @@ def clean_audit_transaction_detail_rc(df, source_filename=""):
     return df[["pk"] + required]
 
 
+def build_med_cost_updates_from_audit_detail(df):
+    if df is None or df.empty or "med_id" not in df.columns or "unit_cost" not in df.columns:
+        return pd.DataFrame(columns=["med_id", "cost_per_unit"])
+
+    costs = df[["med_id", "unit_cost"] + (["dt"] if "dt" in df.columns else [])].copy()
+    costs["med_id"] = costs["med_id"].fillna("").astype(str).str.strip().str.upper()
+    costs["cost_per_unit"] = pd.to_numeric(costs["unit_cost"], errors="coerce")
+    costs = costs[costs["med_id"].ne("") & costs["cost_per_unit"].gt(0)].copy()
+    if costs.empty:
+        return pd.DataFrame(columns=["med_id", "cost_per_unit"])
+
+    if "dt" in costs.columns:
+        costs["dt"] = pd.to_datetime(costs["dt"], errors="coerce")
+        costs = costs.sort_values(["med_id", "dt"], na_position="first")
+        costs = costs.drop_duplicates("med_id", keep="last")
+    else:
+        costs = costs.drop_duplicates("med_id", keep="last")
+
+    costs = costs[["med_id", "cost_per_unit"]].astype(object).where(pd.notna(costs), None)
+    return costs
+
+
 def clean_packaging_report(file_obj):
     file_obj.seek(0)
     name = getattr(file_obj, "name", "packaging_report")
@@ -3507,7 +3529,7 @@ if _is_main:
         st.subheader("📤 Ingest Data")
         u_type = st.selectbox("File Type:", [
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
-            "Inventory Audit (Prices)", "Inventory Audit (Detailed RC)", "Staff Schedule", "Attendance Tracking",
+            "Med Cost Prices (Legacy Inventory Audit)", "Detailed Inventory Snapshot (Legacy RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching", "IV Room Workflow Detail",
             "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats",
             "Days Since Last Cycle Count Report", "Cycle Count Variance Report",
@@ -3515,6 +3537,12 @@ if _is_main:
             "Audit Transaction Detail RC",
             "Packaging Report", "Device Inventory List"
         ])
+        if u_type == "Audit Transaction Detail RC":
+            st.caption("This upload also refreshes med cost prices from the UnitCost column.")
+        elif u_type == "Med Cost Prices (Legacy Inventory Audit)":
+            st.caption("Legacy price-only upload. Audit Transaction Detail RC now refreshes med costs too.")
+        elif u_type == "Detailed Inventory Snapshot (Legacy RC)":
+            st.caption("Legacy current-inventory snapshot. Device Inventory List is the preferred current Pyxis inventory source.")
         upload_types = None if u_type == "Packaging Report" else ["csv", "xlsx"]
         uploaded_files = st.file_uploader(f"Upload {u_type}", type=upload_types, accept_multiple_files=True)
 
@@ -3728,7 +3756,7 @@ if _is_main:
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Pharmacy Orders")
 
-                elif u_type == "Inventory Audit (Prices)":
+                elif u_type == "Med Cost Prices (Legacy Inventory Audit)":
                     clean = clean_inventory_file(raw)
                     sql_costs = """INSERT INTO med_costs (med_id, cost_per_unit) VALUES (%(med_id)s, %(unit_cost)s) 
                                    ON CONFLICT (med_id) DO UPDATE SET cost_per_unit = EXCLUDED.cost_per_unit;"""
@@ -3760,7 +3788,7 @@ if _is_main:
                              ON CONFLICT (pk) DO NOTHING;"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Attendance")
 
-                elif u_type == "Inventory Audit (Detailed RC)":
+                elif u_type == "Detailed Inventory Snapshot (Legacy RC)":
                     clean = clean_detailed_inventory(raw)
                     sql = """INSERT INTO inventory_detailed 
                              (pk, station, med_id, med_desc, unit_cost, current_count, pocket_location)
@@ -3956,17 +3984,57 @@ if _is_main:
                              ON CONFLICT (pk) DO UPDATE SET
                                  location = EXCLUDED.location,
                                  station_name = EXCLUDED.station_name,
+                                 source_system = EXCLUDED.source_system,
                                  user_name = EXCLUDED.user_name,
+                                 user_id = EXCLUDED.user_id,
                                  user_type = EXCLUDED.user_type,
+                                 priority_code = EXCLUDED.priority_code,
                                  transaction_type = EXCLUDED.transaction_type,
                                  med_desc = EXCLUDED.med_desc,
+                                 generic_name = EXCLUDED.generic_name,
+                                 med_class = EXCLUDED.med_class,
+                                 therapeutic_class = EXCLUDED.therapeutic_class,
+                                 drawer_subdrawer_pocket = EXCLUDED.drawer_subdrawer_pocket,
+                                 min_qty = EXCLUDED.min_qty,
+                                 max_qty = EXCLUDED.max_qty,
+                                 dispense_amount = EXCLUDED.dispense_amount,
                                  qty = EXCLUDED.qty,
                                  beginning_qty = EXCLUDED.beginning_qty,
                                  ending_qty = EXCLUDED.ending_qty,
+                                 unit_cost = EXCLUDED.unit_cost,
+                                 extended_cost = EXCLUDED.extended_cost,
+                                 discrepancy = EXCLUDED.discrepancy,
+                                 discrepancy_difference = EXCLUDED.discrepancy_difference,
+                                 discrepancy_resolution_desc = EXCLUDED.discrepancy_resolution_desc,
+                                 discrepancy_reason = EXCLUDED.discrepancy_reason,
+                                 correction_quantity_before = EXCLUDED.correction_quantity_before,
+                                 correction_quantity_after = EXCLUDED.correction_quantity_after,
+                                 correction = EXCLUDED.correction,
+                                 resolution_user = EXCLUDED.resolution_user,
+                                 resolution_dt = EXCLUDED.resolution_dt,
                                  waste_amount = EXCLUDED.waste_amount,
+                                 waste_reason = EXCLUDED.waste_reason,
+                                 witness_user_name = EXCLUDED.witness_user_name,
+                                 override_reason = EXCLUDED.override_reason,
+                                 override_flag = EXCLUDED.override_flag,
+                                 ordering_physician_present = EXCLUDED.ordering_physician_present,
+                                 attending_physician_present = EXCLUDED.attending_physician_present,
                                  source_filename = EXCLUDED.source_filename,
                                  uploaded_at = NOW();"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Audit Transaction Detail RC")
+                    cost_updates = build_med_cost_updates_from_audit_detail(clean)
+                    if not cost_updates.empty:
+                        sql_costs = """INSERT INTO med_costs (med_id, cost_per_unit)
+                                       VALUES (%(med_id)s, %(cost_per_unit)s)
+                                       ON CONFLICT (med_id) DO UPDATE SET
+                                           cost_per_unit = EXCLUDED.cost_per_unit;"""
+                        execute_statement(
+                            sql_costs,
+                            cost_updates.to_dict("records"),
+                            batch=True,
+                            table_name="Med Costs from Audit Detail",
+                        )
+                        st.info(f"Refreshed {len(cost_updates)} med cost price{'s' if len(cost_updates) != 1 else ''} from Audit Transaction Detail RC.")
 
                 elif u_type == "Packaging Report":
                     clean = pd.concat([clean_packaging_report(file) for file in uploaded_files], ignore_index=True)
