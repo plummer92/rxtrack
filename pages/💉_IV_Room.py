@@ -9,6 +9,9 @@ import App
 _debug_event = getattr(App, "record_ui_debug_event", lambda *args, **kwargs: None)
 _debug_panel = getattr(App, "render_ui_debugger", lambda *args, **kwargs: None)
 
+RECIPE_STATUS_OPTIONS = ["Needs recipe", "Draft", "Needs pharmacist review", "Pharmacist reviewed", "Approved"]
+FINAL_RECIPE_STATUSES = ["Pharmacist reviewed", "Approved"]
+
 
 def to_csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8")
@@ -149,6 +152,30 @@ def parse_epic_recipe_text(recipe_text):
 def recipe_widget_key(drug_name, field_name):
     safe_drug = re.sub(r"[^a-z0-9]+", "_", str(drug_name).casefold()).strip("_")
     return f"iv_recipe_{field_name}_{safe_drug[:80]}"
+
+
+def recipe_existing_row(recipe_log, drug_name):
+    if not drug_name or recipe_log.empty:
+        return {}
+    match = recipe_log[recipe_log["drug_name"].eq(drug_name)]
+    if match.empty:
+        return {}
+    return match.iloc[0].to_dict()
+
+
+def recipe_status_index(status):
+    if status in RECIPE_STATUS_OPTIONS:
+        return RECIPE_STATUS_OPTIONS.index(status)
+    return 0
+
+
+def recipe_review_date(value):
+    if pd.isna(value) or value is None:
+        return pd.Timestamp.today().date()
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        return pd.Timestamp.today().date()
+    return parsed.date()
 
 
 def build_medkeeper_phase_timing(workflow_df):
@@ -737,10 +764,8 @@ else:
             key=f"iv_recipe_builder_drug_{builder_mode}",
         )
     existing = {}
-    if selected_recipe_drug and not recipe_log.empty:
-        match = recipe_log[recipe_log["drug_name"].eq(selected_recipe_drug)]
-        if not match.empty:
-            existing = match.iloc[0].to_dict()
+    if selected_recipe_drug:
+        existing = recipe_existing_row(recipe_log, selected_recipe_drug)
     if selected_recipe_drug:
         step_hint = recipe_top.loc[
             recipe_top["drug_name"].eq(selected_recipe_drug), "workflow_steps_seen"
@@ -753,12 +778,8 @@ else:
         r1, r2, r3 = st.columns(3)
         recipe_status = r1.selectbox(
             "Status",
-            ["Needs recipe", "Draft", "Needs pharmacist review", "Approved"],
-            index=["Needs recipe", "Draft", "Needs pharmacist review", "Approved"].index(
-                existing.get("recipe_status", "Needs recipe")
-                if existing.get("recipe_status", "Needs recipe") in ["Needs recipe", "Draft", "Needs pharmacist review", "Approved"]
-                else "Needs recipe"
-            ),
+            RECIPE_STATUS_OPTIONS,
+            index=recipe_status_index(existing.get("recipe_status", "Needs recipe")),
             key=recipe_widget_key(key_prefix, "status"),
         )
         approved_by = r2.text_input(
@@ -773,13 +794,9 @@ else:
             key=recipe_widget_key(key_prefix, "no_epic_cnr"),
         )
         last_reviewed_value = existing.get("last_reviewed")
-        if pd.isna(last_reviewed_value) or last_reviewed_value is None:
-            last_reviewed_value = pd.Timestamp.today().date()
-        else:
-            last_reviewed_value = pd.to_datetime(last_reviewed_value, errors="coerce").date()
         last_reviewed = r3.date_input(
             "Last reviewed",
-            value=last_reviewed_value,
+            value=recipe_review_date(last_reviewed_value),
             key=recipe_widget_key(key_prefix, "last_reviewed"),
         )
         epic_recipe_text = st.text_area(
@@ -888,6 +905,184 @@ else:
     if review_library.empty:
         st.info("No saved recipes are waiting for pharmacist review yet.")
     else:
+        review_queue = review_library[
+            ~review_library["recipe_status"].isin(FINAL_RECIPE_STATUSES)
+        ].copy()
+        q1, q2, q3 = st.columns(3)
+        q1.metric("Needs Review", f"{len(review_queue):,}")
+        q2.metric("Reviewed / Approved", f"{int(review_library['recipe_status'].isin(FINAL_RECIPE_STATUSES).sum()):,}")
+        q3.metric("No Epic CNR", f"{int(review_library['no_epic_cnr_record'].sum()):,}")
+
+        if review_queue.empty:
+            st.success("No saved recipes currently need pharmacist review.")
+        else:
+            st.markdown("**Pharmacist Review Queue**")
+            review_queue = review_queue.sort_values(["recipe_status", "preparations"], ascending=[True, False])
+            st.dataframe(
+                review_queue[
+                    [
+                        "recipe_status", "drug_name", "no_epic_cnr_record", "preparations",
+                        "base_solution", "last_reviewed",
+                    ]
+                ],
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "recipe_status": st.column_config.TextColumn("Status"),
+                    "no_epic_cnr_record": st.column_config.CheckboxColumn("No Epic CNR"),
+                    "last_reviewed": st.column_config.DateColumn("Last Reviewed"),
+                    "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+                },
+            )
+            selected_review_drug = st.selectbox(
+                "Select recipe for pharmacist review",
+                review_queue["drug_name"].tolist(),
+                key="iv_pharmacist_review_drug",
+            )
+            review_existing = recipe_existing_row(recipe_log, selected_review_drug)
+            review_context = recipe_top[recipe_top["drug_name"].eq(selected_review_drug)]
+            if not review_context.empty:
+                context_row = review_context.iloc[0]
+                st.caption(
+                    f"Preparations: {int(context_row.get('preparations') or 0):,} | "
+                    f"Current status: {context_row.get('recipe_status') or 'Needs recipe'}"
+                )
+
+            with st.form("iv_pharmacist_review_form"):
+                key_prefix = f"pharm_review_{selected_review_drug or 'none'}"
+                pr1, pr2, pr3 = st.columns(3)
+                pharmacist_status = pr1.selectbox(
+                    "Review decision",
+                    ["Pharmacist reviewed", "Approved", "Needs recipe", "Draft", "Needs pharmacist review"],
+                    index=0,
+                    key=recipe_widget_key(key_prefix, "status"),
+                )
+                pharmacist_reviewer = pr2.text_input(
+                    "Reviewed by",
+                    value=str(review_existing.get("approved_by") or ""),
+                    key=recipe_widget_key(key_prefix, "approved_by"),
+                )
+                pharmacist_reviewed_date = pr3.date_input(
+                    "Review date",
+                    value=recipe_review_date(review_existing.get("last_reviewed")),
+                    key=recipe_widget_key(key_prefix, "last_reviewed"),
+                )
+                pharmacist_no_cnr = st.checkbox(
+                    "No Epic CNR recipe found",
+                    value=bool(review_existing.get("no_epic_cnr_record") or False),
+                    help="Use this when Epic CNR does not have a compounding/repackaging recipe for this medication.",
+                    key=recipe_widget_key(key_prefix, "no_epic_cnr"),
+                )
+                pharmacist_epic_text = st.text_area(
+                    "Epic CNR recipe text",
+                    value=str(review_existing.get("epic_recipe_text") or ""),
+                    height=220,
+                    key=recipe_widget_key(key_prefix, "epic_recipe_text"),
+                )
+                pharmacist_parsed = parse_epic_recipe_text(pharmacist_epic_text)
+                pharmacist_base_solution = st.text_input(
+                    "Base solution / final volume",
+                    value=str(review_existing.get("base_solution") or pharmacist_parsed.get("base_solution") or ""),
+                    key=recipe_widget_key(key_prefix, "base_solution"),
+                )
+                pharmacist_additives = st.text_area(
+                    "Additives / components",
+                    value=str(review_existing.get("additives_components") or ""),
+                    height=80,
+                    key=recipe_widget_key(key_prefix, "additives_components"),
+                )
+                pharmacist_supplies = st.text_area(
+                    "Supplies needed",
+                    value=str(review_existing.get("supplies_needed") or ""),
+                    height=80,
+                    key=recipe_widget_key(key_prefix, "supplies_needed"),
+                )
+                prs1, prs2 = st.columns(2)
+                pharmacist_step_1 = prs1.text_area(
+                    "Step 1",
+                    value=str(review_existing.get("step_1") or pharmacist_parsed.get("step_1") or ""),
+                    height=90,
+                    key=recipe_widget_key(key_prefix, "step_1"),
+                )
+                pharmacist_step_2 = prs2.text_area(
+                    "Step 2",
+                    value=str(review_existing.get("step_2") or pharmacist_parsed.get("step_2") or ""),
+                    height=90,
+                    key=recipe_widget_key(key_prefix, "step_2"),
+                )
+                prs3, prs4 = st.columns(2)
+                pharmacist_step_3 = prs3.text_area(
+                    "Step 3",
+                    value=str(review_existing.get("step_3") or pharmacist_parsed.get("step_3") or ""),
+                    height=90,
+                    key=recipe_widget_key(key_prefix, "step_3"),
+                )
+                pharmacist_step_4 = prs4.text_area(
+                    "Step 4",
+                    value=str(review_existing.get("step_4") or pharmacist_parsed.get("step_4") or ""),
+                    height=90,
+                    key=recipe_widget_key(key_prefix, "step_4"),
+                )
+                pharmacist_stability = st.text_area(
+                    "Stability / BUD source",
+                    value=str(review_existing.get("stability_bud_source") or pharmacist_parsed.get("stability_bud_source") or ""),
+                    height=80,
+                    key=recipe_widget_key(key_prefix, "stability_bud_source"),
+                )
+                pharmacist_labeling = st.text_area(
+                    "Labeling notes",
+                    value=str(review_existing.get("labeling_notes") or pharmacist_parsed.get("labeling_notes") or ""),
+                    height=80,
+                    key=recipe_widget_key(key_prefix, "labeling_notes"),
+                )
+                pharmacist_verification = st.text_area(
+                    "Pharmacist verification notes",
+                    value=str(review_existing.get("verification_notes") or pharmacist_parsed.get("verification_notes") or ""),
+                    height=90,
+                    key=recipe_widget_key(key_prefix, "verification_notes"),
+                )
+                pharmacist_submitted = st.form_submit_button(
+                    "Save pharmacist review",
+                    disabled=not bool(selected_review_drug),
+                )
+
+            if pharmacist_submitted and selected_review_drug:
+                final_decision = pharmacist_status in FINAL_RECIPE_STATUSES
+                missing_reviewer = final_decision and not str(pharmacist_reviewer or "").strip()
+                missing_recipe_source = (
+                    final_decision
+                    and not pharmacist_no_cnr
+                    and not str(pharmacist_epic_text or "").strip()
+                )
+                if missing_reviewer:
+                    st.error("Enter the pharmacist reviewer name before saving as reviewed or approved.")
+                elif missing_recipe_source:
+                    st.error("Paste the Epic CNR recipe text or check No Epic CNR before saving as reviewed or approved.")
+                else:
+                    save_iv_recipe(
+                        {
+                            "drug_name": selected_review_drug,
+                            "recipe_status": pharmacist_status,
+                            "epic_recipe_text": pharmacist_epic_text,
+                            "base_solution": pharmacist_base_solution,
+                            "additives_components": pharmacist_additives,
+                            "supplies_needed": pharmacist_supplies,
+                            "step_1": pharmacist_step_1,
+                            "step_2": pharmacist_step_2,
+                            "step_3": pharmacist_step_3,
+                            "step_4": pharmacist_step_4,
+                            "labeling_notes": pharmacist_labeling,
+                            "verification_notes": pharmacist_verification,
+                            "stability_bud_source": pharmacist_stability,
+                            "no_epic_cnr_record": pharmacist_no_cnr,
+                            "approved_by": pharmacist_reviewer,
+                            "last_reviewed": pharmacist_reviewed_date,
+                        }
+                    )
+                    st.success(f"Saved pharmacist review for {selected_review_drug}.")
+                    st.rerun()
+
+        st.markdown("**Recipe Library**")
         review_cols = [
             "recipe_status", "drug_name", "no_epic_cnr_record", "preparations",
             "approved_by", "last_reviewed", "base_solution", "epic_recipe_text",
