@@ -168,6 +168,65 @@ def add_batch_make_window(batch_df, workflow_df):
     return out.drop(columns=["batch_make_start_dt_workflow", "batch_make_stop_dt_workflow"], errors="ignore")
 
 
+def build_workload_from_workflow_detail(workflow_df):
+    if workflow_df.empty:
+        return pd.DataFrame()
+
+    wf = workflow_df.copy()
+    for col in ["facility_name", "order_lot_number", "dose_number", "drug_name", "prepared_by", "approved_by"]:
+        if col not in wf.columns:
+            wf[col] = ""
+        wf[col] = wf[col].fillna("").astype(str).str.strip()
+    for col in ["ordered_on", "start_dt", "stop_dt"]:
+        if col in wf.columns:
+            wf[col] = pd.to_datetime(wf[col], errors="coerce")
+    if "total_duration_minutes" in wf.columns:
+        wf["total_duration_minutes"] = pd.to_numeric(wf["total_duration_minutes"], errors="coerce")
+
+    grouped = (
+        wf.groupby(["facility_name", "order_lot_number", "dose_number", "drug_name"], dropna=False)
+        .agg(
+            order_date=("ordered_on", "min"),
+            order_dt=("start_dt", "min"),
+            completed_on=("stop_dt", "max"),
+            prepare_tat_minutes=("total_duration_minutes", "sum"),
+            prepared_by=("prepared_by", lambda s: next((v for v in s if v), "Unassigned")),
+            approved_by=("approved_by", lambda s: next((v for v in s if v), "Unassigned")),
+        )
+        .reset_index()
+    )
+    if grouped.empty:
+        return grouped
+
+    grouped["order_date"] = grouped["order_date"].fillna(grouped["order_dt"])
+    grouped["order_date"] = pd.to_datetime(grouped["order_date"], errors="coerce").dt.date
+    grouped["ordered_time"] = pd.to_datetime(grouped["order_dt"], errors="coerce").dt.strftime("%H:%M")
+    grouped["compound_type"] = "Patient Specific"
+    grouped["num_preparations"] = 1
+    grouped["priority_name"] = ""
+    grouped["secondary_approved_by"] = "Unassigned"
+    grouped["pk"] = grouped.apply(
+        lambda row: "|".join(
+            [
+                "workflow-detail",
+                str(row.get("facility_name") or ""),
+                str(row.get("order_lot_number") or ""),
+                str(row.get("dose_number") or ""),
+                str(row.get("drug_name") or ""),
+            ]
+        ),
+        axis=1,
+    )
+    return grouped[
+        [
+            "pk", "facility_name", "order_lot_number", "compound_type",
+            "num_preparations", "dose_number", "drug_name", "order_date",
+            "ordered_time", "order_dt", "completed_on", "priority_name",
+            "prepare_tat_minutes", "prepared_by", "approved_by", "secondary_approved_by",
+        ]
+    ]
+
+
 st.set_page_config(page_title="IV Room", page_icon="💉", layout="wide")
 App.apply_global_styles()
 
@@ -196,8 +255,17 @@ with st.spinner("Loading IV room workload..."):
     workflow_detail = load_iv_room_workflow_detail(start_date, end_date)
 
 if df_iv.empty:
-    st.info("No IV room workload found for this date range. Upload an `IV Room Workload` or `IV Room Batching` file from the sidebar to get started.")
-    st.stop()
+    if workflow_detail.empty:
+        st.info("No IV room workload found for this date range. Upload an `IV Room Workload`, `IV Room Batching`, or `IV Room Workflow Detail` file from the sidebar to get started.")
+        st.stop()
+    df_iv = build_workload_from_workflow_detail(workflow_detail)
+    if df_iv.empty:
+        st.info("IV Room Workflow Detail is loaded, but RxTrack could not build order rows from it for this date range.")
+        st.stop()
+    st.warning(
+        "Using IV Room Workflow Detail as the order source because no IV Room Workload/Batching rows are loaded for this range. "
+        "Volume and timing will work, but priority, compound type, and preparation counts are less complete until the workload file is uploaded."
+    )
 
 work = df_iv.copy()
 work["order_date"] = pd.to_datetime(work["order_date"], errors="coerce")
@@ -324,6 +392,72 @@ long_tat_rows = pd.DataFrame()
 if not tat_ready.empty:
     tat_threshold = tat_ready["prepare_tat_minutes"].quantile(0.90)
     long_tat_rows = tat_ready[tat_ready["prepare_tat_minutes"].ge(tat_threshold)].copy()
+
+patient_specific = filtered[
+    ~filtered["compound_type"].fillna("").astype(str).str.contains("batch", case=False, na=False)
+    & ~filtered["order_status"].isin(["Canceled / Not Made", "Batch Ready / Staged"])
+].copy()
+recipe_steps = pd.DataFrame(columns=["drug_name", "workflow_steps_seen"])
+if not workflow_filtered.empty and "drug_name" in workflow_filtered.columns:
+    step_source = workflow_filtered.copy()
+    if "workflow_step_name" not in step_source.columns:
+        step_source["workflow_step_name"] = ""
+    step_source["drug_name"] = step_source["drug_name"].fillna("").astype(str).str.strip()
+    step_source["workflow_step_name"] = step_source["workflow_step_name"].fillna("").astype(str).str.strip()
+    step_source = step_source[step_source["drug_name"].ne("") & step_source["workflow_step_name"].ne("")]
+    if not step_source.empty:
+        recipe_steps = (
+            step_source.groupby("drug_name", as_index=False)
+            .agg(workflow_steps_seen=("workflow_step_name", lambda s: " -> ".join(dict.fromkeys(s.tolist()))))
+        )
+
+st.subheader("Patient-Specific Recipe Log Starter")
+if patient_specific.empty:
+    st.info("No patient-specific non-batch compounds are in the current filter window.")
+else:
+    recipe_top = (
+        patient_specific.groupby("drug_name", as_index=False)
+        .agg(
+            iv_orders=("pk", "count"),
+            preparations=("num_preparations", "sum"),
+            first_seen=("order_dt", "min"),
+            last_seen=("order_dt", "max"),
+            median_tat_minutes=("prepare_tat_minutes", "median"),
+        )
+        .sort_values(["preparations", "iv_orders"], ascending=False)
+        .head(100)
+    )
+    recipe_top.insert(0, "rank", range(1, len(recipe_top) + 1))
+    if not recipe_steps.empty:
+        recipe_top = recipe_top.merge(recipe_steps, on="drug_name", how="left")
+    else:
+        recipe_top["workflow_steps_seen"] = ""
+    for col in [
+        "recipe_status", "base_solution", "additives_components", "supplies_needed",
+        "step_1", "step_2", "step_3", "step_4", "labeling_notes", "verification_notes",
+    ]:
+        recipe_top[col] = "" if col != "recipe_status" else "Needs recipe"
+
+    st.caption(
+        "Ranks patient-specific, non-batch compounds by preparation volume. Use the blank columns as the starter recipe-log fields."
+    )
+    st.dataframe(
+        recipe_top,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "first_seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
+            "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
+            "median_tat_minutes": st.column_config.NumberColumn("Median TAT Min", format="%.1f"),
+            "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+        },
+    )
+    st.download_button(
+        "Download top 100 recipe log starter CSV",
+        data=to_csv_bytes(recipe_top),
+        file_name="iv_room_top_100_patient_specific_recipe_log_starter.csv",
+        mime="text/csv",
+    )
 
 st.subheader("Manager Snapshot")
 snapshot_tab, action_tab, guide_tab = st.tabs(["Overview", "Action Queue", "How to Read"])
