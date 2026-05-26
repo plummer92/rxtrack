@@ -29,6 +29,7 @@ def load_iv_recipe_log():
             labeling_notes,
             verification_notes,
             stability_bud_source,
+            COALESCE(no_epic_cnr_record, FALSE) AS no_epic_cnr_record,
             approved_by,
             last_reviewed,
             updated_at
@@ -51,12 +52,12 @@ def save_iv_recipe(row):
         INSERT INTO iv_recipe_log (
             drug_name, recipe_status, base_solution, additives_components,
             supplies_needed, step_1, step_2, step_3, step_4, labeling_notes,
-            verification_notes, stability_bud_source, approved_by, last_reviewed
+            verification_notes, stability_bud_source, no_epic_cnr_record, approved_by, last_reviewed
         )
         VALUES (
             :drug_name, :recipe_status, :base_solution, :additives_components,
             :supplies_needed, :step_1, :step_2, :step_3, :step_4, :labeling_notes,
-            :verification_notes, :stability_bud_source, :approved_by, :last_reviewed
+            :verification_notes, :stability_bud_source, :no_epic_cnr_record, :approved_by, :last_reviewed
         )
         ON CONFLICT (drug_name) DO UPDATE SET
             recipe_status = EXCLUDED.recipe_status,
@@ -70,6 +71,7 @@ def save_iv_recipe(row):
             labeling_notes = EXCLUDED.labeling_notes,
             verification_notes = EXCLUDED.verification_notes,
             stability_bud_source = EXCLUDED.stability_bud_source,
+            no_epic_cnr_record = EXCLUDED.no_epic_cnr_record,
             approved_by = EXCLUDED.approved_by,
             last_reviewed = EXCLUDED.last_reviewed,
             updated_at = NOW()
@@ -586,7 +588,7 @@ else:
                     "drug_name", "recipe_status", "base_solution", "additives_components",
                     "supplies_needed", "step_1", "step_2", "step_3", "step_4",
                     "labeling_notes", "verification_notes", "stability_bud_source",
-                    "approved_by", "last_reviewed",
+                    "no_epic_cnr_record", "approved_by", "last_reviewed",
                 ]
             ],
             on="drug_name",
@@ -597,11 +599,12 @@ else:
     for col in [
         "recipe_status", "base_solution", "additives_components", "supplies_needed",
         "step_1", "step_2", "step_3", "step_4", "labeling_notes", "verification_notes",
-        "stability_bud_source", "approved_by", "last_reviewed",
+        "stability_bud_source", "no_epic_cnr_record", "approved_by", "last_reviewed",
     ]:
         if col not in recipe_top.columns:
             recipe_top[col] = None
     recipe_top["recipe_status"] = recipe_top["recipe_status"].fillna("Needs recipe")
+    recipe_top["no_epic_cnr_record"] = recipe_top["no_epic_cnr_record"].fillna(False).astype(bool)
 
     st.caption(
         "Ranks patient-specific, non-batch compounds by preparation volume and shows saved recipe-log status."
@@ -614,6 +617,7 @@ else:
             "first_seen": st.column_config.DatetimeColumn("First Seen", format="MM/DD/YY HH:mm"),
             "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
             "last_reviewed": st.column_config.DateColumn("Last Reviewed"),
+            "no_epic_cnr_record": st.column_config.CheckboxColumn("No Epic CNR"),
             "median_tat_minutes": st.column_config.NumberColumn("Median TAT Min", format="%.1f"),
             "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
         },
@@ -654,6 +658,11 @@ else:
             ),
         )
         approved_by = r2.text_input("Approved by", value=str(existing.get("approved_by") or ""))
+        no_epic_cnr_record = r2.checkbox(
+            "No Epic CNR recipe found",
+            value=bool(existing.get("no_epic_cnr_record") or False),
+            help="Use this when Epic CNR does not have a compounding/repackaging recipe for this medication.",
+        )
         last_reviewed_value = existing.get("last_reviewed")
         if pd.isna(last_reviewed_value) or last_reviewed_value is None:
             last_reviewed_value = pd.Timestamp.today().date()
@@ -694,6 +703,7 @@ else:
                 "labeling_notes": labeling_notes,
                 "verification_notes": verification_notes,
                 "stability_bud_source": stability_bud_source,
+                "no_epic_cnr_record": no_epic_cnr_record,
                 "approved_by": approved_by,
                 "last_reviewed": last_reviewed,
             }

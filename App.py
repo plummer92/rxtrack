@@ -301,10 +301,12 @@ def init_db():
             labeling_notes TEXT,
             verification_notes TEXT,
             stability_bud_source TEXT,
+            no_epic_cnr_record BOOLEAN DEFAULT FALSE,
             approved_by TEXT,
             last_reviewed DATE,
             updated_at TIMESTAMP DEFAULT NOW()
         );""",
+        """ALTER TABLE iv_recipe_log ADD COLUMN IF NOT EXISTS no_epic_cnr_record BOOLEAN DEFAULT FALSE;""",
         """CREATE TABLE IF NOT EXISTS wcc_compounding_stats (
             pk TEXT PRIMARY KEY,
             component_name TEXT,
