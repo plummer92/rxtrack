@@ -2115,7 +2115,9 @@ def load_data(start_date, end_date):
     queries = {
         "events": """
             WITH audit_days AS (
-                SELECT DISTINCT dt::date AS d
+                SELECT DISTINCT
+                    dt::date AS d,
+                    UPPER(TRIM(station_name)) AS device
                 FROM audit_transaction_detail_rc
                 WHERE dt::date BETWEEN %s AND %s
             ),
@@ -2160,6 +2162,7 @@ def load_data(start_date, end_date):
                       SELECT 1
                       FROM audit_days ad
                       WHERE ad.d = e.dt::date
+                        AND ad.device = UPPER(TRIM(e.device))
                   )
             )
             SELECT * FROM audit_events
@@ -2260,7 +2263,9 @@ def load_pharmacy_workflow_orders(start_date, end_date):
 def load_pyxis_workflow_events(start_date, end_date):
     sql = """
         WITH audit_days AS (
-            SELECT DISTINCT dt::date AS d
+            SELECT DISTINCT
+                dt::date AS d,
+                UPPER(TRIM(station_name)) AS device
             FROM audit_transaction_detail_rc
             WHERE dt::date BETWEEN %s AND %s
         ),
@@ -2301,6 +2306,7 @@ def load_pyxis_workflow_events(start_date, end_date):
                   SELECT 1
                   FROM audit_days ad
                   WHERE ad.d = e.dt::date
+                    AND ad.device = UPPER(TRIM(e.device))
               )
         )
         SELECT * FROM audit_events

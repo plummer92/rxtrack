@@ -92,7 +92,9 @@ def load_device_events(start, end, selected_devices):
     }
     sql = text("""
         WITH audit_days AS (
-            SELECT DISTINCT dt::date AS d
+            SELECT DISTINCT
+                dt::date AS d,
+                UPPER(TRIM(station_name)) AS device
             FROM audit_transaction_detail_rc
             WHERE dt::timestamp >= :start_ts
               AND dt::timestamp < :end_exclusive
@@ -121,7 +123,7 @@ def load_device_events(start, end, selected_devices):
                 pk,
                 dt::timestamp AS dt,
                 user_name,
-                UPPER(TRIM(device)) AS device,
+                UPPER(TRIM(e.device)) AS device,
                 med_id,
                 med_desc,
                 event_type,
@@ -137,6 +139,7 @@ def load_device_events(start, end, selected_devices):
                   SELECT 1
                   FROM audit_days ad
                   WHERE ad.d = e.dt::date
+                    AND ad.device = UPPER(TRIM(e.device))
               )
         )
         SELECT * FROM audit_events
