@@ -79,6 +79,84 @@ def save_iv_recipe(row):
     load_iv_recipe_log.clear()
 
 
+def build_medkeeper_phase_timing(workflow_df):
+    if workflow_df.empty:
+        return pd.DataFrame()
+
+    wf = workflow_df.copy()
+    for col in ["order_lot_number", "dose_number", "drug_name", "prepared_by", "approved_by", "workflow_step_name"]:
+        if col not in wf.columns:
+            wf[col] = ""
+        wf[col] = wf[col].fillna("").astype(str).str.strip()
+    wf["event_dt"] = pd.to_datetime(wf.get("start_dt"), errors="coerce")
+    fallback_stop = pd.to_datetime(wf.get("stop_dt"), errors="coerce")
+    wf["event_dt"] = wf["event_dt"].fillna(fallback_stop)
+    wf = wf[wf["event_dt"].notna() & wf["workflow_step_name"].ne("")].copy()
+    if wf.empty:
+        return pd.DataFrame()
+
+    status_map = {
+        "initial_creation": "Initial Creation",
+        "ready_prepare": "Ready for Scan Product and Image Preparation",
+        "started_prepare": "Started Scan Product and Image Preparation",
+        "ready_approve": "Ready for Approve",
+        "started_approve": "Started Approve",
+        "ready_post_label": "Ready for Post Verification Label",
+        "started_post_label": "Started Post Verification Label",
+        "completed": "Completed",
+    }
+
+    def pick_time(group, label):
+        match = group[group["workflow_step_name"].str.casefold().eq(label.casefold())]
+        if match.empty:
+            return pd.NaT
+        return match["event_dt"].min()
+
+    def pick_user(group, label, user_col):
+        match = group[group["workflow_step_name"].str.casefold().eq(label.casefold())]
+        if match.empty or user_col not in match.columns:
+            return ""
+        values = match[user_col].fillna("").astype(str).str.strip()
+        return next((value for value in values if value), "")
+
+    rows = []
+    for keys, group in wf.groupby(["order_lot_number", "dose_number", "drug_name"], dropna=False):
+        row = {
+            "order_lot_number": keys[0],
+            "dose_number": keys[1],
+            "drug_name": keys[2],
+            "prepared_by": pick_user(group, status_map["started_prepare"], "prepared_by"),
+            "approved_by": pick_user(group, status_map["started_approve"], "approved_by"),
+        }
+        for key, label in status_map.items():
+            row[key] = pick_time(group, label)
+
+        def minutes(start_key, end_key):
+            start = row.get(start_key)
+            end = row.get(end_key)
+            if pd.isna(start) or pd.isna(end):
+                return None
+            return (end - start).total_seconds() / 60
+
+        row["queue_to_prep_minutes"] = minutes("ready_prepare", "started_prepare")
+        row["tech_prep_minutes"] = minutes("started_prepare", "ready_approve")
+        row["pharmacist_wait_minutes"] = minutes("ready_approve", "started_approve")
+        row["pharmacist_check_minutes"] = minutes("started_approve", "ready_post_label")
+        row["post_verification_minutes"] = minutes("ready_post_label", "completed")
+        row["total_elapsed_minutes"] = minutes("initial_creation", "completed")
+        row["hands_on_minutes"] = sum(
+            value for value in [
+                row["tech_prep_minutes"],
+                row["pharmacist_check_minutes"],
+                row["post_verification_minutes"],
+            ]
+            if value is not None
+        )
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 def collapse_iv_display_rows(df):
     if df.empty:
         return df.copy()
@@ -1143,14 +1221,19 @@ else:
     wf["activity"] = wf["workflow_step_name"].str.strip().replace("", "Unknown")
     wf["category"] = wf["workflow_step_category"].str.strip().replace("", "Unknown")
 
+    medkeeper_phases = build_medkeeper_phase_timing(wf)
     timing_status = wf["category"].isin(["Working", "Waiting"])
-    if not timing_status.any():
-        st.warning("Workflow detail is loaded, but no Waiting/Working timing rows were found in the selected range.")
+    if not timing_status.any() and medkeeper_phases.empty:
+        st.warning("Workflow detail is loaded, but no expected MedKeeper status or Waiting/Working timing rows were found in the selected range.")
     else:
         wf_timing = wf[timing_status].copy()
         working = wf_timing[wf_timing["category"].eq("Working")].copy()
         waiting = wf_timing[wf_timing["category"].eq("Waiting")].copy()
-        workflow_orders = wf_timing["order_lot_number"].nunique()
+        workflow_orders = (
+            wf_timing["order_lot_number"].nunique()
+            if not wf_timing.empty
+            else medkeeper_phases["order_lot_number"].nunique()
+        )
         total_working_minutes = working["total_duration_minutes"].sum()
         total_waiting_minutes = waiting["total_duration_minutes"].sum()
         waiting_share = (
@@ -1169,28 +1252,41 @@ else:
             "Active work means someone was performing a workflow step. Queue / waiting means the order was sitting between steps "
             "or waiting for the next person/action in MedKeeper."
         )
+        if not medkeeper_phases.empty:
+            phase_ready = medkeeper_phases.dropna(
+                subset=["queue_to_prep_minutes", "tech_prep_minutes", "pharmacist_check_minutes"],
+                how="all",
+            )
+            if not phase_ready.empty:
+                p1, p2, p3, p4 = st.columns(4)
+                p1.metric("Median Queue to Prep", f"{phase_ready['queue_to_prep_minutes'].median():.1f} min")
+                p2.metric("Median Tech Prep", f"{phase_ready['tech_prep_minutes'].median():.1f} min")
+                p3.metric("Median Pharmacist Check", f"{phase_ready['pharmacist_check_minutes'].median():.1f} min")
+                p4.metric("Median Total Elapsed", f"{phase_ready['total_elapsed_minutes'].median():.1f} min")
 
-        stage_summary = (
-            wf_timing.groupby(["stage", "activity", "category"], as_index=False)
-            .agg(
-                rows=("pk", "count"),
-                total_minutes=("total_duration_minutes", "sum"),
-                median_minutes=("total_duration_minutes", "median"),
-                p90_minutes=("total_duration_minutes", lambda s: s.quantile(0.90)),
+        stage_summary = pd.DataFrame()
+        if not wf_timing.empty:
+            stage_summary = (
+                wf_timing.groupby(["stage", "activity", "category"], as_index=False)
+                .agg(
+                    rows=("pk", "count"),
+                    total_minutes=("total_duration_minutes", "sum"),
+                    median_minutes=("total_duration_minutes", "median"),
+                    p90_minutes=("total_duration_minutes", lambda s: s.quantile(0.90)),
+                )
+                .sort_values(["stage", "category", "total_minutes"], ascending=[True, True, False])
+                .rename(
+                    columns={
+                        "stage": "Workflow Stage",
+                        "activity": "Step",
+                        "category": "Working vs Waiting",
+                        "rows": "Rows",
+                        "total_minutes": "Total Minutes",
+                        "median_minutes": "Median Minutes",
+                        "p90_minutes": "P90 Minutes",
+                    }
+                )
             )
-            .sort_values(["stage", "category", "total_minutes"], ascending=[True, True, False])
-            .rename(
-                columns={
-                    "stage": "Workflow Stage",
-                    "activity": "Step",
-                    "category": "Working vs Waiting",
-                    "rows": "Rows",
-                    "total_minutes": "Total Minutes",
-                    "median_minutes": "Median Minutes",
-                    "p90_minutes": "P90 Minutes",
-                }
-            )
-        )
 
         longest_waits = waiting.sort_values("total_duration_minutes", ascending=False).copy()
         wait_by_step = (
@@ -1216,8 +1312,9 @@ else:
             | waiting["stage"].str.contains("approve|verification|secondary", case=False, na=False)
         ].copy()
 
-        timing_tab, waits_tab, prep_delay_tab, approve_delay_tab, prep_tab, approve_tab, detail_tab = st.tabs(
+        phase_tab, timing_tab, waits_tab, prep_delay_tab, approve_delay_tab, prep_tab, approve_tab, detail_tab = st.tabs(
             [
+                "MedKeeper Phases",
                 "Timing Summary",
                 "Longest Waits",
                 "Prepare Delays",
@@ -1227,6 +1324,42 @@ else:
                 "Order Timeline",
             ]
         )
+        with phase_tab:
+            if medkeeper_phases.empty:
+                st.info("No MedKeeper phase rows matched the expected status names in this range.")
+            else:
+                st.caption(
+                    "This view uses exact status transitions: Initial Creation, Ready/Started Scan Product and Image Preparation, "
+                    "Ready/Started Approve, Ready/Started Post Verification Label, and Completed."
+                )
+                phase_cols = [
+                    "order_lot_number", "dose_number", "drug_name", "prepared_by", "approved_by",
+                    "queue_to_prep_minutes", "tech_prep_minutes", "pharmacist_wait_minutes",
+                    "pharmacist_check_minutes", "post_verification_minutes", "hands_on_minutes",
+                    "total_elapsed_minutes",
+                ]
+                st.dataframe(
+                    medkeeper_phases[[c for c in phase_cols if c in medkeeper_phases.columns]].sort_values(
+                        "total_elapsed_minutes", ascending=False, na_position="last"
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "queue_to_prep_minutes": st.column_config.NumberColumn("Queue to Prep Min", format="%.1f"),
+                        "tech_prep_minutes": st.column_config.NumberColumn("Tech Prep Min", format="%.1f"),
+                        "pharmacist_wait_minutes": st.column_config.NumberColumn("Pharm Wait Min", format="%.1f"),
+                        "pharmacist_check_minutes": st.column_config.NumberColumn("Pharm Check Min", format="%.1f"),
+                        "post_verification_minutes": st.column_config.NumberColumn("Post-Verify Min", format="%.1f"),
+                        "hands_on_minutes": st.column_config.NumberColumn("Hands-On Min", format="%.1f"),
+                        "total_elapsed_minutes": st.column_config.NumberColumn("Total Elapsed Min", format="%.1f"),
+                    },
+                )
+                st.download_button(
+                    "Download MedKeeper phase timing CSV",
+                    data=to_csv_bytes(medkeeper_phases),
+                    file_name="iv_room_medkeeper_phase_timing.csv",
+                    mime="text/csv",
+                )
         with timing_tab:
             if not wait_by_step.empty:
                 st.markdown("**Where orders waited the most**")
@@ -1243,17 +1376,20 @@ else:
                     },
                 )
             st.markdown("**All workflow timing rows by step**")
-            st.dataframe(
-                stage_summary,
-                width="stretch",
-                hide_index=True,
-                column_config={
-                    "Rows": st.column_config.NumberColumn("Rows", format="%.0f"),
-                    "Total Minutes": st.column_config.NumberColumn("Total Min", format="%.1f"),
-                    "Median Minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
-                    "P90 Minutes": st.column_config.NumberColumn("P90 Min", format="%.1f"),
-                },
-            )
+            if stage_summary.empty:
+                st.info("No generic Working/Waiting stage rows are loaded; use MedKeeper Phases for exact status timing.")
+            else:
+                st.dataframe(
+                    stage_summary,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Rows": st.column_config.NumberColumn("Rows", format="%.0f"),
+                        "Total Minutes": st.column_config.NumberColumn("Total Min", format="%.1f"),
+                        "Median Minutes": st.column_config.NumberColumn("Median Min", format="%.1f"),
+                        "P90 Minutes": st.column_config.NumberColumn("P90 Min", format="%.1f"),
+                    },
+                )
 
         with waits_tab:
             if longest_waits.empty:
