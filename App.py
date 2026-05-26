@@ -2788,6 +2788,7 @@ def clear_app_upload_caches():
         load_pharmacy_workflow_orders,
         load_pyxis_workflow_events,
         load_iv_room_data,
+        load_iv_room_workflow_detail,
         load_wcc_compounding_stats,
         load_wcc_cartfill_stats,
         load_overnight_cartfill_orders,
@@ -2823,6 +2824,14 @@ def get_stats_range():
                 attendance_stats AS (
                     SELECT COUNT(*) AS row_count, MIN(dt_date) AS min_dt, MAX(dt_date) AS max_dt
                     FROM attendance_punches
+                ),
+                iv_workload_stats AS (
+                    SELECT COUNT(*) AS row_count, MIN(order_date) AS min_dt, MAX(order_date) AS max_dt
+                    FROM iv_room_workload
+                ),
+                iv_workflow_stats AS (
+                    SELECT COUNT(*) AS row_count, MIN(start_date) AS min_dt, MAX(start_date) AS max_dt
+                    FROM iv_room_workflow_detail
                 )
                 SELECT
                     event_stats.row_count,
@@ -2835,7 +2844,9 @@ def get_stats_range():
                             (event_stats.min_dt),
                             (pharmacy_stats.min_dt),
                             (schedule_stats.min_dt),
-                            (attendance_stats.min_dt)
+                            (attendance_stats.min_dt),
+                            (iv_workload_stats.min_dt),
+                            (iv_workflow_stats.min_dt)
                         ) AS dates(d)
                         WHERE d IS NOT NULL
                     ) AS min_dt,
@@ -2845,11 +2856,13 @@ def get_stats_range():
                             (event_stats.max_dt),
                             (pharmacy_stats.max_dt),
                             (schedule_stats.max_dt),
-                            (attendance_stats.max_dt)
+                            (attendance_stats.max_dt),
+                            (iv_workload_stats.max_dt),
+                            (iv_workflow_stats.max_dt)
                         ) AS dates(d)
                         WHERE d IS NOT NULL
                     ) AS max_dt
-                FROM event_stats, pharmacy_stats, schedule_stats, attendance_stats
+                FROM event_stats, pharmacy_stats, schedule_stats, attendance_stats, iv_workload_stats, iv_workflow_stats
             """
             cur.execute(sql)
             row = cur.fetchone()
@@ -2869,6 +2882,10 @@ def get_present_dates(min_dt, max_dt):
             SELECT dt::date AS d FROM events WHERE dt IS NOT NULL
             UNION
             SELECT dt::date AS d FROM pharmacy_orders WHERE dt IS NOT NULL
+            UNION
+            SELECT order_date AS d FROM iv_room_workload WHERE order_date IS NOT NULL
+            UNION
+            SELECT start_date AS d FROM iv_room_workflow_detail WHERE start_date IS NOT NULL
         ) present
         WHERE d BETWEEN %(start)s AND %(end)s
     """
