@@ -19,6 +19,7 @@ def load_iv_recipe_log():
         SELECT
             drug_name,
             recipe_status,
+            epic_recipe_text,
             base_solution,
             additives_components,
             supplies_needed,
@@ -50,17 +51,18 @@ def load_iv_recipe_log():
 def save_iv_recipe(row):
     sql = text("""
         INSERT INTO iv_recipe_log (
-            drug_name, recipe_status, base_solution, additives_components,
+            drug_name, recipe_status, epic_recipe_text, base_solution, additives_components,
             supplies_needed, step_1, step_2, step_3, step_4, labeling_notes,
             verification_notes, stability_bud_source, no_epic_cnr_record, approved_by, last_reviewed
         )
         VALUES (
-            :drug_name, :recipe_status, :base_solution, :additives_components,
+            :drug_name, :recipe_status, :epic_recipe_text, :base_solution, :additives_components,
             :supplies_needed, :step_1, :step_2, :step_3, :step_4, :labeling_notes,
             :verification_notes, :stability_bud_source, :no_epic_cnr_record, :approved_by, :last_reviewed
         )
         ON CONFLICT (drug_name) DO UPDATE SET
             recipe_status = EXCLUDED.recipe_status,
+            epic_recipe_text = EXCLUDED.epic_recipe_text,
             base_solution = EXCLUDED.base_solution,
             additives_components = EXCLUDED.additives_components,
             supplies_needed = EXCLUDED.supplies_needed,
@@ -585,7 +587,7 @@ else:
         recipe_top = recipe_top.merge(
             recipe_log[
                 [
-                    "drug_name", "recipe_status", "base_solution", "additives_components",
+                    "drug_name", "recipe_status", "epic_recipe_text", "base_solution", "additives_components",
                     "supplies_needed", "step_1", "step_2", "step_3", "step_4",
                     "labeling_notes", "verification_notes", "stability_bud_source",
                     "no_epic_cnr_record", "approved_by", "last_reviewed",
@@ -597,7 +599,7 @@ else:
     else:
         recipe_top["recipe_status"] = None
     for col in [
-        "recipe_status", "base_solution", "additives_components", "supplies_needed",
+        "recipe_status", "epic_recipe_text", "base_solution", "additives_components", "supplies_needed",
         "step_1", "step_2", "step_3", "step_4", "labeling_notes", "verification_notes",
         "stability_bud_source", "no_epic_cnr_record", "approved_by", "last_reviewed",
     ]:
@@ -669,6 +671,12 @@ else:
         else:
             last_reviewed_value = pd.to_datetime(last_reviewed_value, errors="coerce").date()
         last_reviewed = r3.date_input("Last reviewed", value=last_reviewed_value)
+        epic_recipe_text = st.text_area(
+            "Paste Epic CNR recipe",
+            value=str(existing.get("epic_recipe_text") or ""),
+            height=260,
+            help="Paste the full Epic compounding/repackaging recipe here exactly as it appears in Epic.",
+        )
         base_solution = st.text_input("Base solution / final volume", value=str(existing.get("base_solution") or ""))
         additives_components = st.text_area("Additives / components", value=str(existing.get("additives_components") or ""), height=90)
         supplies_needed = st.text_area("Supplies needed", value=str(existing.get("supplies_needed") or ""), height=80)
@@ -693,6 +701,7 @@ else:
             {
                 "drug_name": selected_recipe_drug,
                 "recipe_status": recipe_status,
+                "epic_recipe_text": epic_recipe_text,
                 "base_solution": base_solution,
                 "additives_components": additives_components,
                 "supplies_needed": supplies_needed,

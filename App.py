@@ -291,6 +291,7 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS iv_recipe_log (
             drug_name TEXT PRIMARY KEY,
             recipe_status TEXT,
+            epic_recipe_text TEXT,
             base_solution TEXT,
             additives_components TEXT,
             supplies_needed TEXT,
@@ -306,6 +307,7 @@ def init_db():
             last_reviewed DATE,
             updated_at TIMESTAMP DEFAULT NOW()
         );""",
+        """ALTER TABLE iv_recipe_log ADD COLUMN IF NOT EXISTS epic_recipe_text TEXT;""",
         """ALTER TABLE iv_recipe_log ADD COLUMN IF NOT EXISTS no_epic_cnr_record BOOLEAN DEFAULT FALSE;""",
         """CREATE TABLE IF NOT EXISTS wcc_compounding_stats (
             pk TEXT PRIMARY KEY,
