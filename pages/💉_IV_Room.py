@@ -105,10 +105,11 @@ def classify_iv_order_status(df):
     no_approval = out["approved_by"].str.lower().isin(["", "unassigned", "none", "nan"])
     no_secondary = out["secondary_approved_by"].str.lower().isin(["", "unassigned", "none", "nan"])
     has_any_approval = ~(no_approval & no_secondary)
+    has_making_evidence = ~no_preparer | has_any_approval
 
     out["order_status"] = "Completed / Made"
-    out.loc[no_completion & no_preparer & no_approval & no_secondary, "order_status"] = "Canceled / Not Made"
-    out.loc[no_completion & ~(no_preparer & no_approval & no_secondary), "order_status"] = "Needs Completion Review"
+    out.loc[no_completion, "order_status"] = "Canceled / Not Made"
+    out.loc[~is_batch & no_completion & has_making_evidence, "order_status"] = "Needs Completion Review"
     out.loc[
         ~is_batch & no_completion & ~no_preparer & has_any_approval,
         "order_status",
