@@ -673,6 +673,7 @@ else:
     ]:
         if col not in recipe_top.columns:
             recipe_top[col] = None
+    recipe_top["saved_recipe"] = recipe_top["recipe_status"].notna()
     recipe_top["recipe_status"] = recipe_top["recipe_status"].fillna("Needs recipe")
     recipe_top["no_epic_cnr_record"] = recipe_top["no_epic_cnr_record"].fillna(False).astype(bool)
 
@@ -688,6 +689,7 @@ else:
             "last_seen": st.column_config.DatetimeColumn("Last Seen", format="MM/DD/YY HH:mm"),
             "last_reviewed": st.column_config.DateColumn("Last Reviewed"),
             "no_epic_cnr_record": st.column_config.CheckboxColumn("No Epic CNR"),
+            "saved_recipe": st.column_config.CheckboxColumn("Saved"),
             "median_tat_minutes": st.column_config.NumberColumn("Median TAT Min", format="%.1f"),
             "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
         },
@@ -700,9 +702,9 @@ else:
     )
 
     st.markdown("**Recipe Log Builder**")
-    recipe_work_queue = recipe_top[recipe_top["recipe_status"].eq("Needs recipe")].copy()
+    recipe_work_queue = recipe_top[~recipe_top["saved_recipe"]].copy()
     review_library = recipe_top[
-        recipe_top["recipe_status"].ne("Needs recipe") | recipe_top["no_epic_cnr_record"]
+        recipe_top["saved_recipe"] | recipe_top["no_epic_cnr_record"]
     ].copy()
     builder_mode = st.radio(
         "Recipe builder mode",
@@ -880,7 +882,7 @@ else:
         st.rerun()
 
     review_library = recipe_top[
-        recipe_top["recipe_status"].ne("Needs recipe") | recipe_top["no_epic_cnr_record"]
+        recipe_top["saved_recipe"] | recipe_top["no_epic_cnr_record"]
     ].copy()
     st.markdown("**Pharmacist Review & Recipe Library**")
     if review_library.empty:
