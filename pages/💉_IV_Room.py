@@ -1,5 +1,6 @@
 import pandas as pd
 import plotly.express as px
+import re
 import streamlit as st
 from sqlalchemy import text
 
@@ -81,6 +82,68 @@ def save_iv_recipe(row):
     with App.engine.begin() as conn:
         conn.execute(sql, row)
     load_iv_recipe_log.clear()
+
+
+def parse_epic_recipe_text(recipe_text):
+    text_value = str(recipe_text or "").strip()
+    parsed = {
+        "base_solution": "",
+        "step_1": "",
+        "step_2": "",
+        "step_3": "",
+        "step_4": "",
+        "labeling_notes": "",
+        "verification_notes": "",
+        "stability_bud_source": "",
+    }
+    if not text_value:
+        return parsed
+
+    lines = [line.rstrip() for line in text_value.splitlines()]
+    if lines:
+        parsed["base_solution"] = lines[0].strip()
+
+    section_aliases = {
+        "directions": "directions",
+        "physical description": "physical",
+        "storage": "storage",
+        "special precautions": "precautions",
+        "references": "references",
+    }
+    sections = {value: [] for value in section_aliases.values()}
+    current = None
+    for line in lines[1:]:
+        clean = line.strip()
+        heading = clean.rstrip(":").casefold()
+        if heading in section_aliases:
+            current = section_aliases[heading]
+            continue
+        if current and clean:
+            sections[current].append(clean)
+
+    direction_lines = [
+        re.sub(r"^\d+\.\s*", "", line).strip()
+        for line in sections["directions"]
+        if line.strip() and line.strip().upper() != "OR"
+    ]
+    for idx, line in enumerate(direction_lines[:4], start=1):
+        parsed[f"step_{idx}"] = line
+
+    storage = " ".join(sections["storage"]).strip()
+    physical = " ".join(sections["physical"]).strip()
+    precautions = " ".join(sections["precautions"]).strip()
+    references = "\n".join(sections["references"]).strip()
+    parsed["labeling_notes"] = "\n".join(
+        part for part in [
+            f"Physical description: {physical}" if physical else "",
+            f"Storage: {storage}" if storage else "",
+            f"Special precautions: {precautions}" if precautions else "",
+        ]
+        if part
+    )
+    parsed["verification_notes"] = "Verify recipe against Epic CNR and local sterile compounding policy."
+    parsed["stability_bud_source"] = references
+    return parsed
 
 
 def build_medkeeper_phase_timing(workflow_df):
@@ -677,23 +740,46 @@ else:
             height=260,
             help="Paste the full Epic compounding/repackaging recipe here exactly as it appears in Epic.",
         )
-        base_solution = st.text_input("Base solution / final volume", value=str(existing.get("base_solution") or ""))
-        additives_components = st.text_area("Additives / components", value=str(existing.get("additives_components") or ""), height=90)
-        supplies_needed = st.text_area("Supplies needed", value=str(existing.get("supplies_needed") or ""), height=80)
+        parsed_recipe = parse_epic_recipe_text(epic_recipe_text)
+        if epic_recipe_text.strip():
+            with st.expander("Autofill preview from pasted Epic recipe", expanded=False):
+                st.write(parsed_recipe)
+        base_solution = st.text_input(
+            "Base solution / final volume",
+            value=str(existing.get("base_solution") or parsed_recipe.get("base_solution") or ""),
+        )
+        additives_components = st.text_area(
+            "Additives / components",
+            value=str(existing.get("additives_components") or ""),
+            height=90,
+        )
+        supplies_needed = st.text_area(
+            "Supplies needed",
+            value=str(existing.get("supplies_needed") or ""),
+            height=80,
+        )
         s1, s2 = st.columns(2)
-        step_1 = s1.text_area("Step 1", value=str(existing.get("step_1") or ""), height=90)
-        step_2 = s2.text_area("Step 2", value=str(existing.get("step_2") or ""), height=90)
+        step_1 = s1.text_area("Step 1", value=str(existing.get("step_1") or parsed_recipe.get("step_1") or ""), height=90)
+        step_2 = s2.text_area("Step 2", value=str(existing.get("step_2") or parsed_recipe.get("step_2") or ""), height=90)
         s3, s4 = st.columns(2)
-        step_3 = s3.text_area("Step 3", value=str(existing.get("step_3") or ""), height=90)
-        step_4 = s4.text_area("Step 4", value=str(existing.get("step_4") or ""), height=90)
+        step_3 = s3.text_area("Step 3", value=str(existing.get("step_3") or parsed_recipe.get("step_3") or ""), height=90)
+        step_4 = s4.text_area("Step 4", value=str(existing.get("step_4") or parsed_recipe.get("step_4") or ""), height=90)
         stability_bud_source = st.text_area(
             "Stability / BUD source",
-            value=str(existing.get("stability_bud_source") or ""),
+            value=str(existing.get("stability_bud_source") or parsed_recipe.get("stability_bud_source") or ""),
             height=80,
             help="Examples: ASHP Injectable Drug Information, King Guide, Lexicomp, package insert, local policy.",
         )
-        labeling_notes = st.text_area("Labeling notes", value=str(existing.get("labeling_notes") or ""), height=80)
-        verification_notes = st.text_area("Verification notes", value=str(existing.get("verification_notes") or ""), height=80)
+        labeling_notes = st.text_area(
+            "Labeling notes",
+            value=str(existing.get("labeling_notes") or parsed_recipe.get("labeling_notes") or ""),
+            height=80,
+        )
+        verification_notes = st.text_area(
+            "Verification notes",
+            value=str(existing.get("verification_notes") or parsed_recipe.get("verification_notes") or ""),
+            height=80,
+        )
         submitted = st.form_submit_button("Save recipe log")
 
     if submitted:
