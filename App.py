@@ -2114,10 +2114,57 @@ def clean_overnight_cartfill_workbook(uploaded):
 def load_data(start_date, end_date):
     queries = {
         "events": """
-            SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty, 
-                   e.beginning_qty, e.ending_qty, e.discrepancy_qty, e.discrepancy_reason, c.cost_per_unit, e.pk 
-            FROM events e LEFT JOIN med_costs c ON e.med_id = c.med_id
-            WHERE e.dt::date BETWEEN %s AND %s
+            WITH audit_days AS (
+                SELECT DISTINCT dt::date AS d
+                FROM audit_transaction_detail_rc
+                WHERE dt::date BETWEEN %s AND %s
+            ),
+            audit_events AS (
+                SELECT
+                    a.user_name,
+                    a.station_name AS device,
+                    a.med_id,
+                    a.med_desc,
+                    a.transaction_type AS event_type,
+                    a.dt,
+                    a.qty,
+                    a.beginning_qty,
+                    a.ending_qty,
+                    a.discrepancy_difference AS discrepancy_qty,
+                    COALESCE(NULLIF(a.discrepancy_reason, ''), a.discrepancy_resolution_desc) AS discrepancy_reason,
+                    COALESCE(a.unit_cost, c.cost_per_unit, 0) AS cost_per_unit,
+                    a.pk
+                FROM audit_transaction_detail_rc a
+                LEFT JOIN med_costs c ON UPPER(TRIM(a.med_id)) = UPPER(TRIM(c.med_id))
+                WHERE a.dt::date BETWEEN %s AND %s
+            ),
+            legacy_events AS (
+                SELECT
+                    e.user_name,
+                    e.device,
+                    e.med_id,
+                    e.med_desc,
+                    e.event_type,
+                    e.dt,
+                    e.qty,
+                    e.beginning_qty,
+                    e.ending_qty,
+                    e.discrepancy_qty,
+                    e.discrepancy_reason,
+                    COALESCE(c.cost_per_unit, 0) AS cost_per_unit,
+                    e.pk
+                FROM events e
+                LEFT JOIN med_costs c ON UPPER(TRIM(e.med_id)) = UPPER(TRIM(c.med_id))
+                WHERE e.dt::date BETWEEN %s AND %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM audit_days ad
+                      WHERE ad.d = e.dt::date
+                  )
+            )
+            SELECT * FROM audit_events
+            UNION ALL
+            SELECT * FROM legacy_events
         """,
         "config": """
             SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, 
@@ -2145,7 +2192,8 @@ def load_data(start_date, end_date):
     with db_cursor() as (conn, cur):
         for key, sql in queries.items():
             try:
-                results[key] = pd.read_sql(sql, conn, params=params)
+                query_params = params * 3 if key == "events" else params
+                results[key] = pd.read_sql(sql, conn, params=query_params)
                 if not results[key].empty and 'dt' in results[key].columns:
                     results[key]["dt"] = pd.to_datetime(results[key]["dt"])
             except Exception:
@@ -2211,13 +2259,55 @@ def load_pharmacy_workflow_orders(start_date, end_date):
 @st.cache_data(ttl=300)
 def load_pyxis_workflow_events(start_date, end_date):
     sql = """
-        SELECT e.user_name, e.device, e.med_id, e.med_desc, e.event_type, e.dt, e.qty,
-               e.discrepancy_qty, e.discrepancy_reason, e.ending_qty, c.cost_per_unit
-        FROM events e
-        LEFT JOIN med_costs c ON e.med_id = c.med_id
-        WHERE e.dt::date BETWEEN %s AND %s
+        WITH audit_days AS (
+            SELECT DISTINCT dt::date AS d
+            FROM audit_transaction_detail_rc
+            WHERE dt::date BETWEEN %s AND %s
+        ),
+        audit_events AS (
+            SELECT
+                a.user_name,
+                a.station_name AS device,
+                a.med_id,
+                a.med_desc,
+                a.transaction_type AS event_type,
+                a.dt,
+                a.qty,
+                a.discrepancy_difference AS discrepancy_qty,
+                COALESCE(NULLIF(a.discrepancy_reason, ''), a.discrepancy_resolution_desc) AS discrepancy_reason,
+                a.ending_qty,
+                COALESCE(a.unit_cost, c.cost_per_unit, 0) AS cost_per_unit
+            FROM audit_transaction_detail_rc a
+            LEFT JOIN med_costs c ON UPPER(TRIM(a.med_id)) = UPPER(TRIM(c.med_id))
+            WHERE a.dt::date BETWEEN %s AND %s
+        ),
+        legacy_events AS (
+            SELECT
+                e.user_name,
+                e.device,
+                e.med_id,
+                e.med_desc,
+                e.event_type,
+                e.dt,
+                e.qty,
+                e.discrepancy_qty,
+                e.discrepancy_reason,
+                e.ending_qty,
+                COALESCE(c.cost_per_unit, 0) AS cost_per_unit
+            FROM events e
+            LEFT JOIN med_costs c ON UPPER(TRIM(e.med_id)) = UPPER(TRIM(c.med_id))
+            WHERE e.dt::date BETWEEN %s AND %s
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM audit_days ad
+                  WHERE ad.d = e.dt::date
+              )
+        )
+        SELECT * FROM audit_events
+        UNION ALL
+        SELECT * FROM legacy_events
     """
-    df = run_query(sql, params=(start_date, end_date))
+    df = run_query(sql, params=(start_date, end_date) * 3)
     if df.empty:
         return df
     df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
