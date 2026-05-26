@@ -91,12 +91,58 @@ def load_device_events(start, end, selected_devices):
         "devices": [_clean_device_name(d) for d in selected_devices],
     }
     sql = text("""
-        SELECT pk, dt::timestamp AS dt, user_name, UPPER(TRIM(device)) AS device, med_id, med_desc,
-               event_type, qty, beginning_qty, ending_qty, discrepancy_qty
-        FROM events
-        WHERE dt::timestamp >= :start_ts AND dt::timestamp < :end_exclusive
-          AND UPPER(TRIM(device)) IN :devices
-        ORDER BY dt::timestamp
+        WITH audit_days AS (
+            SELECT DISTINCT dt::date AS d
+            FROM audit_transaction_detail_rc
+            WHERE dt::timestamp >= :start_ts
+              AND dt::timestamp < :end_exclusive
+              AND UPPER(TRIM(station_name)) IN :devices
+        ),
+        audit_events AS (
+            SELECT
+                pk,
+                dt::timestamp AS dt,
+                user_name,
+                UPPER(TRIM(station_name)) AS device,
+                med_id,
+                med_desc,
+                transaction_type AS event_type,
+                qty,
+                beginning_qty,
+                ending_qty,
+                discrepancy_difference AS discrepancy_qty
+            FROM audit_transaction_detail_rc
+            WHERE dt::timestamp >= :start_ts
+              AND dt::timestamp < :end_exclusive
+              AND UPPER(TRIM(station_name)) IN :devices
+        ),
+        legacy_events AS (
+            SELECT
+                pk,
+                dt::timestamp AS dt,
+                user_name,
+                UPPER(TRIM(device)) AS device,
+                med_id,
+                med_desc,
+                event_type,
+                qty,
+                beginning_qty,
+                ending_qty,
+                discrepancy_qty
+            FROM events e
+            WHERE e.dt::timestamp >= :start_ts
+              AND e.dt::timestamp < :end_exclusive
+              AND UPPER(TRIM(e.device)) IN :devices
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM audit_days ad
+                  WHERE ad.d = e.dt::date
+              )
+        )
+        SELECT * FROM audit_events
+        UNION ALL
+        SELECT * FROM legacy_events
+        ORDER BY dt
     """).bindparams(bindparam("devices", expanding=True))
     with engine.connect() as conn:
         df = pd.read_sql(sql, conn, params=params)
