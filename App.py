@@ -2085,6 +2085,12 @@ def clean_cartfill_discontinued_orders(df, source_file=""):
         for alias in aliases
     }
     df.rename(columns={col: alias_lookup.get(_col_key(col), col) for col in df.columns}, inplace=True)
+    if df.columns.duplicated().any():
+        collapsed = {}
+        for col in dict.fromkeys(df.columns):
+            same_name = df.loc[:, df.columns == col]
+            collapsed[col] = same_name.bfill(axis=1).iloc[:, 0] if isinstance(same_name, pd.DataFrame) else same_name
+        df = pd.DataFrame(collapsed)
 
     required_signal = {"order_id", "discontinued_dt"}
     if not required_signal.issubset(set(df.columns)):
