@@ -2009,7 +2009,17 @@ def clean_wcc_cartfill_stats(df, source_file=""):
         axis=1,
     )
 
+    source_rows = len(df)
+    medication_rows = int(df["order_medication"].ne("").sum())
+    ready_rows = int(df["ready_for_dispense_dt"].notna().sum())
     df = df[df["order_medication"].ne("") & df["ready_for_dispense_dt"].notna()].copy()
+    if df.empty and source_rows:
+        raise ValueError(
+            "No Cartfill Stats rows survived cleaning. "
+            f"Detected columns: {', '.join(map(str, df.columns))}. "
+            f"Rows read: {source_rows}; rows with Order Medication: {medication_rows}; "
+            f"rows with Ready for Dispense date/time: {ready_rows}."
+        )
     df["source_file"] = source_file or ""
     df["pk"] = df.apply(
         lambda row: hashlib.sha256(
