@@ -3465,9 +3465,14 @@ def render_sidebar():
         st.session_state.end_date = default_analysis_date
     if 'rxtrack_sidebar_filter_mode' not in st.session_state:
         st.session_state.rxtrack_sidebar_filter_mode = "Day"
-    if latest_activity_date and today not in present_dates and st.session_state.start_date == today and st.session_state.end_date == today:
+    selected_window_has_data = any(
+        st.session_state.start_date <= d <= st.session_state.end_date
+        for d in present_dates
+    )
+    if latest_activity_date and not selected_window_has_data:
         st.session_state.start_date = default_analysis_date
         st.session_state.end_date = default_analysis_date
+        st.session_state["rxtrack_sidebar_day"] = default_analysis_date
     st.session_state.start_date = min(max(st.session_state.start_date, min_selectable_date), max_selectable_date)
     st.session_state.end_date = min(max(st.session_state.end_date, min_selectable_date), max_selectable_date)
     if st.session_state.start_date > st.session_state.end_date:
@@ -3542,11 +3547,13 @@ def render_sidebar():
             st.session_state.end_date = week_start + timedelta(days=6)
 
         else:
+            if "rxtrack_sidebar_day" not in st.session_state:
+                st.session_state["rxtrack_sidebar_day"] = st.session_state.start_date
             single_day = st.date_input(
                 "Select Day:",
-                value=st.session_state.start_date,
                 min_value=min_selectable_date,
                 max_value=max_selectable_date,
+                key="rxtrack_sidebar_day",
             )
             st.session_state.start_date = single_day
             st.session_state.end_date = single_day
