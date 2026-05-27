@@ -26,15 +26,21 @@ else:
 
 
 DEFAULT_POSITIONS = [
-    {"position": "0500 Tech Refills", "start": "05:00", "end": "09:00", "staff_keywords": "0500", "device_keywords": ""},
-    {"position": "0600 Tech Refills", "start": "06:00", "end": "10:00", "staff_keywords": "0600", "device_keywords": ""},
-    {"position": "1430 PHP Refills", "start": "14:30", "end": "18:30", "staff_keywords": "1430", "device_keywords": "PHP"},
-    {"position": "1430 OR Refills", "start": "14:30", "end": "18:30", "staff_keywords": "1430", "device_keywords": "OR"},
+    {"position": "0500 Tech Refills", "start": "05:00", "end": "13:30", "staff_keywords": "0500", "device_keywords": ""},
+    {"position": "0600 Tech Refills", "start": "06:00", "end": "14:30", "staff_keywords": "0600", "device_keywords": ""},
+    {"position": "PHP Refills", "start": "14:30", "end": "23:00", "staff_keywords": "PHP", "device_keywords": "PHP"},
+    {"position": "OR Refills", "start": "14:30", "end": "23:00", "staff_keywords": "OR", "device_keywords": "OR"},
 ]
 
 
 def normalize_keywords(value):
     return [part.strip().upper() for part in str(value or "").split(",") if part.strip()]
+
+
+def normalize_match_text(value):
+    text = str(value or "").upper()
+    time_compact = re.sub(r"\b([0-2]?\d):([0-5]\d)\b", lambda m: f"{int(m.group(1)):02d}{m.group(2)}", text)
+    return f"{text} {time_compact}"
 
 
 def coerce_time(value):
@@ -131,7 +137,7 @@ def attach_schedule_context(sessions, schedule):
         .fillna("")
         .astype(str)
         .agg(" ".join, axis=1)
-        .str.upper()
+        .apply(normalize_match_text)
     )
     return sessions
 
@@ -139,6 +145,7 @@ def attach_schedule_context(sessions, schedule):
 def contains_any_keyword(series, keywords):
     if not keywords:
         return pd.Series(True, index=series.index)
+    series = series.fillna("").astype(str).apply(normalize_match_text)
     pattern = "|".join(re.escape(keyword) for keyword in keywords)
     return series.str.contains(pattern, case=False, regex=True, na=False)
 
