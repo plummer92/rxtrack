@@ -224,7 +224,23 @@ with st.spinner("Loading refill sessions..."):
     df_events, _, df_pharm, df_sched, _ = App.load_data(effective_start_date, end_date)
     sessions = build_work_sessions(df_events, df_pharm)
 
+if sessions.empty and effective_start_date < start_date:
+    with st.spinner("Retrying the selected sidebar window..."):
+        retry_events, _, retry_pharm, retry_sched, _ = App.load_data(start_date, end_date)
+        retry_sessions = build_work_sessions(retry_events, retry_pharm)
+    if not retry_sessions.empty:
+        st.warning(
+            "The wider KPI baseline did not return workflow rows, so this view is using the selected sidebar "
+            "date range instead. Widen the sidebar range if you need a larger baseline."
+        )
+        effective_start_date = start_date
+        df_events, df_pharm, df_sched, sessions = retry_events, retry_pharm, retry_sched, retry_sessions
+
 if sessions.empty:
+    row_cols = st.columns(3)
+    row_cols[0].metric("Loaded Pyxis Rows", f"{len(df_events):,}")
+    row_cols[1].metric("Loaded Pharmacy Rows", f"{len(df_pharm):,}")
+    row_cols[2].metric("Loaded Schedule Rows", f"{len(df_sched):,}")
     st.warning("No Pyxis or pharmacy workflow sessions were found in the KPI baseline window.")
     if not df_events.empty and "event_type" in df_events.columns:
         event_counts = (
