@@ -3455,13 +3455,17 @@ def render_sidebar():
     today = date.today()
     min_selectable_date = min(min_db, today)
     max_selectable_date = max(max_db, today)
+    default_analysis_date = max_db if max_db and max_db <= today else today
 
     if 'start_date' not in st.session_state:
-        st.session_state.start_date = today
+        st.session_state.start_date = default_analysis_date
     if 'end_date' not in st.session_state:
-        st.session_state.end_date = today
+        st.session_state.end_date = default_analysis_date
     if 'rxtrack_sidebar_filter_mode' not in st.session_state:
         st.session_state.rxtrack_sidebar_filter_mode = "Day"
+    if max_db and max_db < today and st.session_state.start_date == today and st.session_state.end_date == today:
+        st.session_state.start_date = default_analysis_date
+        st.session_state.end_date = default_analysis_date
     st.session_state.start_date = min(max(st.session_state.start_date, min_selectable_date), max_selectable_date)
     st.session_state.end_date = min(max(st.session_state.end_date, min_selectable_date), max_selectable_date)
     if st.session_state.start_date > st.session_state.end_date:
