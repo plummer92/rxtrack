@@ -70,7 +70,7 @@ SCENARIOS = {
         "label": "Cartfill Every 2 Hours",
         "waves": Q2H_WAVES,
         "split": None,
-        "note": "Reassigns each order to the nearest 2-hour cartfill from 0600 through 2000 based on Ready for Dispense time.",
+        "note": "Reassigns each order to the next 2-hour cartfill from 0600 through 2000 based on Ready for Dispense time.",
     },
 }
 
@@ -89,6 +89,17 @@ def nearest_custom_wave_label(ts, waves):
     value = ts.hour + (ts.minute / 60)
     anchors = {wave: int(wave[:2]) + int(wave[2:]) / 60 for wave in waves}
     return min(anchors, key=lambda label: abs(value - anchors[label]))
+
+
+def next_custom_wave_label(ts, waves):
+    if pd.isna(ts):
+        return "Unknown"
+    value = ts.hour + (ts.minute / 60)
+    anchors = [(wave, int(wave[:2]) + int(wave[2:]) / 60) for wave in waves]
+    for wave, hour_value in sorted(anchors, key=lambda item: item[1]):
+        if value <= hour_value:
+            return wave
+    return waves[0]
 
 
 def prepare_daily_current(df):
@@ -139,7 +150,7 @@ def prepare_daily_nearest_wave(df, waves):
     if df.empty:
         return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
     work = df.copy()
-    work["scenario_wave"] = work["ready_for_dispense_dt"].apply(lambda ts: nearest_custom_wave_label(ts, waves))
+    work["scenario_wave"] = work["ready_for_dispense_dt"].apply(lambda ts: next_custom_wave_label(ts, waves))
     daily = (
         work.groupby(["event_date", "scenario_wave"], as_index=False)
         .agg(
