@@ -306,8 +306,8 @@ st.dataframe(
     column_config={
         "position": st.column_config.TextColumn("Position"),
         "baseline_sessions": st.column_config.NumberColumn("Sessions", format="%d"),
-            "baseline_events": st.column_config.NumberColumn("Median Events", format="%.0f"),
-            "baseline_qty": st.column_config.NumberColumn("Median Qty", format="%.0f"),
+        "baseline_events": st.column_config.NumberColumn("Median Events", format="%.0f"),
+        "baseline_qty": st.column_config.NumberColumn("Median Qty", format="%.0f"),
     },
 )
 
