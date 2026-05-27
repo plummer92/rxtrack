@@ -127,7 +127,7 @@ def build_work_sessions(events, pharmacy_orders):
 @st.cache_data(ttl=300)
 def load_position_kpi_data(start_date, end_date):
     params = {"start_date": start_date, "end_date": end_date}
-    event_sql = text("""
+    legacy_event_sql = text("""
         SELECT
             user_name::text AS user_name,
             device::text AS device,
@@ -139,7 +139,8 @@ def load_position_kpi_data(start_date, end_date):
             pk::text AS pk
         FROM events
         WHERE dt::date BETWEEN :start_date AND :end_date
-        UNION ALL
+    """)
+    audit_event_sql = text("""
         SELECT
             user_name::text AS user_name,
             station_name::text AS device,
@@ -164,14 +165,28 @@ def load_position_kpi_data(start_date, end_date):
         FROM staff_schedule
         WHERE dt::date BETWEEN :start_date AND :end_date
     """)
-    try:
-        with App.engine.connect() as conn:
-            events = pd.read_sql(event_sql, conn, params=params)
+    frames = []
+    pharmacy = pd.DataFrame()
+    schedule = pd.DataFrame()
+    with App.engine.connect() as conn:
+        try:
+            frames.append(pd.read_sql(legacy_event_sql, conn, params=params))
+        except Exception as exc:
+            st.warning(f"Could not load legacy Pyxis event rows for {start_date} to {end_date}: {exc}")
+        try:
+            frames.append(pd.read_sql(audit_event_sql, conn, params=params))
+        except Exception as exc:
+            st.warning(f"Could not load audit Pyxis event rows for {start_date} to {end_date}: {exc}")
+        try:
             pharmacy = pd.read_sql(pharmacy_sql, conn, params=params)
+        except Exception as exc:
+            st.warning(f"Could not load pharmacy rows for {start_date} to {end_date}: {exc}")
+        try:
             schedule = pd.read_sql(schedule_sql, conn, params=params)
-    except Exception as exc:
-        st.warning(f"Could not load Position KPI source rows for {start_date} to {end_date}: {exc}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        except Exception as exc:
+            st.warning(f"Could not load schedule rows for {start_date} to {end_date}: {exc}")
+
+    events = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     for df in [events, pharmacy, schedule]:
         if not df.empty and "dt" in df.columns:
