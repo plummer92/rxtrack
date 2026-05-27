@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import time, timedelta
 import re
 
 import pandas as pd
@@ -166,17 +166,44 @@ with st.expander("Position window setup", expanded=False):
             "staff_keywords": st.column_config.TextColumn("Staff/assignment keywords"),
             "device_keywords": st.column_config.TextColumn("Device keywords"),
         },
-        key="position_kpi_windows",
+        key="position_kpi_windows_v2",
     )
 
 min_sessions = st.slider("Minimum sessions for baseline", 3, 30, 5, key="position_kpi_min_sessions")
+baseline_lookback_days = st.slider(
+    "Baseline lookback days",
+    7,
+    180,
+    60,
+    key="position_kpi_baseline_lookback_days",
+)
+effective_start_date = min(start_date, end_date - timedelta(days=baseline_lookback_days - 1))
+if effective_start_date < start_date:
+    st.caption(
+        f"Position KPI baseline is using {effective_start_date:%m/%d/%y} through {end_date:%m/%d/%y} "
+        f"so the baseline has enough refill sessions."
+    )
 
 with st.spinner("Loading refill sessions..."):
-    df_events, _, _, df_sched, _ = App.load_data(start_date, end_date)
+    df_events, _, _, df_sched, _ = App.load_data(effective_start_date, end_date)
     sessions = sessionize_refills(df_events)
 
 if sessions.empty:
-    st.warning("No refill/load sessions were found in the selected date range.")
+    st.warning("No refill/load sessions were found in the KPI baseline window.")
+    if not df_events.empty and "event_type" in df_events.columns:
+        event_counts = (
+            df_events["event_type"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "(blank)")
+            .value_counts()
+            .head(20)
+            .rename_axis("event_type")
+            .reset_index(name="rows")
+        )
+        with st.expander("Loaded event types"):
+            st.dataframe(event_counts, width="stretch", hide_index=True)
     st.stop()
 
 sessions = attach_schedule_context(sessions, df_sched)
