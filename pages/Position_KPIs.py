@@ -17,19 +17,19 @@ App.require_management_access("Position KPIs")
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
         "Position KPIs",
-        "Baseline refill duration by position window, then show how each tech/day deviates from the normal range.",
+        "Baseline Pyxis and pharmacy workflow duration by scheduled position window, then show how each tech/day deviates from the normal range.",
         kicker="Performance",
     )
 else:
     st.header("Position KPIs")
-    st.caption("Baseline refill duration by position window and compare tech/day performance.")
+    st.caption("Baseline Pyxis and pharmacy workflow duration by position window and compare tech/day performance.")
 
 
 DEFAULT_POSITIONS = [
     {"position": "0500 Tech Refills", "start": "05:00", "end": "13:30", "staff_keywords": "0500", "device_keywords": ""},
     {"position": "0600 Tech Refills", "start": "06:00", "end": "14:30", "staff_keywords": "0600", "device_keywords": ""},
-    {"position": "PHP Refills", "start": "14:30", "end": "23:00", "staff_keywords": "PHP", "device_keywords": "PHP"},
-    {"position": "OR Refills", "start": "14:30", "end": "23:00", "staff_keywords": "OR", "device_keywords": "OR"},
+    {"position": "PHP Refills", "start": "14:30", "end": "23:00", "staff_keywords": "PHP", "device_keywords": ""},
+    {"position": "OR Refills", "start": "14:30", "end": "23:00", "staff_keywords": "OR", "device_keywords": ""},
 ]
 
 
@@ -52,42 +52,48 @@ def coerce_time(value):
     return parsed.time()
 
 
-def sessionize_refills(events):
-    if events.empty:
+def build_work_sessions(events, pharmacy_orders):
+    px_cols = ["pk", "dt", "user_name", "device", "event_type", "med_id", "med_desc", "qty"]
+    px_df = events[[c for c in px_cols if c in events.columns]].copy() if not events.empty else pd.DataFrame()
+    if not px_df.empty:
+        px_df["source"] = "Pyxis"
+
+    ph_cols = ["pk", "dt", "user_name", "destination", "priority", "med_id", "med_desc", "qty"]
+    ph_df = pharmacy_orders[[c for c in ph_cols if c in pharmacy_orders.columns]].copy() if not pharmacy_orders.empty else pd.DataFrame()
+    if not ph_df.empty:
+        ph_df = ph_df.rename(columns={"destination": "device", "priority": "event_type"})
+        ph_df["source"] = "Pharmacy"
+
+    df = pd.concat([px_df, ph_df], ignore_index=True)
+    if df.empty:
         return pd.DataFrame()
 
-    refill_pattern = r"restock|refill|\bload\b|replenish"
-    exclude_pattern = r"cancel|unload|empty|outdate|expire"
-    df = events.copy()
-    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-    df = df.dropna(subset=["dt"]).copy()
-    for col in ["event_type", "user_name", "device", "med_id", "med_desc"]:
+    for col in ["pk", "user_name", "device", "event_type", "med_id", "med_desc", "source"]:
         if col not in df.columns:
             df[col] = ""
         df[col] = df[col].fillna("").astype(str).str.strip()
     if "qty" not in df.columns:
         df["qty"] = 0
     df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
-    event_text = df["event_type"].str.lower()
-    df = df[
-        event_text.str.contains(refill_pattern, regex=True, na=False)
-        & ~event_text.str.contains(exclude_pattern, regex=True, na=False)
-    ].copy()
+    df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    df = df.dropna(subset=["dt"]).copy()
     if df.empty:
         return pd.DataFrame()
 
     df["tech_key"] = df["user_name"].apply(App.normalize_name)
     df["event_date"] = df["dt"].dt.date
     df["device_norm"] = df["device"].str.upper()
-    df = df.sort_values(["tech_key", "event_date", "device_norm", "dt"]).reset_index(drop=True)
+    df = df.sort_values(["tech_key", "event_date", "source", "device_norm", "dt"]).reset_index(drop=True)
     df["prev_tech"] = df["tech_key"].shift()
     df["prev_date"] = df["event_date"].shift()
+    df["prev_source"] = df["source"].shift()
     df["prev_device"] = df["device_norm"].shift()
     df["prev_dt"] = df["dt"].shift()
     df["gap_sec"] = (df["dt"] - df["prev_dt"]).dt.total_seconds().fillna(0)
     df["new_session"] = (
         (df["tech_key"] != df["prev_tech"])
         | (df["event_date"] != df["prev_date"])
+        | (df["source"] != df["prev_source"])
         | (df["device_norm"] != df["prev_device"])
         | (df["gap_sec"] > 20 * 60)
     )
@@ -99,8 +105,10 @@ def sessionize_refills(events):
             event_date=("event_date", "first"),
             user_name=("user_name", "first"),
             tech_key=("tech_key", "first"),
+            source=("source", "first"),
             device=("device", "first"),
             device_norm=("device_norm", "first"),
+            primary_event=("event_type", "first"),
             start_dt=("dt", "min"),
             end_dt=("dt", "max"),
             refill_events=("dt", "count"),
@@ -146,13 +154,17 @@ def contains_any_keyword(series, keywords):
     if not keywords:
         return pd.Series(True, index=series.index)
     series = series.fillna("").astype(str).apply(normalize_match_text)
-    pattern = "|".join(re.escape(keyword) for keyword in keywords)
+    pattern_parts = [
+        rf"(?<![A-Z0-9]){re.escape(keyword)}(?![A-Z0-9])"
+        for keyword in keywords
+    ]
+    pattern = "|".join(pattern_parts)
     return series.str.contains(pattern, case=False, regex=True, na=False)
 
 
 with st.expander("Position window setup", expanded=False):
     st.caption(
-        "Keywords are comma-separated. Staff keywords match schedule text; device keywords match cabinet names."
+        "Keywords are comma-separated. Staff keywords match schedule text first; device keywords optionally narrow cabinet/destination names."
     )
     edited_positions = st.data_editor(
         pd.DataFrame(DEFAULT_POSITIONS),
@@ -185,11 +197,11 @@ if effective_start_date < start_date:
     )
 
 with st.spinner("Loading refill sessions..."):
-    df_events, _, _, df_sched, _ = App.load_data(effective_start_date, end_date)
-    sessions = sessionize_refills(df_events)
+    df_events, _, df_pharm, df_sched, _ = App.load_data(effective_start_date, end_date)
+    sessions = build_work_sessions(df_events, df_pharm)
 
 if sessions.empty:
-    st.warning("No refill/load sessions were found in the KPI baseline window.")
+    st.warning("No Pyxis or pharmacy workflow sessions were found in the KPI baseline window.")
     if not df_events.empty and "event_type" in df_events.columns:
         event_counts = (
             df_events["event_type"]
@@ -204,6 +216,20 @@ if sessions.empty:
         )
         with st.expander("Loaded event types"):
             st.dataframe(event_counts, width="stretch", hide_index=True)
+    if not df_pharm.empty and "priority" in df_pharm.columns:
+        pharm_counts = (
+            df_pharm["priority"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "(blank)")
+            .value_counts()
+            .head(20)
+            .rename_axis("priority")
+            .reset_index(name="rows")
+        )
+        with st.expander("Loaded pharmacy priorities"):
+            st.dataframe(pharm_counts, width="stretch", hide_index=True)
     st.stop()
 
 sessions = attach_schedule_context(sessions, df_sched)
@@ -262,7 +288,7 @@ kpi.loc[kpi["duration_minutes"] > kpi["baseline_p75_min"], "kpi_status"] = "Slow
 kpi.loc[kpi["duration_minutes"] < (kpi["baseline_median_min"] * 0.75), "kpi_status"] = "Faster than baseline"
 
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Refill Sessions", f"{len(kpi):,}")
+m1.metric("Workflow Sessions", f"{len(kpi):,}")
 m2.metric("Positions Baselined", f"{baseline['position'].nunique():,}")
 m3.metric("Slower Sessions", f"{int((kpi['kpi_status'] == 'Slower than baseline').sum()):,}")
 m4.metric("Techs Measured", f"{kpi['staff_name'].nunique():,}")
@@ -280,8 +306,8 @@ st.dataframe(
     column_config={
         "position": st.column_config.TextColumn("Position"),
         "baseline_sessions": st.column_config.NumberColumn("Sessions", format="%d"),
-        "baseline_events": st.column_config.NumberColumn("Median Events", format="%.0f"),
-        "baseline_qty": st.column_config.NumberColumn("Median Qty", format="%.0f"),
+            "baseline_events": st.column_config.NumberColumn("Median Events", format="%.0f"),
+            "baseline_qty": st.column_config.NumberColumn("Median Qty", format="%.0f"),
     },
 )
 
@@ -343,7 +369,7 @@ with detail_tab:
         detail[
             [
                 "event_date", "position", "staff_name", "shift_type", "device", "start_dt", "end_dt",
-                "duration_minutes", "baseline_median_min", "duration_delta_min", "duration_delta_pct",
+                "source", "primary_event", "duration_minutes", "baseline_median_min", "duration_delta_min", "duration_delta_pct",
                 "refill_events", "refill_qty", "meds", "kpi_status",
             ]
         ],
@@ -363,6 +389,6 @@ with detail_tab:
     st.download_button(
         "Download position KPI session detail CSV",
         data=detail.to_csv(index=False).encode("utf-8"),
-        file_name="position_kpi_refill_sessions.csv",
+        file_name="position_kpi_workflow_sessions.csv",
         mime="text/csv",
     )
