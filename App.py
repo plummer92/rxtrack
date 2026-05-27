@@ -2135,6 +2135,14 @@ def clean_cartfill_discontinued_orders(df, source_file=""):
     ]]
 
 
+def looks_like_cartfill_discontinued_orders(df):
+    columns = {re.sub(r"[^a-z0-9]", "", str(col or "").strip().lower()) for col in df.columns}
+    has_dc_time = bool(columns & {"actioninstant", "discontinueddatetime", "discontinueddatetime", "dcdatetime"})
+    has_order_id = bool(columns & {"orderid", "medicationorderid"})
+    has_medication_order = bool(columns & {"medicationorder", "ordermedication", "medication"})
+    return has_dc_time and has_order_id and has_medication_order
+
+
 def clean_overnight_cartfill_workbook(uploaded):
     uploaded.seek(0)
     excel = pd.ExcelFile(uploaded)
@@ -4547,32 +4555,61 @@ if _is_main:
                     processed_count = len(clean)
 
                 elif u_type in {"Cartfill Stats (All Areas)", "WCC Cartfill Stats"}:
-                    clean = clean_wcc_cartfill_stats(raw, uploaded_names)
-                    sql = """INSERT INTO wcc_cartfill_stats
-                             (pk, order_id, report_start_date, report_end_date, order_medication, med_id,
-                              ready_for_dispense_dt, admin_given_dt, prepared_dt, prep_or_dispense_user,
-                              location, pharmacy, cartfill_area, source_file)
-                             VALUES (%(pk)s, %(order_id)s, %(report_start_date)s, %(report_end_date)s, %(order_medication)s,
-                                     %(med_id)s, %(ready_for_dispense_dt)s, %(admin_given_dt)s,
-                                     %(prepared_dt)s, %(prep_or_dispense_user)s, %(location)s,
-                                     %(pharmacy)s, %(cartfill_area)s, %(source_file)s)
-                             ON CONFLICT (pk) DO UPDATE SET
-                                 order_id = EXCLUDED.order_id,
-                                 report_start_date = EXCLUDED.report_start_date,
-                                 report_end_date = EXCLUDED.report_end_date,
-                                 order_medication = EXCLUDED.order_medication,
-                                 med_id = EXCLUDED.med_id,
-                                 ready_for_dispense_dt = EXCLUDED.ready_for_dispense_dt,
-                                 admin_given_dt = EXCLUDED.admin_given_dt,
-                                 prepared_dt = EXCLUDED.prepared_dt,
-                                 prep_or_dispense_user = EXCLUDED.prep_or_dispense_user,
-                                 location = EXCLUDED.location,
-                                 pharmacy = EXCLUDED.pharmacy,
-                                 cartfill_area = EXCLUDED.cartfill_area,
-                                 source_file = EXCLUDED.source_file,
-                                 uploaded_at = NOW();"""
-                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cartfill Stats")
-                    processed_count = len(clean)
+                    if looks_like_cartfill_discontinued_orders(raw):
+                        st.warning(
+                            "This file looks like Cartfill Discontinued Orders, so RxTrack is routing it "
+                            "to the discontinued-orders table instead of Cartfill Stats."
+                        )
+                        clean = clean_cartfill_discontinued_orders(raw, uploaded_names)
+                        sql = """INSERT INTO cartfill_discontinued_orders
+                                 (pk, report_start_date, report_end_date, action_type, user_name,
+                                  discontinued_dt, order_medication, order_id, source_file)
+                                 VALUES (%(pk)s, %(report_start_date)s, %(report_end_date)s, %(action_type)s,
+                                         %(user_name)s, %(discontinued_dt)s, %(order_medication)s,
+                                         %(order_id)s, %(source_file)s)
+                                 ON CONFLICT (pk) DO UPDATE SET
+                                     report_start_date = EXCLUDED.report_start_date,
+                                     report_end_date = EXCLUDED.report_end_date,
+                                     action_type = EXCLUDED.action_type,
+                                     user_name = EXCLUDED.user_name,
+                                     discontinued_dt = EXCLUDED.discontinued_dt,
+                                     order_medication = EXCLUDED.order_medication,
+                                     order_id = EXCLUDED.order_id,
+                                     source_file = EXCLUDED.source_file,
+                                     uploaded_at = NOW();"""
+                        execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cartfill Discontinued Orders")
+                        dc_min, dc_max, dc_rows = verify_cartfill_discontinued_upload()
+                        st.success(
+                            f"Verified discontinued-orders table: {dc_rows:,} rows from {dc_min} through {dc_max}."
+                        )
+                        processed_count = len(clean)
+                    else:
+                        clean = clean_wcc_cartfill_stats(raw, uploaded_names)
+                        sql = """INSERT INTO wcc_cartfill_stats
+                                 (pk, order_id, report_start_date, report_end_date, order_medication, med_id,
+                                  ready_for_dispense_dt, admin_given_dt, prepared_dt, prep_or_dispense_user,
+                                  location, pharmacy, cartfill_area, source_file)
+                                 VALUES (%(pk)s, %(order_id)s, %(report_start_date)s, %(report_end_date)s, %(order_medication)s,
+                                         %(med_id)s, %(ready_for_dispense_dt)s, %(admin_given_dt)s,
+                                         %(prepared_dt)s, %(prep_or_dispense_user)s, %(location)s,
+                                         %(pharmacy)s, %(cartfill_area)s, %(source_file)s)
+                                 ON CONFLICT (pk) DO UPDATE SET
+                                     order_id = EXCLUDED.order_id,
+                                     report_start_date = EXCLUDED.report_start_date,
+                                     report_end_date = EXCLUDED.report_end_date,
+                                     order_medication = EXCLUDED.order_medication,
+                                     med_id = EXCLUDED.med_id,
+                                     ready_for_dispense_dt = EXCLUDED.ready_for_dispense_dt,
+                                     admin_given_dt = EXCLUDED.admin_given_dt,
+                                     prepared_dt = EXCLUDED.prepared_dt,
+                                     prep_or_dispense_user = EXCLUDED.prep_or_dispense_user,
+                                     location = EXCLUDED.location,
+                                     pharmacy = EXCLUDED.pharmacy,
+                                     cartfill_area = EXCLUDED.cartfill_area,
+                                     source_file = EXCLUDED.source_file,
+                                     uploaded_at = NOW();"""
+                        execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cartfill Stats")
+                        processed_count = len(clean)
 
                 elif u_type == "Cartfill Discontinued Orders":
                     clean = clean_cartfill_discontinued_orders(raw, uploaded_names)
