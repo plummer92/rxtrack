@@ -45,14 +45,9 @@ SCENARIOS = {
     "two_wave_balanced": {
         "label": "0600 / 1700 Cartfills",
         "waves": TWO_WAVE_WAVES,
-        "split": {
-            "0600": {"0600": 1.0},
-            "0900": {"0600": 1.0},
-            "1400": {"0600": 1.0},
-            "1700": {"1700": 1.0},
-            "2000": {"1700": 1.0},
-        },
-        "note": "Moves 0900 and 1400 work into 0600, keeps late-day work in a 1700 cartfill.",
+        "split": None,
+        "method": "due_deadline",
+        "note": "Batches orders into 0600 or 1700 based on dose due time, keeping a 2-hour delivery buffer.",
     },
     "two_wave_frontload": {
         "label": "0600 Heavy + 1700 Backup",
@@ -64,13 +59,15 @@ SCENARIOS = {
             "1700": {"0600": 1.0},
             "2000": {"1700": 1.0},
         },
+        "method": "current_wave_split",
         "note": "Stress-tests the idea of moving the 0900, 1400, and 1700 work into 0600, leaving 1700 as the late cartfill.",
     },
     "q2h": {
         "label": "Cartfill Every 2 Hours",
         "waves": Q2H_WAVES,
         "split": None,
-        "note": "Reassigns each order to the next 2-hour cartfill from 0600 through 2000 based on Ready for Dispense time.",
+        "method": "due_deadline",
+        "note": "Batches orders every 2 hours based on dose due time, keeping a 2-hour delivery buffer.",
     },
 }
 
@@ -100,6 +97,18 @@ def next_custom_wave_label(ts, waves):
         if value <= hour_value:
             return wave
     return waves[0]
+
+
+def cartfill_for_due_deadline(due_ts, waves, lead_hours=2):
+    if pd.isna(due_ts):
+        return "Unknown"
+    deadline = due_ts - pd.Timedelta(hours=lead_hours)
+    deadline_value = deadline.hour + (deadline.minute / 60)
+    anchors = [(wave, int(wave[:2]) + int(wave[2:]) / 60) for wave in waves]
+    eligible = [item for item in anchors if item[1] <= deadline_value]
+    if eligible:
+        return max(eligible, key=lambda item: item[1])[0]
+    return max(anchors, key=lambda item: item[1])[0]
 
 
 def prepare_daily_current(df):
@@ -151,6 +160,30 @@ def prepare_daily_nearest_wave(df, waves):
         return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
     work = df.copy()
     work["scenario_wave"] = work["ready_for_dispense_dt"].apply(lambda ts: next_custom_wave_label(ts, waves))
+    daily = (
+        work.groupby(["event_date", "scenario_wave"], as_index=False)
+        .agg(
+            total_orders=("pk", "count"),
+            administered_orders=("was_administered", "sum"),
+        )
+        .rename(columns={"scenario_wave": "wave"})
+    )
+    daily["not_administered_orders"] = daily["total_orders"] - daily["administered_orders"]
+    return daily
+
+
+def prepare_daily_due_deadline(df, waves, lead_hours=2):
+    if df.empty:
+        return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
+    work = df.copy()
+    if "dose_due_dt" not in work.columns:
+        work["dose_due_dt"] = pd.NaT
+    work = work[work["dose_due_dt"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
+    work["scenario_wave"] = work["dose_due_dt"].apply(
+        lambda ts: cartfill_for_due_deadline(ts, waves, lead_hours=lead_hours)
+    )
     daily = (
         work.groupby(["event_date", "scenario_wave"], as_index=False)
         .agg(
@@ -292,6 +325,7 @@ orders["order_medication"] = orders["order_medication"].fillna("Unknown").astype
 orders["is_sjs_cleanroom"] = orders["is_sjs_cleanroom"].fillna(False)
 orders["current_wave"] = orders["ready_for_dispense_dt"].apply(nearest_wave_label)
 orders["was_administered"] = orders["admin_given_dt"].notna().astype(int)
+orders["dose_due_dt"] = orders["admin_given_dt"]
 orders["prep_lead_hours"] = pd.to_numeric(orders["prep_lead_hours"], errors="coerce")
 orders["hold_hours"] = pd.to_numeric(orders["hold_hours"], errors="coerce")
 
@@ -325,10 +359,12 @@ scenario_key = st.selectbox(
     index=1,
 )
 scenario = SCENARIOS[scenario_key]
-if scenario["split"] is None:
-    proposed_daily = prepare_daily_nearest_wave(focus, scenario["waves"])
+if scenario.get("method") == "due_deadline":
+    proposed_daily = prepare_daily_due_deadline(focus, scenario["waves"], lead_hours=2)
+    due_mode_rows = int(focus["dose_due_dt"].notna().sum())
 else:
     proposed_daily = prepare_daily_split(current_daily, scenario["split"])
+    due_mode_rows = len(focus)
 period_tables = build_period_tables(current_daily, proposed_daily, focus, CURRENT_WAVES, scenario["waves"])
 
 total_orders = len(focus)
@@ -356,6 +392,18 @@ if scenario_key in {"two_wave_balanced", "two_wave_frontload"}:
         "1000-1830, and the late cartfill remains at 1700. The charts below show order volume movement; "
         "labor coverage is shown as an operating assumption, not a payroll calculation."
     )
+
+if scenario.get("method") == "due_deadline":
+    missing_due = len(focus) - due_mode_rows
+    st.caption(
+        f"Dose due time is approximated from `Admin Given Date & Time`; {due_mode_rows:,} administered rows "
+        f"were included in this due-time model."
+    )
+    if missing_due:
+        st.warning(
+            f"{missing_due:,} rows had no Admin Given Date & Time, so they are excluded from this due-time what-if. "
+            "A report column with scheduled dose due time would let this model include every order."
+        )
 
 st.divider()
 
