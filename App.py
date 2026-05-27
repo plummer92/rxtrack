@@ -1900,7 +1900,9 @@ def clean_wcc_compounding_stats(df, source_file=""):
 def parse_excel_datetime_series(series):
     numeric_values = pd.to_numeric(series, errors="coerce")
     parsed_values = pd.to_datetime(series.where(numeric_values.isna()), errors="coerce")
-    excel_values = pd.to_datetime(numeric_values, unit="D", origin="1899-12-30", errors="coerce")
+    excel_origin = pd.Timestamp("1899-12-30")
+    excel_values = excel_origin + pd.to_timedelta(numeric_values, unit="D")
+    excel_values = excel_values.where(numeric_values.notna())
     return excel_values.where(numeric_values.notna(), parsed_values)
 
 
