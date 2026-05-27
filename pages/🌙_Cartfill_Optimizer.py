@@ -293,6 +293,85 @@ def prepare_daily_two_wave_deadline(df, lead_hours=2):
     return daily
 
 
+def assign_scenario_wave(row, scenario_key, scenario, lead_hours=2):
+    if scenario_key == "two_wave_balanced":
+        if pd.notna(row.get("dose_due_dt")):
+            return cartfill_for_due_deadline(row.get("dose_due_dt"), TWO_WAVE_WAVES, lead_hours=lead_hours)
+        return {
+            "0600": "0600",
+            "0900": "0600",
+            "1400": "0600",
+            "1700": "1700",
+            "2000": "1700",
+        }.get(row.get("current_wave"), "1700")
+
+    if scenario_key == "two_wave_frontload":
+        return {
+            "0600": "0600",
+            "0900": "0600",
+            "1400": "0600",
+            "1700": "0600",
+            "2000": "1700",
+        }.get(row.get("current_wave"), "1700")
+
+    if scenario.get("method") == "due_deadline":
+        if pd.notna(row.get("dose_due_dt")):
+            return cartfill_for_due_deadline(row.get("dose_due_dt"), scenario["waves"], lead_hours=lead_hours)
+        return next_custom_wave_label(row.get("ready_for_dispense_dt"), scenario["waves"])
+
+    split = scenario.get("split") or {}
+    current_wave = row.get("current_wave")
+    wave_split = split.get(current_wave, {})
+    if not wave_split:
+        return current_wave
+    return max(wave_split.items(), key=lambda item: item[1])[0]
+
+
+def cartfill_timestamp(event_date, wave):
+    if pd.isna(event_date) or not wave or wave == "Unknown":
+        return pd.NaT
+    return pd.to_datetime(event_date).normalize() + pd.Timedelta(
+        hours=int(str(wave)[:2]),
+        minutes=int(str(wave)[2:]),
+    )
+
+
+def build_discontinued_waste_summary(focus_df, scenario_key, scenario):
+    if focus_df.empty or "discontinued_dt" not in focus_df.columns:
+        return pd.DataFrame()
+
+    work = focus_df.copy()
+    work["discontinued_dt"] = pd.to_datetime(work["discontinued_dt"], errors="coerce")
+    work = work[work["was_administered"].eq(0) & work["discontinued_dt"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    work["proposed_wave"] = work.apply(lambda row: assign_scenario_wave(row, scenario_key, scenario), axis=1)
+    work["current_cartfill_dt"] = pd.to_datetime(work["ready_for_dispense_dt"], errors="coerce")
+    work["proposed_cartfill_dt"] = work.apply(lambda row: cartfill_timestamp(row["event_date"], row["proposed_wave"]), axis=1)
+    current_made = work["current_cartfill_dt"].notna() & (work["current_cartfill_dt"] <= work["discontinued_dt"])
+    proposed_made = work["proposed_cartfill_dt"].notna() & (work["proposed_cartfill_dt"] <= work["discontinued_dt"])
+
+    current_waste = int(current_made.sum())
+    proposed_waste = int(proposed_made.sum())
+    return pd.DataFrame(
+        [
+            {
+                "Model": "Current",
+                "Discontinued Not-Admin Orders": len(work),
+                "Likely Made Before DC": current_waste,
+                "Avoidable Before Cartfill": int((~current_made).sum()),
+            },
+            {
+                "Model": "Proposed",
+                "Discontinued Not-Admin Orders": len(work),
+                "Likely Made Before DC": proposed_waste,
+                "Avoidable Before Cartfill": int((~proposed_made).sum()),
+            },
+        ]
+    )
+
+
 def build_average_table(daily_df, dates, wave_order, label, basis_map=None):
     if not dates:
         return pd.DataFrame(
@@ -433,7 +512,7 @@ if df_orders.empty:
     st.stop()
 
 orders = df_orders.copy()
-for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "event_date"]:
+for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "event_date", "discontinued_dt"]:
     if col in orders.columns:
         orders[col] = pd.to_datetime(orders[col], errors="coerce")
 
@@ -638,6 +717,26 @@ st.caption(
     "This uses missing `Admin Given Date & Time` as likely waste. The selected model changes which cartfill wave "
     "carries that waste; total likely waste only changes if a workflow change actually prevents doses from going unused."
 )
+
+dc_waste = build_discontinued_waste_summary(focus, scenario_key, scenario)
+if not dc_waste.empty:
+    st.subheader("Discontinued Order Waste Check")
+    st.dataframe(dc_waste, width="stretch", hide_index=True)
+    current_dc_waste = dc_waste.loc[dc_waste["Model"] == "Current", "Likely Made Before DC"].sum()
+    proposed_dc_waste = dc_waste.loc[dc_waste["Model"] == "Proposed", "Likely Made Before DC"].sum()
+    dc_delta = proposed_dc_waste - current_dc_waste
+    st.metric(
+        "Proposed DC-Linked Waste",
+        f"{proposed_dc_waste:.0f} orders",
+        f"{dc_delta:+.0f} vs current",
+        help="Counts not-administered orders with a discontinue time where the cartfill would have happened before the discontinue.",
+    )
+    st.caption(
+        "This is the stronger waste signal: it only uses rows with no admin time and a known discontinue time. "
+        "If the proposed cartfill time is after the discontinue time, the model counts that order as avoidable before cartfill."
+    )
+else:
+    st.caption("Upload Cartfill Discontinued Orders to compare waste that could be avoided before a cartfill is made.")
 
 detail_col1, detail_col2 = st.columns(2)
 

@@ -323,6 +323,7 @@ def init_db():
         );""",
         """CREATE TABLE IF NOT EXISTS wcc_cartfill_stats (
             pk TEXT PRIMARY KEY,
+            order_id TEXT,
             report_start_date DATE,
             report_end_date DATE,
             order_medication TEXT,
@@ -334,6 +335,18 @@ def init_db():
             location TEXT,
             pharmacy TEXT,
             cartfill_area TEXT,
+            source_file TEXT,
+            uploaded_at TIMESTAMP DEFAULT NOW()
+        );""",
+        """CREATE TABLE IF NOT EXISTS cartfill_discontinued_orders (
+            pk TEXT PRIMARY KEY,
+            report_start_date DATE,
+            report_end_date DATE,
+            action_type TEXT,
+            user_name TEXT,
+            discontinued_dt TIMESTAMP,
+            order_medication TEXT,
+            order_id TEXT,
             source_file TEXT,
             uploaded_at TIMESTAMP DEFAULT NOW()
         );""",
@@ -452,6 +465,7 @@ def init_db():
         """ALTER TABLE staff_schedule ADD COLUMN IF NOT EXISTS cell_fill_color TEXT;""",
         """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS cartfill_area TEXT;""",
         """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS admin_given_dt TIMESTAMP;""",
+        """ALTER TABLE wcc_cartfill_stats ADD COLUMN IF NOT EXISTS order_id TEXT;""",
         """ALTER TABLE cycle_count_variances ADD COLUMN IF NOT EXISTS source_filename TEXT;""",
         """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_page TEXT;""",
         """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_key TEXT;""",
@@ -1934,6 +1948,7 @@ def clean_wcc_cartfill_stats(df, source_file=""):
     col_aliases = {
         "report_start_date": ["Start Date", "Report Start Date", "Start"],
         "report_end_date": ["End Date", "Report End Date", "End"],
+        "order_id": ["Order ID", "OrderID", "Medication Order ID"],
         "order_medication": ["Order Medication", "Medication", "Med", "Order Med", "Order Name", "Medication Name"],
         "ready_for_dispense_dt": [
             "Ready for Dispense for Date & Time",
@@ -2000,9 +2015,10 @@ def clean_wcc_cartfill_stats(df, source_file=""):
         if col not in df.columns:
             df[col] = None
 
-    for col in ["order_medication", "prep_or_dispense_user", "location", "pharmacy"]:
+    for col in ["order_id", "order_medication", "prep_or_dispense_user", "location", "pharmacy"]:
         df[col] = df[col].fillna("").astype(str).str.strip()
 
+    df["order_id"] = df["order_id"].apply(normalize_identifier_text).fillna("")
     df["med_id"] = df["order_medication"].str.extract(r"\[([^\]]+)\]", expand=False).fillna("").astype(str).str.strip()
     df["report_start_date"] = parse_excel_datetime_series(df["report_start_date"]).dt.date
     df["report_end_date"] = parse_excel_datetime_series(df["report_end_date"]).dt.date
@@ -2041,9 +2057,75 @@ def clean_wcc_cartfill_stats(df, source_file=""):
     df = df.astype(object)
     df = df.where(pd.notna(df), None)
     return df[[
-        "pk", "report_start_date", "report_end_date", "order_medication", "med_id",
+        "pk", "order_id", "report_start_date", "report_end_date", "order_medication", "med_id",
         "ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "prep_or_dispense_user",
         "location", "pharmacy", "cartfill_area", "source_file",
+    ]]
+
+
+def clean_cartfill_discontinued_orders(df, source_file=""):
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    def _col_key(value):
+        return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+    col_aliases = {
+        "report_start_date": ["Start Date", "Report Start Date", "Start"],
+        "report_end_date": ["End Date", "Report End Date", "End"],
+        "action_type": ["Action Type", "Slices by Action Type"],
+        "user_name": ["User", "Action User"],
+        "discontinued_dt": ["Action Instant", "Discontinued Date & Time", "Discontinued Date Time", "DC Date & Time"],
+        "order_medication": ["Medication Order", "Order Medication", "Medication"],
+        "order_id": ["Order ID", "OrderID", "Medication Order ID"],
+    }
+    alias_lookup = {
+        _col_key(alias): target
+        for target, aliases in col_aliases.items()
+        for alias in aliases
+    }
+    df.rename(columns={col: alias_lookup.get(_col_key(col), col) for col in df.columns}, inplace=True)
+
+    required_signal = {"order_id", "discontinued_dt"}
+    if not required_signal.issubset(set(df.columns)):
+        raise ValueError(
+            "Discontinued order upload needs Order ID and Action Instant/Discontinued Date & Time columns. "
+            f"Detected columns: {', '.join(map(str, df.columns))}."
+        )
+
+    for col in col_aliases:
+        if col not in df.columns:
+            df[col] = None
+
+    for col in ["action_type", "user_name", "order_medication", "order_id"]:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+
+    df["order_id"] = df["order_id"].apply(normalize_identifier_text).fillna("")
+    df["report_start_date"] = parse_excel_datetime_series(df["report_start_date"]).dt.date
+    df["report_end_date"] = parse_excel_datetime_series(df["report_end_date"]).dt.date
+    df["discontinued_dt"] = parse_excel_datetime_series(df["discontinued_dt"])
+    source_rows = len(df)
+    df = df[df["order_id"].ne("") & df["discontinued_dt"].notna()].copy()
+    if df.empty and source_rows:
+        raise ValueError(
+            "No discontinued order rows survived cleaning. "
+            f"Rows read: {source_rows}; rows with Order ID: {int(df['order_id'].ne('').sum()) if 'order_id' in df else 0}."
+        )
+    df["source_file"] = source_file or ""
+    df["pk"] = df.apply(
+        lambda row: hashlib.sha256(
+            "|".join([
+                str(row.get("order_id") or ""),
+                str(row.get("discontinued_dt") or ""),
+                str(row.get("action_type") or ""),
+            ]).encode()
+        ).hexdigest(),
+        axis=1,
+    )
+    df = df.astype(object).where(pd.notna(df), None)
+    return df[[
+        "pk", "report_start_date", "report_end_date", "action_type", "user_name",
+        "discontinued_dt", "order_medication", "order_id", "source_file",
     ]]
 
 
@@ -2735,6 +2817,7 @@ def load_wcc_cartfill_stats(start_date, end_date):
     query = """
         SELECT
             pk,
+            order_id,
             report_start_date,
             report_end_date,
             order_medication,
@@ -2767,10 +2850,16 @@ def load_wcc_cartfill_stats(start_date, end_date):
 def load_overnight_cartfill_orders(start_date, end_date):
     init_db()
     query = """
+        WITH discontinued AS (
+            SELECT order_id, MIN(discontinued_dt) AS discontinued_dt
+            FROM cartfill_discontinued_orders
+            WHERE order_id IS NOT NULL AND order_id <> ''
+            GROUP BY order_id
+        )
         SELECT * FROM (
             SELECT
                 'legacy-' || pk AS pk,
-                order_id,
+                o.order_id,
                 order_medication,
                 ready_for_dispense_dt,
                 admin_given_dt,
@@ -2781,15 +2870,17 @@ def load_overnight_cartfill_orders(start_date, end_date):
                 required_start_dt,
                 prep_lead_hours,
                 hold_hours,
-                is_sjs_cleanroom
-            FROM overnight_iv_cartfill_orders
+                is_sjs_cleanroom,
+                d.discontinued_dt
+            FROM overnight_iv_cartfill_orders o
+            LEFT JOIN discontinued d ON d.order_id = o.order_id
             WHERE event_date BETWEEN %s AND %s
 
             UNION ALL
 
             SELECT
-                'all-' || pk AS pk,
-                pk AS order_id,
+                'all-' || c.pk AS pk,
+                NULLIF(c.order_id, '') AS order_id,
                 order_medication,
                 ready_for_dispense_dt,
                 admin_given_dt,
@@ -2800,8 +2891,10 @@ def load_overnight_cartfill_orders(start_date, end_date):
                 ready_for_dispense_dt - INTERVAL '4 hours' AS required_start_dt,
                 EXTRACT(EPOCH FROM (ready_for_dispense_dt - prepared_dt)) / 3600.0 AS prep_lead_hours,
                 NULL::float AS hold_hours,
-                (COALESCE(cartfill_area, '') = 'IV Room' OR UPPER(COALESCE(pharmacy, '')) LIKE '%%CLEANROOM%%') AS is_sjs_cleanroom
-            FROM wcc_cartfill_stats
+                (COALESCE(cartfill_area, '') = 'IV Room' OR UPPER(COALESCE(pharmacy, '')) LIKE '%%CLEANROOM%%') AS is_sjs_cleanroom,
+                d.discontinued_dt
+            FROM wcc_cartfill_stats c
+            LEFT JOIN discontinued d ON d.order_id = c.order_id
             WHERE ready_for_dispense_dt::date BETWEEN %s AND %s
         ) cartfill_orders
         ORDER BY COALESCE(admin_given_dt, ready_for_dispense_dt, prepared_dt)
@@ -2809,7 +2902,7 @@ def load_overnight_cartfill_orders(start_date, end_date):
     try:
         with db_cursor() as (conn, cur):
             df = pd.read_sql(query, conn, params=(start_date, end_date, start_date, end_date))
-        for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date"]:
+        for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date", "discontinued_dt"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         if "order_id" in df.columns:
@@ -2838,14 +2931,15 @@ def load_overnight_cartfill_orders(start_date, end_date):
             required_start_dt,
             prep_lead_hours,
             hold_hours,
-            is_sjs_cleanroom
+            is_sjs_cleanroom,
+            NULL::timestamp AS discontinued_dt
         FROM overnight_iv_cartfill_orders
         WHERE event_date BETWEEN %s AND %s
         ORDER BY COALESCE(admin_given_dt, ready_for_dispense_dt, prepared_dt)
     """
         with db_cursor() as (conn, cur):
             df = pd.read_sql(fallback_query, conn, params=(start_date, end_date))
-        for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date"]:
+        for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "required_start_dt", "event_date", "discontinued_dt"]:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
         if "order_id" in df.columns:
@@ -3802,7 +3896,7 @@ if _is_main:
             "Daily Transaction Report", "Device Activity Log (Pends)", "Pharmacy Workflow Report", 
             "Med Cost Prices (Legacy Inventory Audit)", "Detailed Inventory Snapshot (Legacy RC)", "Staff Schedule", "Attendance Tracking",
             "IV Room Workload", "IV Room Batching", "IV Room Workflow Detail",
-            "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats",
+            "WCC Compounding Stats", "Cartfill Stats (All Areas)", "WCC Cartfill Stats", "Cartfill Discontinued Orders",
             "Days Since Last Cycle Count Report", "Cycle Count Variance Report",
             "Buyer Formulary Listing Report", "Physical Inventory Report",
             "Audit Transaction Detail RC",
@@ -4405,14 +4499,15 @@ if _is_main:
                 elif u_type in {"Cartfill Stats (All Areas)", "WCC Cartfill Stats"}:
                     clean = clean_wcc_cartfill_stats(raw, uploaded_names)
                     sql = """INSERT INTO wcc_cartfill_stats
-                             (pk, report_start_date, report_end_date, order_medication, med_id,
+                             (pk, order_id, report_start_date, report_end_date, order_medication, med_id,
                               ready_for_dispense_dt, admin_given_dt, prepared_dt, prep_or_dispense_user,
                               location, pharmacy, cartfill_area, source_file)
-                             VALUES (%(pk)s, %(report_start_date)s, %(report_end_date)s, %(order_medication)s,
+                             VALUES (%(pk)s, %(order_id)s, %(report_start_date)s, %(report_end_date)s, %(order_medication)s,
                                      %(med_id)s, %(ready_for_dispense_dt)s, %(admin_given_dt)s,
                                      %(prepared_dt)s, %(prep_or_dispense_user)s, %(location)s,
                                      %(pharmacy)s, %(cartfill_area)s, %(source_file)s)
                              ON CONFLICT (pk) DO UPDATE SET
+                                 order_id = EXCLUDED.order_id,
                                  report_start_date = EXCLUDED.report_start_date,
                                  report_end_date = EXCLUDED.report_end_date,
                                  order_medication = EXCLUDED.order_medication,
@@ -4427,6 +4522,27 @@ if _is_main:
                                  source_file = EXCLUDED.source_file,
                                  uploaded_at = NOW();"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cartfill Stats")
+                    processed_count = len(clean)
+
+                elif u_type == "Cartfill Discontinued Orders":
+                    clean = clean_cartfill_discontinued_orders(raw, uploaded_names)
+                    sql = """INSERT INTO cartfill_discontinued_orders
+                             (pk, report_start_date, report_end_date, action_type, user_name,
+                              discontinued_dt, order_medication, order_id, source_file)
+                             VALUES (%(pk)s, %(report_start_date)s, %(report_end_date)s, %(action_type)s,
+                                     %(user_name)s, %(discontinued_dt)s, %(order_medication)s,
+                                     %(order_id)s, %(source_file)s)
+                             ON CONFLICT (pk) DO UPDATE SET
+                                 report_start_date = EXCLUDED.report_start_date,
+                                 report_end_date = EXCLUDED.report_end_date,
+                                 action_type = EXCLUDED.action_type,
+                                 user_name = EXCLUDED.user_name,
+                                 discontinued_dt = EXCLUDED.discontinued_dt,
+                                 order_medication = EXCLUDED.order_medication,
+                                 order_id = EXCLUDED.order_id,
+                                 source_file = EXCLUDED.source_file,
+                                 uploaded_at = NOW();"""
+                    execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cartfill Discontinued Orders")
                     processed_count = len(clean)
 
                 elif u_type == "IV Overnight Cartfill Model":
