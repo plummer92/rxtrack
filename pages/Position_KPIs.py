@@ -162,6 +162,30 @@ def contains_any_keyword(series, keywords):
     return series.str.contains(pattern, case=False, regex=True, na=False)
 
 
+def summarize_position_match(pos_name, start_time, end_time, staff_keywords, device_keywords, sessions):
+    session_time = sessions["start_dt"].dt.time
+    if start_time <= end_time:
+        time_match = sessions[(session_time >= start_time) & (session_time <= end_time)].copy()
+    else:
+        time_match = sessions[(session_time >= start_time) | (session_time <= end_time)].copy()
+
+    staff_match = time_match
+    if staff_keywords:
+        staff_match = staff_match[contains_any_keyword(staff_match["schedule_text"], staff_keywords)].copy()
+
+    device_match = staff_match
+    if device_keywords:
+        device_match = device_match[contains_any_keyword(device_match["device_norm"], device_keywords)].copy()
+
+    return {
+        "position": pos_name,
+        "time_window_sessions": len(time_match),
+        "after_staff_keyword": len(staff_match),
+        "after_device_keyword": len(device_match),
+        "matched_staff": staff_match["staff_name"].nunique() if not staff_match.empty else 0,
+    }
+
+
 with st.expander("Position window setup", expanded=False):
     st.caption(
         "Keywords are comma-separated. Staff keywords match schedule text first; device keywords optionally narrow cabinet/destination names."
@@ -233,8 +257,16 @@ if sessions.empty:
     st.stop()
 
 sessions = attach_schedule_context(sessions, df_sched)
+sessions["has_schedule_match"] = sessions["shift_type"].fillna("").astype(str).str.strip().ne("")
+
+diag_cols = st.columns(4)
+diag_cols[0].metric("Loaded Pyxis Rows", f"{len(df_events):,}")
+diag_cols[1].metric("Loaded Pharmacy Rows", f"{len(df_pharm):,}")
+diag_cols[2].metric("Workflow Sessions", f"{len(sessions):,}")
+diag_cols[3].metric("Sessions Linked To Schedule", f"{int(sessions['has_schedule_match'].sum()):,}")
 
 position_frames = []
+position_diagnostics = []
 for pos in edited_positions.to_dict("records"):
     pos_name = str(pos.get("position") or "").strip()
     start_time = coerce_time(pos.get("start"))
@@ -243,6 +275,9 @@ for pos in edited_positions.to_dict("records"):
     keywords = normalize_keywords(pos.get("device_keywords"))
     if not pos_name or start_time is None or end_time is None:
         continue
+    position_diagnostics.append(
+        summarize_position_match(pos_name, start_time, end_time, staff_keywords, keywords, sessions)
+    )
     temp = sessions.copy()
     session_time = temp["start_dt"].dt.time
     if start_time <= end_time:
@@ -260,6 +295,32 @@ for pos in edited_positions.to_dict("records"):
 
 if not position_frames:
     st.warning("No refill sessions matched the current position windows/keywords.")
+    if position_diagnostics:
+        with st.expander("Position matching diagnostics", expanded=True):
+            st.dataframe(pd.DataFrame(position_diagnostics), width="stretch", hide_index=True)
+    if not df_sched.empty:
+        schedule_preview = df_sched.copy()
+        schedule_preview["schedule_text"] = (
+            schedule_preview[["staff_name", "shift_type", "assignment_type"]]
+            .fillna("")
+            .astype(str)
+            .agg(" ".join, axis=1)
+            .apply(normalize_match_text)
+        )
+        with st.expander("Schedule rows loaded"):
+            st.dataframe(
+                schedule_preview[["dt", "staff_name", "shift_type", "assignment_type", "schedule_text"]].head(100),
+                width="stretch",
+                hide_index=True,
+            )
+    if not sessions.empty:
+        unmatched = sessions[~sessions["has_schedule_match"]].copy()
+        with st.expander("Workflow sessions not linked to schedule"):
+            st.dataframe(
+                unmatched[["event_date", "source", "user_name", "tech_key", "device", "start_dt", "primary_event"]].head(100),
+                width="stretch",
+                hide_index=True,
+            )
     st.stop()
 
 kpi = pd.concat(position_frames, ignore_index=True)
