@@ -2135,6 +2135,25 @@ def clean_overnight_cartfill_workbook(uploaded):
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
+    legacy_events_sql = """
+        SELECT
+            e.user_name,
+            e.device,
+            e.med_id,
+            e.med_desc,
+            e.event_type,
+            e.dt,
+            e.qty,
+            e.beginning_qty,
+            e.ending_qty,
+            e.discrepancy_qty,
+            e.discrepancy_reason,
+            COALESCE(c.cost_per_unit, 0) AS cost_per_unit,
+            e.pk
+        FROM events e
+        LEFT JOIN med_costs c ON UPPER(TRIM(e.med_id)) = UPPER(TRIM(c.med_id))
+        WHERE e.dt::date BETWEEN %s AND %s
+    """
     queries = {
         "events": """
             WITH audit_days AS (
@@ -2222,7 +2241,17 @@ def load_data(start_date, end_date):
                 results[key] = pd.read_sql(sql, conn, params=query_params)
                 if not results[key].empty and 'dt' in results[key].columns:
                     results[key]["dt"] = pd.to_datetime(results[key]["dt"])
-            except Exception:
+            except Exception as exc:
+                if key == "events":
+                    try:
+                        results[key] = pd.read_sql(legacy_events_sql, conn, params=params)
+                        if not results[key].empty and 'dt' in results[key].columns:
+                            results[key]["dt"] = pd.to_datetime(results[key]["dt"])
+                        continue
+                    except Exception as fallback_exc:
+                        st.warning(f"Could not load Pyxis events for {start_date} to {end_date}: {fallback_exc}")
+                else:
+                    st.warning(f"Could not load {key} data for {start_date} to {end_date}: {exc}")
                 results[key] = pd.DataFrame()
 
     df = results["events"]
