@@ -556,6 +556,7 @@ waste_summary["waste_rate"] = waste_summary.apply(
     lambda row: row["avg_not_administered_per_day"] / row["avg_total_per_day"] if row["avg_total_per_day"] else 0,
     axis=1,
 )
+waste_summary["total_likely_waste"] = waste_summary["avg_not_administered_per_day"] * period_days
 
 c1, c2 = st.columns([1.1, 0.9])
 
@@ -594,24 +595,45 @@ st.subheader("Likely Waste Comparison")
 waste_display = waste_summary.copy()
 waste_display["avg_total_per_day"] = waste_display["avg_total_per_day"].map(lambda x: f"{x:.1f}")
 waste_display["avg_not_administered_per_day"] = waste_display["avg_not_administered_per_day"].map(lambda x: f"{x:.1f}")
+waste_display["total_likely_waste"] = waste_display["total_likely_waste"].map(lambda x: f"{x:.0f}")
 waste_display["waste_rate"] = waste_display["waste_rate"].map(lambda x: f"{x * 100:.1f}%")
 waste_display = waste_display.rename(
     columns={
         "model": "Model",
         "avg_total_per_day": "Avg Total / Day",
         "avg_not_administered_per_day": "Avg Likely Waste / Day",
+        "total_likely_waste": f"Total Likely Waste ({period_label_map[selected_period]})",
         "waste_rate": "Likely Waste Rate",
     }
 )
 st.dataframe(waste_display, width="stretch", hide_index=True)
 if len(waste_summary) == 2:
-    current_waste = waste_summary.loc[waste_summary["model"] == "Current", "avg_not_administered_per_day"].sum()
-    proposed_waste = waste_summary.loc[waste_summary["model"] == "Proposed", "avg_not_administered_per_day"].sum()
-    st.metric(
-        "Likely Waste Difference",
-        f"{proposed_waste - current_waste:+.1f} avg orders/day",
+    current_daily_waste = waste_summary.loc[waste_summary["model"] == "Current", "avg_not_administered_per_day"].sum()
+    proposed_daily_waste = waste_summary.loc[waste_summary["model"] == "Proposed", "avg_not_administered_per_day"].sum()
+    current_total_waste = waste_summary.loc[waste_summary["model"] == "Current", "total_likely_waste"].sum()
+    proposed_total_waste = waste_summary.loc[waste_summary["model"] == "Proposed", "total_likely_waste"].sum()
+    daily_delta = proposed_daily_waste - current_daily_waste
+    total_delta = proposed_total_waste - current_total_waste
+    if daily_delta < -0.05:
+        waste_direction = "less likely waste"
+    elif daily_delta > 0.05:
+        waste_direction = "more likely waste"
+    else:
+        waste_direction = "about the same likely waste"
+    metric_col1, metric_col2 = st.columns(2)
+    metric_col1.metric(
+        "Proposed Daily Waste",
+        f"{proposed_daily_waste:.1f} avg/day",
+        f"{daily_delta:+.1f} vs current",
         help="Negative means the selected model has fewer likely waste rows per day; positive means more.",
     )
+    metric_col2.metric(
+        "Proposed Total Waste",
+        f"{proposed_total_waste:.0f}",
+        f"{total_delta:+.0f} vs current",
+        help=f"Total likely waste across the selected {period_label_map[selected_period].lower()} days.",
+    )
+    st.caption(f"Bottom line: the selected proposed model shows {waste_direction} than current.")
 st.caption(
     "This uses missing `Admin Given Date & Time` as likely waste. The selected model changes which cartfill wave "
     "carries that waste; total likely waste only changes if a workflow change actually prevents doses from going unused."
