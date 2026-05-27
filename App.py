@@ -3004,6 +3004,28 @@ def get_cartfill_discontinued_available_range():
     return None, None, 0
 
 
+def verify_cartfill_discontinued_upload():
+    init_db()
+    query = """
+        SELECT MIN(discontinued_dt)::date AS min_date,
+               MAX(discontinued_dt)::date AS max_date,
+               COUNT(*) AS row_count
+        FROM cartfill_discontinued_orders
+        WHERE discontinued_dt IS NOT NULL
+    """
+    with db_cursor() as (conn, cur):
+        cur.execute(query)
+        row = cur.fetchone()
+    min_date, max_date, row_count = row if row else (None, None, 0)
+    row_count = row_count or 0
+    if row_count == 0:
+        raise ValueError(
+            "Cartfill Discontinued Orders insert finished, but the discontinued-orders table is still empty. "
+            "Re-select the file type and upload cartfill dc.csv again; if this repeats, the upload is hitting a stale app instance."
+        )
+    return min_date, max_date, row_count
+
+
 @st.cache_data(ttl=3600)
 def load_overnight_cartfill_context():
     tables = {
@@ -4554,6 +4576,10 @@ if _is_main:
 
                 elif u_type == "Cartfill Discontinued Orders":
                     clean = clean_cartfill_discontinued_orders(raw, uploaded_names)
+                    st.info(
+                        f"Parsed {len(clean):,} discontinued-order rows from {uploaded_names}. "
+                        "Writing them to the discontinued-orders table now."
+                    )
                     sql = """INSERT INTO cartfill_discontinued_orders
                              (pk, report_start_date, report_end_date, action_type, user_name,
                               discontinued_dt, order_medication, order_id, source_file)
@@ -4571,6 +4597,10 @@ if _is_main:
                                  source_file = EXCLUDED.source_file,
                                  uploaded_at = NOW();"""
                     execute_statement(sql, clean.to_dict("records"), batch=True, table_name="Cartfill Discontinued Orders")
+                    dc_min, dc_max, dc_rows = verify_cartfill_discontinued_upload()
+                    st.success(
+                        f"Verified discontinued-orders table: {dc_rows:,} rows from {dc_min} through {dc_max}."
+                    )
                     processed_count = len(clean)
 
                 elif u_type == "IV Overnight Cartfill Model":
