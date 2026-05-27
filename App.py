@@ -3528,6 +3528,11 @@ def render_sidebar():
         render_demo_mode_toggle()
         render_ui_debug_toggle()
         st.markdown("### Analysis Window")
+        st.caption(
+            f"Latest data day: {default_analysis_date:%m/%d/%y}"
+            if default_analysis_date
+            else "Latest data day: unavailable"
+        )
 
         filter_mode = st.radio(
             "Filter Mode",
