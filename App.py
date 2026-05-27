@@ -2904,6 +2904,8 @@ def get_present_dates(min_dt, max_dt):
         FROM (
             SELECT dt::date AS d FROM events WHERE dt IS NOT NULL
             UNION
+            SELECT dt::date AS d FROM audit_transaction_detail_rc WHERE dt IS NOT NULL
+            UNION
             SELECT dt::date AS d FROM pharmacy_orders WHERE dt IS NOT NULL
             UNION
             SELECT dt AS d FROM staff_schedule WHERE dt IS NOT NULL
@@ -3547,7 +3549,13 @@ def render_sidebar():
             st.session_state.end_date = week_start + timedelta(days=6)
 
         else:
-            if "rxtrack_sidebar_day" not in st.session_state:
+            if (
+                "rxtrack_sidebar_day" not in st.session_state
+                or (
+                    latest_activity_date
+                    and st.session_state["rxtrack_sidebar_day"] not in present_dates
+                )
+            ):
                 st.session_state["rxtrack_sidebar_day"] = st.session_state.start_date
             single_day = st.date_input(
                 "Select Day:",
