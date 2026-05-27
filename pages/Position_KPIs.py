@@ -4,7 +4,6 @@ import re
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import text
 
 import App
 
@@ -124,55 +123,6 @@ def build_work_sessions(events, pharmacy_orders):
     return sessions
 
 
-@st.cache_data(ttl=300)
-def load_position_kpi_data(start_date, end_date):
-    params = {"start_date": start_date, "end_date": end_date}
-    event_sql = text("""
-        SELECT user_name, device, med_id, med_desc, event_type, dt, qty, pk
-        FROM events
-        WHERE dt::date BETWEEN :start_date AND :end_date
-        UNION ALL
-        SELECT
-            user_name,
-            station_name AS device,
-            med_id,
-            med_desc,
-            transaction_type AS event_type,
-            dt,
-            qty,
-            pk
-        FROM audit_transaction_detail_rc
-        WHERE dt::date BETWEEN :start_date AND :end_date
-    """)
-    pharmacy_sql = text("""
-        SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
-        FROM pharmacy_orders
-        WHERE dt::date BETWEEN :start_date AND :end_date
-    """)
-    schedule_sql = text("""
-        SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note,
-               COALESCE(schedule_status, assignment_type, 'Standard') AS schedule_status,
-               cell_fill_color
-        FROM staff_schedule
-        WHERE dt::date BETWEEN :start_date AND :end_date
-    """)
-    try:
-        with App.engine.connect() as conn:
-            events = pd.read_sql(event_sql, conn, params=params)
-            pharmacy = pd.read_sql(pharmacy_sql, conn, params=params)
-            schedule = pd.read_sql(schedule_sql, conn, params=params)
-    except Exception as exc:
-        st.warning(f"Could not load Position KPI source rows for {start_date} to {end_date}: {exc}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
-    for df in [events, pharmacy, schedule]:
-        if not df.empty and "dt" in df.columns:
-            df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-    if not pharmacy.empty and "destination" in pharmacy.columns:
-        pharmacy = pharmacy[~pharmacy["destination"].astype(str).str.contains("BATCH PICK", case=False, na=False)].copy()
-    return events, pharmacy, schedule
-
-
 def attach_schedule_context(sessions, schedule):
     sessions = sessions.copy()
     if schedule.empty:
@@ -271,21 +221,20 @@ if effective_start_date < start_date:
     )
 
 with st.spinner("Loading refill sessions..."):
-    df_events, df_pharm, df_sched = load_position_kpi_data(effective_start_date, end_date)
+    df_events, _, df_pharm, df_sched, _ = App.load_data(effective_start_date, end_date)
     sessions = build_work_sessions(df_events, df_pharm)
 
 if sessions.empty and effective_start_date < start_date:
     with st.spinner("Retrying the selected sidebar window..."):
-        retry_events, retry_pharm, retry_sched = load_position_kpi_data(start_date, end_date)
+        retry_events, _, retry_pharm, retry_sched, _ = App.load_data(start_date, end_date)
         retry_sessions = build_work_sessions(retry_events, retry_pharm)
-    df_events, df_pharm, df_sched = retry_events, retry_pharm, retry_sched
     if not retry_sessions.empty:
         st.warning(
             "The wider KPI baseline did not return workflow rows, so this view is using the selected sidebar "
             "date range instead. Widen the sidebar range if you need a larger baseline."
         )
         effective_start_date = start_date
-        sessions = retry_sessions
+        df_events, df_pharm, df_sched, sessions = retry_events, retry_pharm, retry_sched, retry_sessions
 
 if sessions.empty:
     row_cols = st.columns(3)
