@@ -18,7 +18,9 @@ get_cartfill_available_range = getattr(App, "get_cartfill_available_range", lamb
 
 
 CURRENT_WAVES = ["0600", "0900", "1400", "1700", "2000"]
-PROPOSED_WAVES = ["0600", "0900", "1530", "2000"]
+DEFAULT_PROPOSED_WAVES = ["0600", "0900", "1530", "2000"]
+TWO_WAVE_WAVES = ["0600", "1700"]
+Q2H_WAVES = ["0600", "0800", "1000", "1200", "1400", "1600", "1800", "2000"]
 
 # Weighted redistribution based on the agreed due-window redesign:
 # 0600: 1000-1400
@@ -33,12 +35,59 @@ PROPOSED_SPLIT = {
     "2000": {"0600": 1 / 6, "2000": 5 / 6},
 }
 
+SCENARIOS = {
+    "proposed": {
+        "label": "Current Proposed",
+        "waves": DEFAULT_PROPOSED_WAVES,
+        "split": PROPOSED_SPLIT,
+        "note": "Existing proposed model: 0600, 0900, 1530, and 2000 with weighted due-window redistribution.",
+    },
+    "two_wave_balanced": {
+        "label": "0600 / 1700 Cartfills",
+        "waves": TWO_WAVE_WAVES,
+        "split": {
+            "0600": {"0600": 1.0},
+            "0900": {"0600": 1.0},
+            "1400": {"0600": 1.0},
+            "1700": {"1700": 1.0},
+            "2000": {"1700": 1.0},
+        },
+        "note": "Moves 0900 and 1400 work into 0600, keeps late-day work in a 1700 cartfill.",
+    },
+    "two_wave_frontload": {
+        "label": "0600 Heavy + 1700 Backup",
+        "waves": TWO_WAVE_WAVES,
+        "split": {
+            "0600": {"0600": 1.0},
+            "0900": {"0600": 1.0},
+            "1400": {"0600": 1.0},
+            "1700": {"0600": 1.0},
+            "2000": {"1700": 1.0},
+        },
+        "note": "Stress-tests the idea of moving the 0900, 1400, and 1700 work into 0600, leaving 1700 as the late cartfill.",
+    },
+    "q2h": {
+        "label": "Cartfill Every 2 Hours",
+        "waves": Q2H_WAVES,
+        "split": None,
+        "note": "Reassigns each order to the nearest 2-hour cartfill from 0600 through 2000 based on Ready for Dispense time.",
+    },
+}
+
 
 def nearest_wave_label(ts):
     if pd.isna(ts):
         return "Unknown"
     value = ts.hour + (ts.minute / 60)
     anchors = {"0600": 6, "0900": 9, "1400": 14, "1700": 17, "2000": 20}
+    return min(anchors, key=lambda label: abs(value - anchors[label]))
+
+
+def nearest_custom_wave_label(ts, waves):
+    if pd.isna(ts):
+        return "Unknown"
+    value = ts.hour + (ts.minute / 60)
+    anchors = {wave: int(wave[:2]) + int(wave[2:]) / 60 for wave in waves}
     return min(anchors, key=lambda label: abs(value - anchors[label]))
 
 
@@ -58,14 +107,14 @@ def prepare_daily_current(df):
     return daily
 
 
-def prepare_daily_proposed(current_daily):
+def prepare_daily_split(current_daily, split_map):
     if current_daily.empty:
         return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
 
     rows = []
     for row in current_daily.itertuples(index=False):
-        split_map = PROPOSED_SPLIT.get(row.wave, {})
-        for proposed_wave, weight in split_map.items():
+        wave_split = split_map.get(row.wave, {})
+        for proposed_wave, weight in wave_split.items():
             rows.append(
                 {
                     "event_date": row.event_date,
@@ -84,6 +133,23 @@ def prepare_daily_proposed(current_daily):
         proposed.groupby(["event_date", "wave"], as_index=False)
         .sum(numeric_only=True)
     )
+
+
+def prepare_daily_nearest_wave(df, waves):
+    if df.empty:
+        return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
+    work = df.copy()
+    work["scenario_wave"] = work["ready_for_dispense_dt"].apply(lambda ts: nearest_custom_wave_label(ts, waves))
+    daily = (
+        work.groupby(["event_date", "scenario_wave"], as_index=False)
+        .agg(
+            total_orders=("pk", "count"),
+            administered_orders=("was_administered", "sum"),
+        )
+        .rename(columns={"scenario_wave": "wave"})
+    )
+    daily["not_administered_orders"] = daily["total_orders"] - daily["administered_orders"]
+    return daily
 
 
 def build_average_table(daily_df, dates, wave_order, label):
@@ -240,8 +306,19 @@ if focus.empty:
     st.stop()
 
 current_daily = prepare_daily_current(focus)
-proposed_daily = prepare_daily_proposed(current_daily)
-period_tables = build_period_tables(current_daily, proposed_daily, focus, CURRENT_WAVES, PROPOSED_WAVES)
+
+scenario_key = st.selectbox(
+    "What-if cartfill model",
+    options=list(SCENARIOS.keys()),
+    format_func=lambda key: SCENARIOS[key]["label"],
+    index=1,
+)
+scenario = SCENARIOS[scenario_key]
+if scenario["split"] is None:
+    proposed_daily = prepare_daily_nearest_wave(focus, scenario["waves"])
+else:
+    proposed_daily = prepare_daily_split(current_daily, scenario["split"])
+period_tables = build_period_tables(current_daily, proposed_daily, focus, CURRENT_WAVES, scenario["waves"])
 
 total_orders = len(focus)
 total_days = len(sorted(pd.to_datetime(focus["event_date"].dropna().unique()).tolist()))
@@ -259,9 +336,15 @@ m5.metric("Likely Waste Rate", f"{(total_not_admined / total_orders * 100):.1f}%
 st.caption(
     "Current cartfill volume uses the actual `Ready for Dispense` cartfill start time. "
     "Not-administered orders are rows with no `Admin Given Date & Time`. "
-    "Proposed averages are weighted estimates that reassign current-wave volume into your redesign: "
-    "`0600 = 1000-1400`, `0900 = 1400-2100`, `1530 = 2100-0500`, `2000 = 0500-1000`."
+    f"Selected model: {scenario['note']}"
 )
+
+if scenario_key in {"two_wave_balanced", "two_wave_frontload"}:
+    st.info(
+        "Staffing assumption for this what-if: two techs start at 0600, the former 0800 tech shifts to "
+        "1000-1830, and the late cartfill remains at 1700. The charts below show order volume movement; "
+        "labor coverage is shown as an operating assumption, not a payroll calculation."
+    )
 
 st.divider()
 
@@ -292,6 +375,15 @@ with c1:
         hide_index=True,
     )
 
+    scenario_totals = proposed_avg[["wave", "avg_total_per_day"]].copy()
+    if not scenario_totals.empty:
+        peak_wave = scenario_totals.sort_values("avg_total_per_day", ascending=False).iloc[0]
+        st.metric(
+            "Busiest Proposed Cartfill",
+            f"{peak_wave['wave']}",
+            f"{peak_wave['avg_total_per_day']:.1f} avg orders/day",
+        )
+
 with c2:
     fig_compare = px.bar(
         comparison,
@@ -299,7 +391,7 @@ with c2:
         y="avg_total_per_day",
         color="model",
         barmode="group",
-        category_orders={"wave": CURRENT_WAVES + ["1530"]},
+        category_orders={"wave": CURRENT_WAVES + scenario["waves"]},
         labels={"wave": "Cartfill", "avg_total_per_day": "Avg Orders / Day", "model": "Model"},
         text_auto=".1f",
     )
@@ -315,7 +407,7 @@ with detail_col1:
         y="avg_administered_per_day",
         color="model",
         barmode="group",
-        category_orders={"wave": CURRENT_WAVES + ["1530"]},
+        category_orders={"wave": CURRENT_WAVES + scenario["waves"]},
         labels={"wave": "Cartfill", "avg_administered_per_day": "Avg Admined / Day", "model": "Model"},
         text_auto=".1f",
     )
@@ -329,7 +421,7 @@ with detail_col2:
         y="avg_not_administered_per_day",
         color="model",
         barmode="group",
-        category_orders={"wave": CURRENT_WAVES + ["1530"]},
+        category_orders={"wave": CURRENT_WAVES + scenario["waves"]},
         labels={"wave": "Cartfill", "avg_not_administered_per_day": "Avg Not Admined / Day", "model": "Model"},
         text_auto=".1f",
     )
