@@ -2928,27 +2928,30 @@ def get_stats_range():
 def get_present_dates(min_dt, max_dt):
     if not min_dt or not max_dt:
         return set()
-    sql = """
-        SELECT DISTINCT d
-        FROM (
-            SELECT dt::date AS d FROM events WHERE dt IS NOT NULL
-            UNION
-            SELECT dt::date AS d FROM audit_transaction_detail_rc WHERE dt IS NOT NULL
-            UNION
-            SELECT dt::date AS d FROM pharmacy_orders WHERE dt IS NOT NULL
-            UNION
-            SELECT dt AS d FROM staff_schedule WHERE dt IS NOT NULL
-            UNION
-            SELECT dt_date AS d FROM attendance_punches WHERE dt_date IS NOT NULL
-        ) present
-        WHERE d BETWEEN %(start)s AND %(end)s
-    """
-    df = run_query(sql, params={"start": min_dt, "end": max_dt})
-    if not df.empty:
-        col_name = df.columns[0]
-        df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
-        return set(df[col_name].dt.date.dropna())
-    return set()
+    sources = [
+        ("events", "dt"),
+        ("audit_transaction_detail_rc", "dt"),
+        ("pharmacy_orders", "dt"),
+        ("staff_schedule", "dt"),
+        ("attendance_punches", "dt_date"),
+    ]
+    present = set()
+    with db_cursor() as (conn, cur):
+        for table, column in sources:
+            try:
+                cur.execute(
+                    f"""
+                    SELECT DISTINCT {column}::date AS d
+                    FROM {table}
+                    WHERE {column} IS NOT NULL
+                      AND {column}::date BETWEEN %s AND %s
+                    """,
+                    (min_dt, max_dt),
+                )
+                present.update(row[0] for row in cur.fetchall() if row and row[0])
+            except Exception:
+                continue
+    return present
 
 
 def apply_global_styles():
