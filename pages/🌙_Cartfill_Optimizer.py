@@ -502,14 +502,27 @@ with st.spinner("Loading cartfill data..."):
 if df_orders.empty:
     available_min, available_max, available_rows = get_cartfill_available_range()
     if available_min and available_max:
-        st.info(
-            "No cartfill data matched the selected date range. "
-            f"The uploaded cartfill table currently has {available_rows:,} rows from "
-            f"{pd.to_datetime(available_min).date()} through {pd.to_datetime(available_max).date()}."
-        )
+        fallback_start = pd.to_datetime(available_max).date()
+        fallback_end = pd.to_datetime(available_max).date()
+        df_orders = load_orders(fallback_start, fallback_end)
+        if not df_orders.empty:
+            st.info(
+                "No cartfill data matched the selected date range, so this page is showing the latest "
+                f"available cartfill day: {fallback_end}. The uploaded cartfill table has {available_rows:,} rows "
+                f"from {pd.to_datetime(available_min).date()} through {pd.to_datetime(available_max).date()}."
+            )
+        else:
+            st.info(
+                "No cartfill data matched the selected date range. "
+                f"The uploaded cartfill table currently has {available_rows:,} rows from "
+                f"{pd.to_datetime(available_min).date()} through {pd.to_datetime(available_max).date()}."
+            )
+            st.stop()
     else:
-        st.info("No cartfill data found. Upload `Cartfill Stats (All Areas)` from the sidebar to get started.")
-    st.stop()
+        st.info(
+            "No cartfill data found. Upload `Cartfill Stats (All Areas)` from the sidebar to get started."
+        )
+        st.stop()
 
 orders = df_orders.copy()
 for col in ["ready_for_dispense_dt", "admin_given_dt", "prepared_dt", "event_date", "discontinued_dt"]:
