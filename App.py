@@ -2950,6 +2950,7 @@ def get_present_dates(min_dt, max_dt):
                 )
                 present.update(row[0] for row in cur.fetchall() if row and row[0])
             except Exception:
+                conn.rollback()
                 continue
     return present
 
