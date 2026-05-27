@@ -2906,9 +2906,9 @@ def get_present_dates(min_dt, max_dt):
             UNION
             SELECT dt::date AS d FROM pharmacy_orders WHERE dt IS NOT NULL
             UNION
-            SELECT order_date AS d FROM iv_room_workload WHERE order_date IS NOT NULL
+            SELECT dt AS d FROM staff_schedule WHERE dt IS NOT NULL
             UNION
-            SELECT start_date AS d FROM iv_room_workflow_detail WHERE start_date IS NOT NULL
+            SELECT dt_date AS d FROM attendance_punches WHERE dt_date IS NOT NULL
         ) present
         WHERE d BETWEEN %(start)s AND %(end)s
     """
