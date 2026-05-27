@@ -15,6 +15,7 @@ render_sidebar = App.render_sidebar
 load_orders = App.load_overnight_cartfill_orders
 load_context = App.load_overnight_cartfill_context
 get_cartfill_available_range = getattr(App, "get_cartfill_available_range", lambda: (None, None, 0))
+get_cartfill_discontinued_available_range = getattr(App, "get_cartfill_discontinued_available_range", lambda: (None, None, 0))
 
 
 CURRENT_WAVES = ["0600", "0900", "1400", "1700", "2000"]
@@ -732,8 +733,15 @@ st.caption(
 )
 
 dc_waste = build_discontinued_waste_summary(focus, scenario_key, scenario)
+dc_min, dc_max, dc_rows = get_cartfill_discontinued_available_range()
 if not dc_waste.empty:
     st.subheader("Discontinued Order Waste Check")
+    st.caption(
+        f"Discontinued upload loaded: {dc_rows:,} rows from "
+        f"{pd.to_datetime(dc_min).date()} through {pd.to_datetime(dc_max).date()}."
+        if dc_min and dc_max
+        else "Discontinued upload loaded."
+    )
     st.dataframe(dc_waste, width="stretch", hide_index=True)
     current_dc_waste = dc_waste.loc[dc_waste["Model"] == "Current", "Likely Made Before DC"].sum()
     proposed_dc_waste = dc_waste.loc[dc_waste["Model"] == "Proposed", "Likely Made Before DC"].sum()
@@ -749,7 +757,27 @@ if not dc_waste.empty:
         "If the proposed cartfill time is after the discontinue time, the model counts that order as avoidable before cartfill."
     )
 else:
-    st.caption("Upload Cartfill Discontinued Orders to compare waste that could be avoided before a cartfill is made.")
+    st.subheader("Discontinued Order Waste Check")
+    focus_dc_matches = int(focus.get("discontinued_dt", pd.Series(dtype="datetime64[ns]")).notna().sum())
+    focus_missing_admin_dc = int(
+        (
+            focus.get("discontinued_dt", pd.Series(index=focus.index, dtype="datetime64[ns]")).notna()
+            & focus["was_administered"].eq(0)
+        ).sum()
+    )
+    if dc_rows:
+        st.info(
+            f"Discontinued upload is loaded with {dc_rows:,} rows "
+            f"from {pd.to_datetime(dc_min).date()} through {pd.to_datetime(dc_max).date()}. "
+            f"In the current cartfill view, {focus_dc_matches:,} cartfill rows matched a discontinued Order ID, "
+            f"and {focus_missing_admin_dc:,} of those were not administered."
+        )
+        st.caption(
+            "If this is zero, use a Month range that overlaps the cartfill file, or re-upload the cartfill file that "
+            "contains `Order ID` so the discontinued rows can join to the cartfill rows."
+        )
+    else:
+        st.info("No Cartfill Discontinued Orders upload is loaded yet.")
 
 detail_col1, detail_col2 = st.columns(2)
 

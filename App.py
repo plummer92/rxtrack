@@ -2983,6 +2983,27 @@ def get_cartfill_available_range():
     return None, None, 0
 
 
+@st.cache_data(ttl=300)
+def get_cartfill_discontinued_available_range():
+    init_db()
+    query = """
+        SELECT MIN(discontinued_dt)::date AS min_date,
+               MAX(discontinued_dt)::date AS max_date,
+               COUNT(*) AS row_count
+        FROM cartfill_discontinued_orders
+        WHERE discontinued_dt IS NOT NULL
+    """
+    try:
+        with db_cursor() as (conn, cur):
+            cur.execute(query)
+            row = cur.fetchone()
+        if row and row[0] and row[1]:
+            return row[0], row[1], row[2] or 0
+    except Exception:
+        return None, None, 0
+    return None, None, 0
+
+
 @st.cache_data(ttl=3600)
 def load_overnight_cartfill_context():
     tables = {
@@ -3020,6 +3041,7 @@ def clear_app_upload_caches():
         load_wcc_cartfill_stats,
         load_overnight_cartfill_orders,
         get_cartfill_available_range,
+        get_cartfill_discontinued_available_range,
         load_overnight_cartfill_context,
         get_stats_range,
         get_present_dates,
