@@ -128,27 +128,19 @@ def build_work_sessions(events, pharmacy_orders):
 def load_position_kpi_data(start_date, end_date):
     params = {"start_date": start_date, "end_date": end_date}
     event_sql = text("""
-        SELECT
-            user_name::text AS user_name,
-            device::text AS device,
-            med_id::text AS med_id,
-            med_desc::text AS med_desc,
-            event_type::text AS event_type,
-            dt::timestamp AS dt,
-            qty::float8 AS qty,
-            pk::text AS pk
+        SELECT user_name, device, med_id, med_desc, event_type, dt, qty, pk
         FROM events
         WHERE dt::date BETWEEN :start_date AND :end_date
         UNION ALL
         SELECT
-            user_name::text AS user_name,
-            station_name::text AS device,
-            med_id::text AS med_id,
-            med_desc::text AS med_desc,
-            transaction_type::text AS event_type,
-            dt::timestamp AS dt,
-            qty::float8 AS qty,
-            pk::text AS pk
+            user_name,
+            station_name AS device,
+            med_id,
+            med_desc,
+            transaction_type AS event_type,
+            dt,
+            qty,
+            pk
         FROM audit_transaction_detail_rc
         WHERE dt::date BETWEEN :start_date AND :end_date
     """)
