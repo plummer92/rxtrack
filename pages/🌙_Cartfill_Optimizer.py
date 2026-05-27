@@ -178,12 +178,65 @@ def prepare_daily_due_deadline(df, waves, lead_hours=2):
     work = df.copy()
     if "dose_due_dt" not in work.columns:
         work["dose_due_dt"] = pd.NaT
-    work = work[work["dose_due_dt"].notna()].copy()
-    if work.empty:
+
+    administered = work[work["dose_due_dt"].notna()].copy()
+    missing_due = work[work["dose_due_dt"].isna()].copy()
+    frames = []
+    if not administered.empty:
+        administered["scenario_wave"] = administered["dose_due_dt"].apply(
+            lambda ts: cartfill_for_due_deadline(ts, waves, lead_hours=lead_hours)
+        )
+        frames.append(administered)
+    if not missing_due.empty:
+        missing_due["scenario_wave"] = missing_due["ready_for_dispense_dt"].apply(
+            lambda ts: next_custom_wave_label(ts, waves)
+        )
+        frames.append(missing_due)
+    if not frames:
         return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
-    work["scenario_wave"] = work["dose_due_dt"].apply(
-        lambda ts: cartfill_for_due_deadline(ts, waves, lead_hours=lead_hours)
+
+    work = pd.concat(frames, ignore_index=True)
+    daily = (
+        work.groupby(["event_date", "scenario_wave"], as_index=False)
+        .agg(
+            total_orders=("pk", "count"),
+            administered_orders=("was_administered", "sum"),
+        )
+        .rename(columns={"scenario_wave": "wave"})
     )
+    daily["not_administered_orders"] = daily["total_orders"] - daily["administered_orders"]
+    return daily
+
+
+def prepare_daily_two_wave_deadline(df, lead_hours=2):
+    if df.empty:
+        return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
+    work = df.copy()
+    if "dose_due_dt" not in work.columns:
+        work["dose_due_dt"] = pd.NaT
+
+    administered = work[work["dose_due_dt"].notna()].copy()
+    missing_due = work[work["dose_due_dt"].isna()].copy()
+    frames = []
+    if not administered.empty:
+        administered["scenario_wave"] = administered["dose_due_dt"].apply(
+            lambda ts: cartfill_for_due_deadline(ts, TWO_WAVE_WAVES, lead_hours=lead_hours)
+        )
+        frames.append(administered)
+    if not missing_due.empty:
+        current_to_two_wave = {
+            "0600": "0600",
+            "0900": "0600",
+            "1400": "0600",
+            "1700": "1700",
+            "2000": "1700",
+        }
+        missing_due["scenario_wave"] = missing_due["current_wave"].map(current_to_two_wave).fillna("1700")
+        frames.append(missing_due)
+    if not frames:
+        return pd.DataFrame(columns=["event_date", "wave", "total_orders", "administered_orders", "not_administered_orders"])
+
+    work = pd.concat(frames, ignore_index=True)
     daily = (
         work.groupby(["event_date", "scenario_wave"], as_index=False)
         .agg(
@@ -360,7 +413,10 @@ scenario_key = st.selectbox(
 )
 scenario = SCENARIOS[scenario_key]
 if scenario.get("method") == "due_deadline":
-    proposed_daily = prepare_daily_due_deadline(focus, scenario["waves"], lead_hours=2)
+    if scenario_key == "two_wave_balanced":
+        proposed_daily = prepare_daily_two_wave_deadline(focus, lead_hours=2)
+    else:
+        proposed_daily = prepare_daily_due_deadline(focus, scenario["waves"], lead_hours=2)
     due_mode_rows = int(focus["dose_due_dt"].notna().sum())
 else:
     proposed_daily = prepare_daily_split(current_daily, scenario["split"])
@@ -397,12 +453,12 @@ if scenario.get("method") == "due_deadline":
     missing_due = len(focus) - due_mode_rows
     st.caption(
         f"Dose due time is approximated from `Admin Given Date & Time`; {due_mode_rows:,} administered rows "
-        f"were included in this due-time model."
+        "use that due-time proxy."
     )
     if missing_due:
-        st.warning(
-            f"{missing_due:,} rows had no Admin Given Date & Time, so they are excluded from this due-time what-if. "
-            "A report column with scheduled dose due time would let this model include every order."
+        st.info(
+            f"{missing_due:,} rows had no Admin Given Date & Time. They stay in the model as likely waste and are "
+            "assigned from the cartfill start time because no scheduled dose due time is available."
         )
 
 st.divider()
