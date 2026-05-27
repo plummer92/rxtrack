@@ -2242,6 +2242,7 @@ def load_data(start_date, end_date):
                 if not results[key].empty and 'dt' in results[key].columns:
                     results[key]["dt"] = pd.to_datetime(results[key]["dt"])
             except Exception as exc:
+                conn.rollback()
                 if key == "events":
                     try:
                         results[key] = pd.read_sql(legacy_events_sql, conn, params=params)
@@ -2249,7 +2250,11 @@ def load_data(start_date, end_date):
                             results[key]["dt"] = pd.to_datetime(results[key]["dt"])
                         continue
                     except Exception as fallback_exc:
-                        st.warning(f"Could not load Pyxis events for {start_date} to {end_date}: {fallback_exc}")
+                        conn.rollback()
+                        st.warning(
+                            f"Could not load Pyxis events for {start_date} to {end_date}: {fallback_exc}. "
+                            f"Primary query failed first with: {exc}"
+                        )
                 else:
                     st.warning(f"Could not load {key} data for {start_date} to {end_date}: {exc}")
                 results[key] = pd.DataFrame()
