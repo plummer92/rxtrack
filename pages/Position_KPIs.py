@@ -126,78 +126,74 @@ def build_work_sessions(events, pharmacy_orders):
 
 @st.cache_data(ttl=300)
 def load_position_kpi_data(start_date, end_date):
-    try:
-        params = {"start_date": start_date, "end_date": end_date}
-        legacy_event_sql = text("""
-            SELECT
-                user_name::text AS user_name,
-                device::text AS device,
-                med_id::text AS med_id,
-                med_desc::text AS med_desc,
-                event_type::text AS event_type,
-                dt::timestamp AS dt,
-                qty::float8 AS qty,
-                pk::text AS pk
-            FROM events
-            WHERE dt::date BETWEEN :start_date AND :end_date
-        """)
-        audit_event_sql = text("""
-            SELECT
-                user_name::text AS user_name,
-                station_name::text AS device,
-                med_id::text AS med_id,
-                med_desc::text AS med_desc,
-                transaction_type::text AS event_type,
-                dt::timestamp AS dt,
-                qty::float8 AS qty,
-                pk::text AS pk
-            FROM audit_transaction_detail_rc
-            WHERE dt::date BETWEEN :start_date AND :end_date
-        """)
-        pharmacy_sql = text("""
-            SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
-            FROM pharmacy_orders
-            WHERE dt::date BETWEEN :start_date AND :end_date
-        """)
-        schedule_sql = text("""
-            SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note,
-                   COALESCE(schedule_status, assignment_type, 'Standard') AS schedule_status,
-                   cell_fill_color
-            FROM staff_schedule
-            WHERE dt::date BETWEEN :start_date AND :end_date
-        """)
-        frames = []
-        pharmacy = pd.DataFrame()
-        schedule = pd.DataFrame()
-        with App.engine.connect() as conn:
-            try:
-                frames.append(pd.read_sql(legacy_event_sql, conn, params=params))
-            except Exception as exc:
-                st.warning(f"Could not load legacy Pyxis event rows for {start_date} to {end_date}: {exc}")
-            try:
-                frames.append(pd.read_sql(audit_event_sql, conn, params=params))
-            except Exception as exc:
-                st.warning(f"Could not load audit Pyxis event rows for {start_date} to {end_date}: {exc}")
-            try:
-                pharmacy = pd.read_sql(pharmacy_sql, conn, params=params)
-            except Exception as exc:
-                st.warning(f"Could not load pharmacy rows for {start_date} to {end_date}: {exc}")
-            try:
-                schedule = pd.read_sql(schedule_sql, conn, params=params)
-            except Exception as exc:
-                st.warning(f"Could not load schedule rows for {start_date} to {end_date}: {exc}")
+    params = {"start_date": start_date, "end_date": end_date}
+    legacy_event_sql = text("""
+        SELECT
+            user_name::text AS user_name,
+            device::text AS device,
+            med_id::text AS med_id,
+            med_desc::text AS med_desc,
+            event_type::text AS event_type,
+            dt::timestamp AS dt,
+            qty::float8 AS qty,
+            pk::text AS pk
+        FROM events
+        WHERE dt::date BETWEEN :start_date AND :end_date
+    """)
+    audit_event_sql = text("""
+        SELECT
+            user_name::text AS user_name,
+            station_name::text AS device,
+            med_id::text AS med_id,
+            med_desc::text AS med_desc,
+            transaction_type::text AS event_type,
+            dt::timestamp AS dt,
+            qty::float8 AS qty,
+            pk::text AS pk
+        FROM audit_transaction_detail_rc
+        WHERE dt::date BETWEEN :start_date AND :end_date
+    """)
+    pharmacy_sql = text("""
+        SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+        FROM pharmacy_orders
+        WHERE dt::date BETWEEN :start_date AND :end_date
+    """)
+    schedule_sql = text("""
+        SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note,
+               COALESCE(schedule_status, assignment_type, 'Standard') AS schedule_status,
+               cell_fill_color
+        FROM staff_schedule
+        WHERE dt::date BETWEEN :start_date AND :end_date
+    """)
+    frames = []
+    pharmacy = pd.DataFrame()
+    schedule = pd.DataFrame()
+    with App.engine.connect() as conn:
+        try:
+            frames.append(pd.read_sql(legacy_event_sql, conn, params=params))
+        except Exception as exc:
+            st.warning(f"Could not load legacy Pyxis event rows for {start_date} to {end_date}: {exc}")
+        try:
+            frames.append(pd.read_sql(audit_event_sql, conn, params=params))
+        except Exception as exc:
+            st.warning(f"Could not load audit Pyxis event rows for {start_date} to {end_date}: {exc}")
+        try:
+            pharmacy = pd.read_sql(pharmacy_sql, conn, params=params)
+        except Exception as exc:
+            st.warning(f"Could not load pharmacy rows for {start_date} to {end_date}: {exc}")
+        try:
+            schedule = pd.read_sql(schedule_sql, conn, params=params)
+        except Exception as exc:
+            st.warning(f"Could not load schedule rows for {start_date} to {end_date}: {exc}")
 
-        events = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    events = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
-        for df in [events, pharmacy, schedule]:
-            if not df.empty and "dt" in df.columns:
-                df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
-        if not pharmacy.empty and "destination" in pharmacy.columns:
-            pharmacy = pharmacy[~pharmacy["destination"].astype(str).str.contains("BATCH PICK", case=False, na=False)].copy()
-        return events, pharmacy, schedule
-    except Exception as exc:
-        st.warning(f"Could not load Position KPI source rows for {start_date} to {end_date}: {exc}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    for df in [events, pharmacy, schedule]:
+        if not df.empty and "dt" in df.columns:
+            df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+    if not pharmacy.empty and "destination" in pharmacy.columns:
+        pharmacy = pharmacy[~pharmacy["destination"].astype(str).str.contains("BATCH PICK", case=False, na=False)].copy()
+    return events, pharmacy, schedule
 
 
 def attach_schedule_context(sessions, schedule):
