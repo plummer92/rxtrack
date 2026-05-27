@@ -1899,11 +1899,14 @@ def clean_wcc_compounding_stats(df, source_file=""):
 
 def parse_excel_datetime_series(series):
     numeric_values = pd.to_numeric(series, errors="coerce")
-    parsed_values = pd.to_datetime(series.where(numeric_values.isna()), errors="coerce")
+    excel_serial_mask = numeric_values.between(1, 2_958_465)
+    parsed_values = pd.to_datetime(series.where(~excel_serial_mask), errors="coerce")
     excel_origin = pd.Timestamp("1899-12-30")
-    excel_values = excel_origin + pd.to_timedelta(numeric_values, unit="D")
-    excel_values = excel_values.where(numeric_values.notna())
-    return excel_values.where(numeric_values.notna(), parsed_values)
+    excel_values = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    excel_values.loc[excel_serial_mask] = (
+        excel_origin + pd.to_timedelta(numeric_values.loc[excel_serial_mask], unit="D")
+    )
+    return excel_values.where(excel_serial_mask, parsed_values)
 
 
 def infer_cartfill_area(order_medication, pharmacy, location):
