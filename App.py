@@ -1922,20 +1922,75 @@ def infer_cartfill_area(order_medication, pharmacy, location):
 def clean_wcc_cartfill_stats(df, source_file=""):
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
-    colmap = {
-        "Start Date": "report_start_date",
-        "End Date": "report_end_date",
-        "Order Medication": "order_medication",
-        "Ready for Dispense for Date & Time": "ready_for_dispense_dt",
-        "Admin Given Date & Time": "admin_given_dt",
-        "Prepared Date & Time": "prepared_dt",
-        "Prep or Dispense User": "prep_or_dispense_user",
-        "Location": "location",
-        "Pharmacy": "pharmacy",
-    }
-    df.rename(columns=colmap, inplace=True)
 
-    required = list(colmap.values())
+    def _cartfill_col_key(value):
+        return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+    col_aliases = {
+        "report_start_date": ["Start Date", "Report Start Date", "Start"],
+        "report_end_date": ["End Date", "Report End Date", "End"],
+        "order_medication": ["Order Medication", "Medication", "Med", "Order Med", "Order Name", "Medication Name"],
+        "ready_for_dispense_dt": [
+            "Ready for Dispense for Date & Time",
+            "Ready for Dispense Date & Time",
+            "Ready For Dispense Date/Time",
+            "Ready for Dispense Date Time",
+            "Ready to Dispense Date & Time",
+            "Ready Date & Time",
+            "Ready Date Time",
+            "Ready for Dispense",
+        ],
+        "admin_given_dt": [
+            "Admin Given Date & Time",
+            "Admin Given Date/Time",
+            "Admin Given Date Time",
+            "Administration Date & Time",
+            "Administration Date Time",
+            "Admin Date & Time",
+            "Admin Date Time",
+        ],
+        "prepared_dt": [
+            "Prepared Date & Time",
+            "Prepared Date/Time",
+            "Prepared Date Time",
+            "Prep Date & Time",
+            "Prep Date Time",
+            "Dispensed Date & Time",
+            "Dispensed Date Time",
+        ],
+        "prep_or_dispense_user": [
+            "Prep or Dispense User",
+            "Prep/Dispense User",
+            "Prepared By",
+            "Dispensed By",
+            "User",
+            "Technician",
+        ],
+        "location": ["Location", "Patient Location", "Department", "Unit"],
+        "pharmacy": ["Pharmacy", "Dispensing Pharmacy", "Fill Pharmacy", "Area"],
+    }
+    alias_lookup = {
+        _cartfill_col_key(alias): target
+        for target, aliases in col_aliases.items()
+        for alias in aliases
+    }
+
+    def _mapped_columns(columns):
+        return {col: alias_lookup.get(_cartfill_col_key(col), col) for col in columns}
+
+    df.rename(columns=_mapped_columns(df.columns), inplace=True)
+
+    required_signal = {"order_medication", "ready_for_dispense_dt"}
+    if not required_signal.issubset(set(df.columns)):
+        for row_idx in range(min(10, len(df))):
+            candidate_columns = [str(v).strip() for v in df.iloc[row_idx].tolist()]
+            mapped = _mapped_columns(candidate_columns)
+            if required_signal.issubset(set(mapped.values())):
+                df = df.iloc[row_idx + 1:].copy()
+                df.columns = [mapped.get(col, col) for col in candidate_columns]
+                break
+
+    required = list(col_aliases.keys())
     for col in required:
         if col not in df.columns:
             df[col] = None
