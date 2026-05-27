@@ -35,6 +35,18 @@ PROPOSED_SPLIT = {
     "2000": {"0600": 1 / 6, "2000": 5 / 6},
 }
 
+PROPOSED_DOSE_WINDOWS = {
+    "0600": "1000-1400",
+    "0900": "1400-2100",
+    "1530": "2100-0500",
+    "2000": "0500-1000",
+}
+
+FRONTLOAD_BASIS = {
+    "0600": "Moved from 0600, 0900, 1400, 1700",
+    "1700": "Moved from 2000",
+}
+
 SCENARIOS = {
     "proposed": {
         "label": "Current Proposed",
@@ -70,6 +82,38 @@ SCENARIOS = {
         "note": "Batches orders every 2 hours based on dose due time, keeping a 2-hour delivery buffer.",
     },
 }
+
+
+def wave_to_minutes(wave):
+    return int(wave[:2]) * 60 + int(wave[2:])
+
+
+def minutes_to_label(minutes):
+    minutes = minutes % (24 * 60)
+    return f"{minutes // 60:02d}{minutes % 60:02d}"
+
+
+def due_window_map_for_waves(waves, lead_hours=2):
+    if not waves:
+        return {}
+    sorted_waves = sorted(waves, key=wave_to_minutes)
+    windows = {}
+    for index, wave in enumerate(sorted_waves):
+        next_wave = sorted_waves[(index + 1) % len(sorted_waves)]
+        start = wave_to_minutes(wave) + (lead_hours * 60)
+        end = wave_to_minutes(next_wave) + (lead_hours * 60)
+        windows[wave] = f"{minutes_to_label(start)}-{minutes_to_label(end)}"
+    return windows
+
+
+def scenario_basis_map(scenario_key, scenario):
+    if scenario_key == "proposed":
+        return PROPOSED_DOSE_WINDOWS
+    if scenario_key == "two_wave_frontload":
+        return FRONTLOAD_BASIS
+    if scenario.get("method") == "due_deadline":
+        return due_window_map_for_waves(scenario["waves"], lead_hours=2)
+    return {}
 
 
 def nearest_wave_label(ts):
@@ -249,10 +293,21 @@ def prepare_daily_two_wave_deadline(df, lead_hours=2):
     return daily
 
 
-def build_average_table(daily_df, dates, wave_order, label):
+def build_average_table(daily_df, dates, wave_order, label, basis_map=None):
     if not dates:
-        return pd.DataFrame(columns=["model", "wave", "avg_total_per_day", "avg_administered_per_day", "avg_not_administered_per_day"])
+        return pd.DataFrame(
+            columns=[
+                "model",
+                "wave",
+                "dose_due_window",
+                "avg_total_per_day",
+                "avg_administered_per_day",
+                "avg_not_administered_per_day",
+                "waste_rate",
+            ]
+        )
 
+    basis_map = basis_map or {}
     full_index = pd.MultiIndex.from_product([dates, wave_order], names=["event_date", "wave"])
     daily = (
         daily_df.set_index(["event_date", "wave"])
@@ -271,10 +326,15 @@ def build_average_table(daily_df, dates, wave_order, label):
         )
     )
     averages.insert(0, "model", label)
+    averages.insert(2, "dose_due_window", averages["wave"].map(basis_map).fillna(""))
+    averages["waste_rate"] = averages.apply(
+        lambda row: row["avg_not_administered_per_day"] / row["avg_total_per_day"] if row["avg_total_per_day"] else 0,
+        axis=1,
+    )
     return averages
 
 
-def build_period_tables(current_daily, proposed_daily, focus_df, wave_order_current, wave_order_proposed):
+def build_period_tables(current_daily, proposed_daily, focus_df, wave_order_current, wave_order_proposed, proposed_basis):
     dates = sorted(pd.to_datetime(focus_df["event_date"].dropna().unique()).tolist())
     weekday_dates = sorted(d for d in dates if pd.Timestamp(d).weekday() < 5)
     weekend_dates = sorted(d for d in dates if pd.Timestamp(d).weekday() >= 5)
@@ -282,7 +342,7 @@ def build_period_tables(current_daily, proposed_daily, focus_df, wave_order_curr
     return {
         "overall": (
             build_average_table(current_daily, dates, wave_order_current, "Current"),
-            build_average_table(proposed_daily, dates, wave_order_proposed, "Proposed"),
+            build_average_table(proposed_daily, dates, wave_order_proposed, "Proposed", proposed_basis),
             len(dates),
         ),
         "weekday": (
@@ -297,6 +357,7 @@ def build_period_tables(current_daily, proposed_daily, focus_df, wave_order_curr
                 weekday_dates,
                 wave_order_proposed,
                 "Proposed",
+                proposed_basis,
             ),
             len(weekday_dates),
         ),
@@ -312,6 +373,7 @@ def build_period_tables(current_daily, proposed_daily, focus_df, wave_order_curr
                 weekend_dates,
                 wave_order_proposed,
                 "Proposed",
+                proposed_basis,
             ),
             len(weekend_dates),
         ),
@@ -324,13 +386,16 @@ def style_average_table(df):
     styled = df.copy()
     for col in ["avg_total_per_day", "avg_administered_per_day", "avg_not_administered_per_day"]:
         styled[col] = styled[col].map(lambda x: f"{x:.1f}")
+    styled["waste_rate"] = styled["waste_rate"].map(lambda x: f"{x * 100:.1f}%")
     return styled.rename(
         columns={
             "model": "Model",
             "wave": "Cartfill",
+            "dose_due_window": "Doses Due / Basis",
             "avg_total_per_day": "Avg Total / Day",
             "avg_administered_per_day": "Avg Admined / Day",
             "avg_not_administered_per_day": "Avg Not Admined / Day",
+            "waste_rate": "Likely Waste Rate",
         }
     )
 
@@ -421,7 +486,8 @@ if scenario.get("method") == "due_deadline":
 else:
     proposed_daily = prepare_daily_split(current_daily, scenario["split"])
     due_mode_rows = len(focus)
-period_tables = build_period_tables(current_daily, proposed_daily, focus, CURRENT_WAVES, scenario["waves"])
+proposed_basis = scenario_basis_map(scenario_key, scenario)
+period_tables = build_period_tables(current_daily, proposed_daily, focus, CURRENT_WAVES, scenario["waves"], proposed_basis)
 
 total_orders = len(focus)
 total_days = len(sorted(pd.to_datetime(focus["event_date"].dropna().unique()).tolist()))
@@ -479,6 +545,17 @@ selected_period = st.segmented_control(
 
 current_avg, proposed_avg, period_days = period_tables[selected_period]
 comparison = pd.concat([current_avg, proposed_avg], ignore_index=True)
+waste_summary = (
+    comparison.groupby("model", as_index=False)
+    .agg(
+        avg_total_per_day=("avg_total_per_day", "sum"),
+        avg_not_administered_per_day=("avg_not_administered_per_day", "sum"),
+    )
+)
+waste_summary["waste_rate"] = waste_summary.apply(
+    lambda row: row["avg_not_administered_per_day"] / row["avg_total_per_day"] if row["avg_total_per_day"] else 0,
+    axis=1,
+)
 
 c1, c2 = st.columns([1.1, 0.9])
 
@@ -512,6 +589,33 @@ with c2:
     )
     fig_compare.update_layout(height=360)
     st.plotly_chart(fig_compare, width="stretch")
+
+st.subheader("Likely Waste Comparison")
+waste_display = waste_summary.copy()
+waste_display["avg_total_per_day"] = waste_display["avg_total_per_day"].map(lambda x: f"{x:.1f}")
+waste_display["avg_not_administered_per_day"] = waste_display["avg_not_administered_per_day"].map(lambda x: f"{x:.1f}")
+waste_display["waste_rate"] = waste_display["waste_rate"].map(lambda x: f"{x * 100:.1f}%")
+waste_display = waste_display.rename(
+    columns={
+        "model": "Model",
+        "avg_total_per_day": "Avg Total / Day",
+        "avg_not_administered_per_day": "Avg Likely Waste / Day",
+        "waste_rate": "Likely Waste Rate",
+    }
+)
+st.dataframe(waste_display, width="stretch", hide_index=True)
+if len(waste_summary) == 2:
+    current_waste = waste_summary.loc[waste_summary["model"] == "Current", "avg_not_administered_per_day"].sum()
+    proposed_waste = waste_summary.loc[waste_summary["model"] == "Proposed", "avg_not_administered_per_day"].sum()
+    st.metric(
+        "Likely Waste Difference",
+        f"{proposed_waste - current_waste:+.1f} avg orders/day",
+        help="Negative means the selected model has fewer likely waste rows per day; positive means more.",
+    )
+st.caption(
+    "This uses missing `Admin Given Date & Time` as likely waste. The selected model changes which cartfill wave "
+    "carries that waste; total likely waste only changes if a workflow change actually prevents doses from going unused."
+)
 
 detail_col1, detail_col2 = st.columns(2)
 
