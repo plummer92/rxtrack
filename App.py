@@ -39,11 +39,14 @@ from rxtrack_shared import (
 )
 
 _INIT_DB_ADVISORY_LOCK_ID = 98273145
+_SCHEMA_READY_CACHE = {"checked_at": 0.0, "ready": False}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def _schema_is_ready():
     """Fast path for already-initialized databases."""
+    now = time.time()
+    if _SCHEMA_READY_CACHE["ready"] and now - _SCHEMA_READY_CACHE["checked_at"] < 300:
+        return True
     try:
         with db_cursor() as (conn, cur):
             cur.execute("SET statement_timeout = '5s';")
@@ -77,12 +80,14 @@ def _schema_is_ready():
                     );
                 """
             )
-            return bool(cur.fetchone()[0])
+            ready = bool(cur.fetchone()[0])
+            _SCHEMA_READY_CACHE.update({"checked_at": now, "ready": ready})
+            return ready
     except Exception:
+        _SCHEMA_READY_CACHE.update({"checked_at": now, "ready": False})
         return False
 
 
-@st.cache_resource(show_spinner=False)
 def _run_schema_init_once(schemas):
     """Run schema DDL once per app process, serialized across app instances."""
     with db_cursor() as (conn, cur):
@@ -102,7 +107,7 @@ def _run_schema_init_once(schemas):
             for sql in schemas:
                 cur.execute(sql)
             conn.commit()
-            _schema_is_ready.clear()
+            _SCHEMA_READY_CACHE.update({"checked_at": time.time(), "ready": True})
             return True
         except Exception:
             conn.rollback()
