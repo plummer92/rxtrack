@@ -38,6 +38,40 @@ from rxtrack_shared import (
     seconds_to_mmss,
 )
 
+_INIT_DB_ADVISORY_LOCK_ID = 98273145
+
+
+@st.cache_resource(show_spinner=False)
+def _run_schema_init_once(schemas):
+    """Run schema DDL once per app process, serialized across app instances."""
+    with db_cursor() as (conn, cur):
+        locked = False
+        try:
+            for _ in range(120):
+                cur.execute("SELECT pg_try_advisory_lock(%s);", (_INIT_DB_ADVISORY_LOCK_ID,))
+                locked = bool(cur.fetchone()[0])
+                if locked:
+                    break
+                conn.rollback()
+                time.sleep(1)
+            if not locked:
+                raise TimeoutError("Timed out waiting for RXTrack schema initialization lock.")
+            cur.execute("SET lock_timeout = '30s';")
+            cur.execute("SET statement_timeout = '180s';")
+            for sql in schemas:
+                cur.execute(sql)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if locked:
+                try:
+                    cur.execute("SELECT pg_advisory_unlock(%s);", (_INIT_DB_ADVISORY_LOCK_ID,))
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+
 
 def init_db():
     """Initializes tables if they do not exist."""
@@ -498,10 +532,7 @@ def init_db():
         """CREATE INDEX IF NOT EXISTS idx_med_costs_med_id_norm
             ON med_costs (UPPER(TRIM(med_id)));"""
     ]
-    with db_cursor() as (conn, cur):
-        for sql in schemas:
-            cur.execute(sql)
-        conn.commit()
+    _run_schema_init_once(tuple(schemas))
 
 def run_query(query, params=None):
     """Executes a SELECT query and returns a pandas DataFrame."""
