@@ -472,7 +472,21 @@ def init_db():
         """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_payload_json TEXT;""",
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_management_coaching_notes_source_key
             ON management_coaching_notes (source_key)
-            WHERE source_key IS NOT NULL;"""
+            WHERE source_key IS NOT NULL;""",
+        """CREATE INDEX IF NOT EXISTS idx_events_dt
+            ON events (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_audit_transaction_detail_rc_dt
+            ON audit_transaction_detail_rc (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_config_events_dt
+            ON config_events (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_pharmacy_orders_dt
+            ON pharmacy_orders (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_staff_schedule_dt
+            ON staff_schedule (dt);""",
+        """CREATE INDEX IF NOT EXISTS idx_attendance_punches_dt_date
+            ON attendance_punches (dt_date);""",
+        """CREATE INDEX IF NOT EXISTS idx_med_costs_med_id_norm
+            ON med_costs (UPPER(TRIM(med_id)));"""
     ]
     with db_cursor() as (conn, cur):
         for sql in schemas:
@@ -2301,6 +2315,8 @@ def clean_overnight_cartfill_workbook(uploaded):
 # --- DATA LOADERS (CACHED) ---
 @st.cache_data(ttl=300)
 def load_data(start_date, end_date):
+    start_ts = datetime.combine(pd.to_datetime(start_date).date(), datetime.min.time())
+    end_exclusive = datetime.combine(pd.to_datetime(end_date).date() + timedelta(days=1), datetime.min.time())
     legacy_events_sql = """
         SELECT
             e.user_name,
@@ -2318,7 +2334,7 @@ def load_data(start_date, end_date):
             e.pk
         FROM events e
         LEFT JOIN med_costs c ON UPPER(TRIM(e.med_id)) = UPPER(TRIM(c.med_id))
-        WHERE e.dt::date BETWEEN %s AND %s
+        WHERE e.dt >= %s AND e.dt < %s
     """
     queries = {
         "events": """
@@ -2327,7 +2343,7 @@ def load_data(start_date, end_date):
                     dt::date AS d,
                     UPPER(TRIM(station_name)) AS device
                 FROM audit_transaction_detail_rc
-                WHERE dt::date BETWEEN %s AND %s
+                WHERE dt >= %s AND dt < %s
             ),
             audit_events AS (
                 SELECT
@@ -2346,7 +2362,7 @@ def load_data(start_date, end_date):
                     a.pk
                 FROM audit_transaction_detail_rc a
                 LEFT JOIN med_costs c ON UPPER(TRIM(a.med_id)) = UPPER(TRIM(c.med_id))
-                WHERE a.dt::date BETWEEN %s AND %s
+                WHERE a.dt >= %s AND a.dt < %s
             ),
             legacy_events AS (
                 SELECT
@@ -2365,7 +2381,7 @@ def load_data(start_date, end_date):
                     e.pk
                 FROM events e
                 LEFT JOIN med_costs c ON UPPER(TRIM(e.med_id)) = UPPER(TRIM(c.med_id))
-                WHERE e.dt::date BETWEEN %s AND %s
+                WHERE e.dt >= %s AND e.dt < %s
                   AND NOT EXISTS (
                       SELECT 1
                       FROM audit_days ad
@@ -2380,11 +2396,11 @@ def load_data(start_date, end_date):
         "config": """
             SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, 
                    min_qty, max_qty, is_standard 
-            FROM config_events WHERE dt::date BETWEEN %s AND %s
+            FROM config_events WHERE dt >= %s AND dt < %s
         """,
         "pharm": """
             SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
-            FROM pharmacy_orders WHERE dt::date BETWEEN %s AND %s
+            FROM pharmacy_orders WHERE dt >= %s AND dt < %s
         """,
         "schedule": """
             SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note,
@@ -2399,11 +2415,17 @@ def load_data(start_date, end_date):
     }
     
     results = {}
-    params = (start_date, end_date)
+    timestamp_params = (start_ts, end_exclusive)
+    date_params = (start_date, end_date)
     with db_cursor() as (conn, cur):
         for key, sql in queries.items():
             try:
-                query_params = params * 3 if key == "events" else params
+                if key == "events":
+                    query_params = timestamp_params * 3
+                elif key in {"schedule", "attendance"}:
+                    query_params = date_params
+                else:
+                    query_params = timestamp_params
                 results[key] = pd.read_sql(sql, conn, params=query_params)
                 if not results[key].empty and 'dt' in results[key].columns:
                     results[key]["dt"] = pd.to_datetime(results[key]["dt"])
@@ -2411,7 +2433,7 @@ def load_data(start_date, end_date):
                 conn.rollback()
                 if key == "events":
                     try:
-                        results[key] = pd.read_sql(legacy_events_sql, conn, params=params)
+                        results[key] = pd.read_sql(legacy_events_sql, conn, params=timestamp_params)
                         if not results[key].empty and 'dt' in results[key].columns:
                             results[key]["dt"] = pd.to_datetime(results[key]["dt"])
                         continue
