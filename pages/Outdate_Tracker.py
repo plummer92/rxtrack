@@ -59,6 +59,9 @@ def load_outdate_tracker(start_date, end_date):
             refill.event_type AS last_refill_event_type,
             refill.user_name AS last_refilled_by,
             refill.qty AS last_refill_qty,
+            meaningful.dt AS last_meaningful_dt,
+            meaningful.event_type AS last_meaningful_event_type,
+            meaningful.user_name AS last_meaningful_by,
             activity.dt AS last_activity_dt,
             activity.event_type AS last_activity_event_type,
             activity.user_name AS last_activity_by
@@ -90,6 +93,16 @@ def load_outdate_tracker(start_date, end_date):
             WHERE p.dt < o.outdate_dt
               AND UPPER(TRIM(COALESCE(p.device, ''))) = UPPER(TRIM(COALESCE(o.device, '')))
               AND UPPER(TRIM(COALESCE(p.med_id, ''))) = UPPER(TRIM(COALESCE(o.med_id, '')))
+              AND COALESCE(p.event_type, '') !~* 'cancel|outdat|expir|override|verify|count|inventory|eject'
+            ORDER BY p.dt DESC
+            LIMIT 1
+        ) meaningful ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT p.dt, p.event_type, p.user_name
+            FROM events p
+            WHERE p.dt < o.outdate_dt
+              AND UPPER(TRIM(COALESCE(p.device, ''))) = UPPER(TRIM(COALESCE(o.device, '')))
+              AND UPPER(TRIM(COALESCE(p.med_id, ''))) = UPPER(TRIM(COALESCE(o.med_id, '')))
               AND COALESCE(p.event_type, '') !~* 'cancel|outdat|expir|override'
             ORDER BY p.dt DESC
             LIMIT 1
@@ -100,12 +113,13 @@ def load_outdate_tracker(start_date, end_date):
     if df.empty:
         return df
 
-    for col in ["outdate_dt", "last_used_dt", "last_refill_dt", "last_activity_dt"]:
+    for col in ["outdate_dt", "last_used_dt", "last_refill_dt", "last_meaningful_dt", "last_activity_dt"]:
         df[col] = pd.to_datetime(df[col], errors="coerce")
     for col in [
         "outdated_by", "device", "med_id", "med_desc", "outdate_event_type",
         "last_used_event_type", "last_used_by", "last_refill_event_type",
-        "last_refilled_by", "last_activity_event_type", "last_activity_by",
+        "last_refilled_by", "last_meaningful_event_type", "last_meaningful_by",
+        "last_activity_event_type", "last_activity_by",
     ]:
         df[col] = df[col].fillna("").astype(str).str.strip()
     for col in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty", "cost_per_unit", "last_used_qty", "last_refill_qty"]:
@@ -115,9 +129,20 @@ def load_outdate_tracker(start_date, end_date):
     df["estimated_cost"] = df["outdate_qty"] * df["cost_per_unit"].fillna(0)
     df["days_since_used"] = (df["outdate_dt"] - df["last_used_dt"]).dt.total_seconds() / 86400
     df["days_since_refill"] = (df["outdate_dt"] - df["last_refill_dt"]).dt.total_seconds() / 86400
+    df["days_since_meaningful"] = (df["outdate_dt"] - df["last_meaningful_dt"]).dt.total_seconds() / 86400
     df["days_since_activity"] = (df["outdate_dt"] - df["last_activity_dt"]).dt.total_seconds() / 86400
     df["usage_status"] = "Prior use found"
     df.loc[df["last_used_dt"].isna(), "usage_status"] = "No prior clinical use found"
+    df["days_basis"] = "Last clinical use"
+    df["days_to_review"] = df["days_since_used"]
+    df.loc[df["days_to_review"].isna(), "days_to_review"] = df["days_since_refill"]
+    df.loc[df["days_since_used"].isna() & df["days_since_refill"].notna(), "days_basis"] = "Last refill/load"
+    df.loc[df["days_to_review"].isna(), "days_to_review"] = df["days_since_meaningful"]
+    df.loc[
+        df["days_since_used"].isna() & df["days_since_refill"].isna() & df["days_since_meaningful"].notna(),
+        "days_basis",
+    ] = "Last non-verify activity"
+    df.loc[df["days_to_review"].isna(), "days_basis"] = "No prior matched activity"
     return df
 
 
@@ -145,7 +170,7 @@ unique_meds = outdates["med_id"].replace("", pd.NA).nunique()
 unique_devices = outdates["device"].replace("", pd.NA).nunique()
 total_qty = outdates["outdate_qty"].sum()
 estimated_cost = outdates["estimated_cost"].sum()
-median_days = outdates["days_since_used"].dropna().median()
+median_days = outdates["days_to_review"].dropna().median()
 no_prior_use = int(outdates["last_used_dt"].isna().sum())
 
 m1, m2, m3, m4, m5, m6 = st.columns(6)
@@ -153,7 +178,7 @@ m1.metric("Outdate Rows", f"{total_rows:,}")
 m2.metric("Unique Meds", f"{unique_meds:,}")
 m3.metric("Devices", f"{unique_devices:,}")
 m4.metric("Qty Outdated", f"{total_qty:,.0f}")
-m5.metric("Median Days Since Used", f"{median_days:.1f}" if pd.notna(median_days) else "-")
+m5.metric("Median Days to Review", f"{median_days:.1f}" if pd.notna(median_days) else "-")
 m6.metric("No Prior Use Found", f"{no_prior_use:,}")
 
 if estimated_cost > 0:
@@ -166,7 +191,7 @@ device_options = sorted(outdates["device"].replace("", pd.NA).dropna().unique())
 status_options = sorted(outdates["usage_status"].unique())
 selected_devices = f1.multiselect("Device", device_options, key="outdate_tracker_device_filter")
 selected_status = f2.multiselect("Usage Status", status_options, default=status_options, key="outdate_tracker_status_filter")
-min_days = f3.number_input("Min days since used", min_value=0, value=0, step=1)
+min_days = f3.number_input("Min days to review", min_value=0, value=0, step=1)
 search = f4.text_input("Med search", key="outdate_tracker_search")
 
 view = outdates.copy()
@@ -175,7 +200,7 @@ if selected_devices:
 if selected_status:
     view = view[view["usage_status"].isin(selected_status)]
 if min_days:
-    view = view[view["days_since_used"].fillna(-1).ge(min_days)]
+    view = view[view["days_to_review"].fillna(-1).ge(min_days)]
 if search:
     mask = (
         view["med_id"].str.contains(search, case=False, na=False)
@@ -186,17 +211,18 @@ if search:
 
 st.subheader("Outdate Detail")
 st.caption(
-    "Days Since Used looks for the last prior non-maintenance transaction for the same med on the same device. "
-    "If no prior use is found, compare Last Refill and Last Activity to see whether it was stocked but never documented as used."
+    "Days to Review uses the last documented clinical use when available. If no use is found, it falls back to the last refill/load "
+    "so slow-moving stocked items do not show up as blank."
 )
 
 display_cols = [
     "outdate_dt", "device", "med_id", "med_desc", "outdate_event_type", "outdated_by",
-    "outdate_qty", "days_since_used", "last_used_dt", "last_used_event_type", "last_used_by",
+    "outdate_qty", "days_to_review", "days_basis", "days_since_used", "last_used_dt", "last_used_event_type", "last_used_by",
     "days_since_refill", "last_refill_dt", "last_refill_event_type", "last_refilled_by",
+    "days_since_meaningful", "last_meaningful_dt", "last_meaningful_event_type", "last_meaningful_by",
     "days_since_activity", "last_activity_dt", "last_activity_event_type", "usage_status", "estimated_cost",
 ]
-display = view[display_cols].sort_values(["days_since_used", "outdate_dt"], ascending=[False, False]).copy()
+display = view[display_cols].sort_values(["days_to_review", "outdate_dt"], ascending=[False, False]).copy()
 st.dataframe(
     display,
     width="stretch",
@@ -209,6 +235,8 @@ st.dataframe(
         "outdate_event_type": st.column_config.TextColumn("Outdate Type"),
         "outdated_by": st.column_config.TextColumn("Outdated By"),
         "outdate_qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+        "days_to_review": st.column_config.NumberColumn("Days to Review", format="%.1f"),
+        "days_basis": st.column_config.TextColumn("Days Basis"),
         "days_since_used": st.column_config.NumberColumn("Days Since Used", format="%.1f"),
         "last_used_dt": st.column_config.DatetimeColumn("Last Used", format="MM/DD/YY HH:mm"),
         "last_used_event_type": st.column_config.TextColumn("Last Use Type"),
@@ -217,6 +245,10 @@ st.dataframe(
         "last_refill_dt": st.column_config.DatetimeColumn("Last Refill", format="MM/DD/YY HH:mm"),
         "last_refill_event_type": st.column_config.TextColumn("Last Refill Type"),
         "last_refilled_by": st.column_config.TextColumn("Last Refilled By"),
+        "days_since_meaningful": st.column_config.NumberColumn("Days Since Non-Verify", format="%.1f"),
+        "last_meaningful_dt": st.column_config.DatetimeColumn("Last Non-Verify", format="MM/DD/YY HH:mm"),
+        "last_meaningful_event_type": st.column_config.TextColumn("Last Non-Verify Type"),
+        "last_meaningful_by": st.column_config.TextColumn("Last Non-Verify By"),
         "days_since_activity": st.column_config.NumberColumn("Days Since Any Activity", format="%.1f"),
         "last_activity_dt": st.column_config.DatetimeColumn("Last Activity", format="MM/DD/YY HH:mm"),
         "last_activity_event_type": st.column_config.TextColumn("Last Activity Type"),
@@ -236,7 +268,7 @@ if not display.empty:
                 outdate_rows=("pk", "count"),
                 unique_meds=("med_id", "nunique"),
                 qty=("outdate_qty", "sum"),
-                median_days_since_used=("days_since_used", "median"),
+                median_days_to_review=("days_to_review", "median"),
                 estimated_cost=("estimated_cost", "sum"),
             )
             .reset_index()
@@ -252,7 +284,7 @@ if not display.empty:
                 outdate_rows=("pk", "count"),
                 devices=("device", "nunique"),
                 qty=("outdate_qty", "sum"),
-                median_days_since_used=("days_since_used", "median"),
+                median_days_to_review=("days_to_review", "median"),
                 estimated_cost=("estimated_cost", "sum"),
             )
             .reset_index()
@@ -261,19 +293,19 @@ if not display.empty:
         st.subheader("By Medication")
         st.dataframe(med_summary.head(50), width="stretch", hide_index=True)
 
-    if view["days_since_used"].notna().any():
-        chart_df = view.dropna(subset=["days_since_used"]).copy()
+    if view["days_to_review"].notna().any():
+        chart_df = view.dropna(subset=["days_to_review"]).copy()
         chart_df["label"] = chart_df["med_desc"].where(chart_df["med_desc"].ne(""), chart_df["med_id"])
         chart_df["plot_qty"] = chart_df["outdate_qty"].clip(lower=1)
         fig = px.scatter(
             chart_df,
             x="outdate_dt",
-            y="days_since_used",
+            y="days_to_review",
             color="device",
             size="plot_qty",
-            hover_data=["med_id", "med_desc", "outdate_qty", "last_used_dt"],
-            labels={"outdate_dt": "Outdate Time", "days_since_used": "Days Since Used"},
-            title="Outdates by Days Since Last Documented Use",
+            hover_data=["med_id", "med_desc", "outdate_qty", "days_basis", "last_used_dt", "last_refill_dt"],
+            labels={"outdate_dt": "Outdate Time", "days_to_review": "Days to Review"},
+            title="Outdates by Days Since Last Use or Refill",
         )
         fig.update_layout(height=420, legend_title_text="Device")
         st.plotly_chart(fig, width="stretch")
