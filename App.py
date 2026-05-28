@@ -2688,6 +2688,44 @@ def get_zero_verify_events(df_events):
     return zero_events.sort_values("dt", ascending=False)[available_cols]
 
 
+def calculate_active_tech_count(df_events, df_sched):
+    """Count pharmacy staff activity without including every clinical Pyxis user."""
+    if df_events.empty or "user_name" not in df_events.columns or "event_type" not in df_events.columns:
+        return 0
+
+    work = df_events.copy()
+    work["_etype"] = work["event_type"].fillna("").astype(str).str.lower().str.strip()
+    pharmacy_work = work[
+        work["_etype"].str.contains(r"restock|refill|\bload\b|replenish|unload|empty|outdat|expir", regex=True, na=False)
+        & ~work["_etype"].str.contains("cancel|eject|verify", regex=True, na=False)
+    ].copy()
+    if pharmacy_work.empty:
+        return 0
+
+    pharmacy_work["tech_key"] = pharmacy_work["user_name"].apply(normalize_name)
+    event_keys = {
+        key for key in pharmacy_work["tech_key"].dropna().astype(str)
+        if key and key not in load_admin_users()
+    }
+    if not event_keys:
+        return 0
+
+    if df_sched.empty or "staff_name" not in df_sched.columns:
+        return len(event_keys)
+
+    sched = df_sched.copy()
+    sched["tech_key"] = sched["staff_name"].apply(normalize_name)
+    if "assignment_type" in sched.columns:
+        assignment_text = sched["assignment_type"].fillna("").astype(str).str.lower()
+        sched = sched[~assignment_text.str.contains(r"pto|vacation|off|sick", regex=True, na=False)]
+    schedule_keys = {
+        key for key in sched["tech_key"].dropna().astype(str)
+        if key and key not in load_admin_users()
+    }
+    matched_keys = event_keys & schedule_keys
+    return len(matched_keys) if matched_keys else len(event_keys)
+
+
 def summarize_zero_verify_events(zero_events):
     if zero_events.empty:
         return pd.DataFrame()
@@ -4867,6 +4905,7 @@ if _is_main:
 
             session_stats = ev.groupby("session_id").agg(total_time=("machine_time_sec", "sum"))
             avg_time      = session_stats["total_time"].mean()
+            active_tech_count = calculate_active_tech_count(df_events, df_sched)
 
             # ── Row 1 — Top-line KPIs ─────────────────────────────────────────
             m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
@@ -4874,9 +4913,10 @@ if _is_main:
             m2.metric("Refills / Restocks", f"{len(refills):,}")
             m3.metric("Unloads",            f"{len(unloads):,}")
             m4.metric("Outdates",           f"{len(outdates):,}")
-            m5.metric("Active Techs",       df_events["user_name"].nunique())
+            m5.metric("Active Techs",       f"{active_tech_count:,}")
             m6.metric("Avg Session",        seconds_to_mmss(avg_time))
             m7.metric("Discrepancies",      int(df_events["discrepancy_qty"].ne(0).sum()))
+            st.caption("Active Techs counts pharmacy maintenance users and matches them to the schedule when available, so routine nurse Pyxis users are excluded.")
 
             run_zero_verify_watch = st.checkbox(
                 "Run Zero Verify Watch",
