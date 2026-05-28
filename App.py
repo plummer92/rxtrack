@@ -41,13 +41,54 @@ from rxtrack_shared import (
 _INIT_DB_ADVISORY_LOCK_ID = 98273145
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _schema_is_ready():
+    """Fast path for already-initialized databases."""
+    try:
+        with db_cursor() as (conn, cur):
+            cur.execute("SET statement_timeout = '5s';")
+            cur.execute(
+                """
+                SELECT
+                    to_regclass('public.events') IS NOT NULL
+                    AND to_regclass('public.config_events') IS NOT NULL
+                    AND to_regclass('public.pharmacy_orders') IS NOT NULL
+                    AND to_regclass('public.staff_schedule') IS NOT NULL
+                    AND to_regclass('public.attendance_punches') IS NOT NULL
+                    AND to_regclass('public.wcc_cartfill_stats') IS NOT NULL
+                    AND to_regclass('public.cartfill_discontinued_orders') IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'wcc_cartfill_stats'
+                          AND column_name = 'cartfill_area'
+                    )
+                    AND EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'wcc_cartfill_stats'
+                          AND column_name = 'admin_given_dt'
+                    )
+                    AND EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'wcc_cartfill_stats'
+                          AND column_name = 'order_id'
+                    );
+                """
+            )
+            return bool(cur.fetchone()[0])
+    except Exception:
+        return False
+
+
 @st.cache_resource(show_spinner=False)
 def _run_schema_init_once(schemas):
     """Run schema DDL once per app process, serialized across app instances."""
     with db_cursor() as (conn, cur):
         locked = False
         try:
-            for _ in range(120):
+            for _ in range(5):
                 cur.execute("SELECT pg_try_advisory_lock(%s);", (_INIT_DB_ADVISORY_LOCK_ID,))
                 locked = bool(cur.fetchone()[0])
                 if locked:
@@ -55,12 +96,14 @@ def _run_schema_init_once(schemas):
                 conn.rollback()
                 time.sleep(1)
             if not locked:
-                raise TimeoutError("Timed out waiting for RXTrack schema initialization lock.")
-            cur.execute("SET lock_timeout = '30s';")
-            cur.execute("SET statement_timeout = '180s';")
+                return False
+            cur.execute("SET lock_timeout = '5s';")
+            cur.execute("SET statement_timeout = '120s';")
             for sql in schemas:
                 cur.execute(sql)
             conn.commit()
+            _schema_is_ready.clear()
+            return True
         except Exception:
             conn.rollback()
             raise
@@ -75,6 +118,8 @@ def _run_schema_init_once(schemas):
 
 def init_db():
     """Initializes tables if they do not exist."""
+    if _schema_is_ready():
+        return
     schemas = [
         """CREATE TABLE IF NOT EXISTS events (
             pk TEXT PRIMARY KEY, user_name TEXT, device TEXT, med_id TEXT, med_desc TEXT, 
