@@ -347,7 +347,7 @@ if not display.empty:
                 estimated_cost=("estimated_cost", "sum"),
             )
             .reset_index()
-            .sort_values(["outdate_rows", "qty"], ascending=[False, False])
+            .sort_values(["outdate_rows", "review_qty"], ascending=[False, False])
         )
         st.subheader("By Medication")
         st.dataframe(med_summary.head(50), width="stretch", hide_index=True)
