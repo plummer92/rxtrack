@@ -1,0 +1,16 @@
+.git
+.gitignore
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+*.log
+*.csv
+*.xlsx
+*.xls

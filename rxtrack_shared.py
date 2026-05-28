@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import math
+import os
 import re
 
 import pandas as pd
@@ -10,8 +11,22 @@ from psycopg2.extras import execute_batch
 from sqlalchemy import create_engine, text
 
 
+def get_database_url():
+    env_url = os.environ.get("NEON_DB_URL") or os.environ.get("DATABASE_URL")
+    if env_url:
+        return env_url
+
+    try:
+        return st.secrets["neon"]["db_url"]
+    except Exception as exc:
+        raise RuntimeError(
+            "Database URL is not configured. Set NEON_DB_URL for Cloud Run "
+            "or add [neon].db_url to .streamlit/secrets.toml for local/Streamlit use."
+        ) from exc
+
+
 engine = create_engine(
-    st.secrets["neon"]["db_url"],
+    get_database_url(),
     pool_pre_ping=True,
     pool_recycle=300,
 )
@@ -141,7 +156,7 @@ def db_cursor():
     """Context manager for database connections."""
     conn = None
     try:
-        conn = psycopg2.connect(st.secrets["neon"]["db_url"])
+        conn = psycopg2.connect(get_database_url())
         cur = conn.cursor()
         yield conn, cur
     except Exception as e:

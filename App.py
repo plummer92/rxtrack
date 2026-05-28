@@ -3400,7 +3400,7 @@ def apply_global_styles():
 
 def get_management_password():
     """Return the configured management password without exposing it in the UI."""
-    env_password = os.environ.get("RXTRACK_MANAGEMENT_PASSWORD")
+    env_password = os.environ.get("RXTRACK_MANAGEMENT_PASSWORD") or os.environ.get("MANAGEMENT_PASSWORD")
     if env_password:
         return str(env_password)
 
