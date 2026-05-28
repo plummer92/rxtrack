@@ -422,6 +422,13 @@ def build_movement_segments(user_sessions):
 
     return pd.DataFrame(segments)
 
+
+def pharmacy_session_users(session_frame):
+    if session_frame.empty or "Source Type" not in session_frame.columns:
+        return []
+    pharmacy_sessions = session_frame[session_frame["Source Type"].eq("Pharmacy")]
+    return sorted(pharmacy_sessions["User"].dropna().astype(str).unique())
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -469,10 +476,10 @@ with tab1:
         sessions_for_day = sessions.copy()
         c0.info("No session dates found.")
 
-    all_users = sorted(sessions_for_day['User'].dropna().unique())
+    all_users = pharmacy_session_users(sessions_for_day)
     if "u_sess_uni" in st.session_state:
         st.session_state.u_sess_uni = [user for user in st.session_state.u_sess_uni if user in all_users]
-    sel_u = c1.multiselect("Filter User", all_users, key="u_sess_uni")
+    sel_u = c1.multiselect("Filter Pharmacy User", all_users, key="u_sess_uni")
 
     min_dur = c2.number_input("Min Duration (sec)", 0, 3600, 0)
 
@@ -622,10 +629,10 @@ with tab_visualizer:
         )
 
         movement_day_sessions = sessions[sessions["Start"].dt.date == movement_date].copy()
-        movement_users = sorted(movement_day_sessions["User"].dropna().unique())
+        movement_users = pharmacy_session_users(movement_day_sessions)
 
         if not movement_users:
-            st.info("No tech sessions were found for that date.")
+            st.info("No pharmacy user sessions were found for that date.")
         else:
             if st.session_state.get("movement_visualizer_user") not in movement_users:
                 st.session_state.movement_visualizer_user = movement_users[0]
