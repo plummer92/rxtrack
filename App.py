@@ -22,6 +22,9 @@ import time
 import hmac
 from openpyxl import load_workbook
 
+warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy connectable.*")
+warnings.filterwarnings("ignore", message="This pattern is interpreted as a regular expression.*")
+
 from sqlalchemy import text
 import os
 
@@ -124,6 +127,8 @@ def _run_schema_init_once(schemas):
 def init_db():
     """Initializes tables if they do not exist."""
     if _schema_is_ready():
+        return
+    if os.environ.get("RXTRACK_RUN_SCHEMA_INIT", "").lower() not in {"1", "true", "yes"}:
         return
     schemas = [
         """CREATE TABLE IF NOT EXISTS events (
