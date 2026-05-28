@@ -1,3 +1,5 @@
+import math
+import re
 from datetime import timedelta
 
 import pandas as pd
@@ -5,12 +7,58 @@ import plotly.express as px
 import streamlit as st
 
 import App
+from rxtrack_shared import return_unit_conversion
 
 
 st.set_page_config(page_title="Outdate Tracker", page_icon="📦", layout="wide")
 App.apply_global_styles()
 
 render_sidebar = App.render_sidebar
+
+
+INSULIN_PATTERN = re.compile(
+    r"\b(insulin|regular insulin|insulin regular|lispro|aspart|glargine|detemir|degludec|glulisine|nph|"
+    r"humalog|novolog|novolin|humulin|lantus|levemir|tresiba|toujeo|basaglar|"
+    r"semglee|fiasp|apidra|admelog|lyumjev|rezvoglar)\b",
+    re.IGNORECASE,
+)
+
+
+def insulin_unit_divisor(row):
+    med_text = f"{row.get('med_desc', '')} {row.get('med_id', '')}"
+    if not INSULIN_PATTERN.search(med_text):
+        return 1, ""
+    if re.search(r"\b3\s*ml\b|pen|kwikpen|flextouch|solostar", med_text, re.IGNORECASE):
+        return 300, "Insulin pen: 300 units = 1 pen"
+    return 1000, "Insulin vial: 1000 units = 1 vial"
+
+
+def add_outdate_review_qty(df):
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    conversions = out.apply(return_unit_conversion, axis=1, result_type="expand")
+    out["qty_divisor"] = pd.to_numeric(conversions[0], errors="coerce").fillna(1)
+    out["conversion_note"] = conversions[1].fillna("Each").astype(str)
+
+    insulin_conversions = out.apply(insulin_unit_divisor, axis=1, result_type="expand")
+    insulin_divisor = pd.to_numeric(insulin_conversions[0], errors="coerce").fillna(1)
+    insulin_note = insulin_conversions[1].fillna("").astype(str)
+    insulin_mask = insulin_divisor.gt(1)
+    out.loc[insulin_mask, "qty_divisor"] = insulin_divisor[insulin_mask]
+    out.loc[insulin_mask, "conversion_note"] = insulin_note[insulin_mask]
+
+    out["review_qty"] = out["outdate_qty"]
+    conversion_mask = out["qty_divisor"].gt(1) & out["outdate_qty"].ne(0)
+    out.loc[conversion_mask, "review_qty"] = out.loc[conversion_mask].apply(
+        lambda row: math.ceil(abs(row["outdate_qty"]) / row["qty_divisor"]),
+        axis=1,
+    )
+    out["qty_basis"] = "Raw each/qty"
+    out.loc[conversion_mask, "qty_basis"] = out.loc[conversion_mask, "conversion_note"]
+    out["estimated_cost_raw"] = out["outdate_qty"] * out["cost_per_unit"].fillna(0)
+    out["estimated_cost"] = out["review_qty"] * out["cost_per_unit"].fillna(0)
+    return out
 
 
 @st.cache_data(ttl=300)
@@ -126,7 +174,6 @@ def load_outdate_tracker(start_date, end_date):
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["outdate_qty"] = df["qty"].fillna(0).abs()
-    df["estimated_cost"] = df["outdate_qty"] * df["cost_per_unit"].fillna(0)
     df["days_since_used"] = (df["outdate_dt"] - df["last_used_dt"]).dt.total_seconds() / 86400
     df["days_since_refill"] = (df["outdate_dt"] - df["last_refill_dt"]).dt.total_seconds() / 86400
     df["days_since_meaningful"] = (df["outdate_dt"] - df["last_meaningful_dt"]).dt.total_seconds() / 86400
@@ -143,7 +190,7 @@ def load_outdate_tracker(start_date, end_date):
         "days_basis",
     ] = "Last non-verify activity"
     df.loc[df["days_to_review"].isna(), "days_basis"] = "No prior matched activity"
-    return df
+    return add_outdate_review_qty(df)
 
 
 start_date, end_date = render_sidebar()
@@ -169,6 +216,7 @@ total_rows = len(outdates)
 unique_meds = outdates["med_id"].replace("", pd.NA).nunique()
 unique_devices = outdates["device"].replace("", pd.NA).nunique()
 total_qty = outdates["outdate_qty"].sum()
+review_qty = outdates["review_qty"].sum()
 estimated_cost = outdates["estimated_cost"].sum()
 median_days = outdates["days_to_review"].dropna().median()
 no_prior_use = int(outdates["last_used_dt"].isna().sum())
@@ -177,14 +225,20 @@ m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Outdate Rows", f"{total_rows:,}")
 m2.metric("Unique Meds", f"{unique_meds:,}")
 m3.metric("Devices", f"{unique_devices:,}")
-m4.metric("Qty Outdated", f"{total_qty:,.0f}")
+m4.metric("Review Qty", f"{review_qty:,.0f}")
 m5.metric("Median Days to Review", f"{median_days:.1f}" if pd.notna(median_days) else "-")
 m6.metric("No Prior Use Found", f"{no_prior_use:,}")
 
 if estimated_cost > 0:
-    st.caption(f"Estimated outdated cost from med_costs: ${estimated_cost:,.2f}")
+    st.caption(
+        f"Estimated outdated cost from med_costs after insulin/inhaler conversion: ${estimated_cost:,.2f}. "
+        f"Raw Pyxis qty total: {total_qty:,.0f}."
+    )
 else:
-    st.caption("Estimated cost is blank because matching unit costs were not available for these rows.")
+    st.caption(
+        "Estimated cost is blank because matching unit costs were not available for these rows. "
+        f"Raw Pyxis qty total: {total_qty:,.0f}."
+    )
 
 f1, f2, f3, f4 = st.columns([1.2, 1.2, 1, 1.6])
 device_options = sorted(outdates["device"].replace("", pd.NA).dropna().unique())
@@ -217,7 +271,8 @@ st.caption(
 
 display_cols = [
     "outdate_dt", "device", "med_id", "med_desc", "outdate_event_type", "outdated_by",
-    "outdate_qty", "days_to_review", "days_basis", "days_since_used", "last_used_dt", "last_used_event_type", "last_used_by",
+    "outdate_qty", "review_qty", "qty_basis", "days_to_review", "days_basis",
+    "days_since_used", "last_used_dt", "last_used_event_type", "last_used_by",
     "days_since_refill", "last_refill_dt", "last_refill_event_type", "last_refilled_by",
     "days_since_meaningful", "last_meaningful_dt", "last_meaningful_event_type", "last_meaningful_by",
     "days_since_activity", "last_activity_dt", "last_activity_event_type", "usage_status", "estimated_cost",
@@ -234,7 +289,9 @@ st.dataframe(
         "med_desc": st.column_config.TextColumn("Medication"),
         "outdate_event_type": st.column_config.TextColumn("Outdate Type"),
         "outdated_by": st.column_config.TextColumn("Outdated By"),
-        "outdate_qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+        "outdate_qty": st.column_config.NumberColumn("Raw Qty", format="%.0f"),
+        "review_qty": st.column_config.NumberColumn("Review Qty", format="%.0f"),
+        "qty_basis": st.column_config.TextColumn("Qty Basis"),
         "days_to_review": st.column_config.NumberColumn("Days to Review", format="%.1f"),
         "days_basis": st.column_config.TextColumn("Days Basis"),
         "days_since_used": st.column_config.NumberColumn("Days Since Used", format="%.1f"),
@@ -267,7 +324,8 @@ if not display.empty:
             .agg(
                 outdate_rows=("pk", "count"),
                 unique_meds=("med_id", "nunique"),
-                qty=("outdate_qty", "sum"),
+                raw_qty=("outdate_qty", "sum"),
+                review_qty=("review_qty", "sum"),
                 median_days_to_review=("days_to_review", "median"),
                 estimated_cost=("estimated_cost", "sum"),
             )
@@ -283,7 +341,8 @@ if not display.empty:
             .agg(
                 outdate_rows=("pk", "count"),
                 devices=("device", "nunique"),
-                qty=("outdate_qty", "sum"),
+                raw_qty=("outdate_qty", "sum"),
+                review_qty=("review_qty", "sum"),
                 median_days_to_review=("days_to_review", "median"),
                 estimated_cost=("estimated_cost", "sum"),
             )
@@ -296,14 +355,14 @@ if not display.empty:
     if view["days_to_review"].notna().any():
         chart_df = view.dropna(subset=["days_to_review"]).copy()
         chart_df["label"] = chart_df["med_desc"].where(chart_df["med_desc"].ne(""), chart_df["med_id"])
-        chart_df["plot_qty"] = chart_df["outdate_qty"].clip(lower=1)
+        chart_df["plot_qty"] = chart_df["review_qty"].clip(lower=1)
         fig = px.scatter(
             chart_df,
             x="outdate_dt",
             y="days_to_review",
             color="device",
             size="plot_qty",
-            hover_data=["med_id", "med_desc", "outdate_qty", "days_basis", "last_used_dt", "last_refill_dt"],
+            hover_data=["med_id", "med_desc", "outdate_qty", "review_qty", "qty_basis", "days_basis", "last_used_dt", "last_refill_dt"],
             labels={"outdate_dt": "Outdate Time", "days_to_review": "Days to Review"},
             title="Outdates by Days Since Last Use or Refill",
         )
