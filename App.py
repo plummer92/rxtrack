@@ -4918,6 +4918,15 @@ if _is_main:
             m7.metric("Discrepancies",      int(df_events["discrepancy_qty"].ne(0).sum()))
             st.caption("Active Techs counts pharmacy maintenance users and matches them to the schedule when available, so routine nurse Pyxis users are excluded.")
 
+            load_overview_details = st.checkbox(
+                "Load detailed overview sections",
+                value=False,
+                help="Keeps the home page stable by loading charts, alerts, and drilldowns only when needed.",
+            )
+            if not load_overview_details:
+                st.info("Summary loaded. Turn on detailed overview sections to run the heavier charts and drilldowns.")
+                st.stop()
+
             run_zero_verify_watch = st.checkbox(
                 "Run Zero Verify Watch",
                 value=False,
