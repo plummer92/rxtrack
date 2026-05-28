@@ -493,6 +493,8 @@ def init_db():
             ON staff_schedule (dt);""",
         """CREATE INDEX IF NOT EXISTS idx_attendance_punches_dt_date
             ON attendance_punches (dt_date);""",
+        """CREATE INDEX IF NOT EXISTS idx_events_device_med_dt
+            ON events (device, med_id, dt);""",
         """CREATE INDEX IF NOT EXISTS idx_med_costs_med_id_norm
             ON med_costs (UPPER(TRIM(med_id)));"""
     ]
@@ -2622,7 +2624,8 @@ def summarize_zero_verify_events(zero_events):
 
 @st.cache_data(ttl=300)
 def load_zero_verify_refill_gaps(start_date, end_date, lookback_days=60):
-    lookback_start = start_date - timedelta(days=lookback_days)
+    start_ts = datetime.combine(pd.to_datetime(start_date).date(), datetime.min.time())
+    end_exclusive = datetime.combine(pd.to_datetime(end_date).date() + timedelta(days=1), datetime.min.time())
     sql = text("""
         WITH zero_verifies AS (
             SELECT
@@ -2638,24 +2641,10 @@ def load_zero_verify_refill_gaps(start_date, end_date, lookback_days=60):
                 ending_qty,
                 discrepancy_qty
             FROM events
-            WHERE dt::date BETWEEN :start_date AND :end_date
+            WHERE dt::timestamp >= :start_ts
+              AND dt::timestamp < :end_exclusive
               AND event_type ILIKE '%verify%'
               AND COALESCE(qty, 0) = 0
-        ),
-        refill_events AS (
-            SELECT
-                dt::timestamp AS dt,
-                user_name,
-                device,
-                med_id,
-                event_type,
-                qty
-            FROM events
-            WHERE dt::date BETWEEN :lookback_start AND :end_date
-              AND event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
-              AND event_type NOT ILIKE '%cancel%'
-              AND event_type NOT ILIKE '%unload%'
-              AND event_type NOT ILIKE '%empty%'
         )
         SELECT
             z.pk,
@@ -2676,11 +2665,20 @@ def load_zero_verify_refill_gaps(start_date, end_date, lookback_days=60):
             EXTRACT(EPOCH FROM (z.dt - r.dt)) / 3600.0 AS hours_since_refill
         FROM zero_verifies z
         LEFT JOIN LATERAL (
-            SELECT dt, user_name, event_type, qty
-            FROM refill_events r
-            WHERE r.dt < z.dt
+            SELECT
+                r.dt::timestamp AS dt,
+                r.user_name,
+                r.event_type,
+                r.qty
+            FROM events r
+            WHERE r.dt::timestamp < z.dt
+              AND r.dt::timestamp >= z.dt - (:lookback_days * INTERVAL '1 day')
               AND COALESCE(r.device, '') = COALESCE(z.device, '')
               AND COALESCE(r.med_id, '') = COALESCE(z.med_id, '')
+              AND r.event_type ILIKE ANY (ARRAY['%restock%', '%refill%', '%load%', '%replenish%'])
+              AND r.event_type NOT ILIKE '%cancel%'
+              AND r.event_type NOT ILIKE '%unload%'
+              AND r.event_type NOT ILIKE '%empty%'
             ORDER BY r.dt DESC
             LIMIT 1
         ) r ON TRUE
@@ -2692,9 +2690,9 @@ def load_zero_verify_refill_gaps(start_date, end_date, lookback_days=60):
                 sql,
                 conn,
                 params={
-                    "lookback_start": str(lookback_start),
-                    "start_date": str(start_date),
-                    "end_date": str(end_date),
+                    "lookback_days": int(lookback_days),
+                    "start_ts": start_ts,
+                    "end_exclusive": end_exclusive,
                 },
             )
         if df.empty:
