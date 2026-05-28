@@ -4775,9 +4775,9 @@ if _is_main:
             ]
             # Everything except verify (for total tx count)
             real_tx  = ev[~ev["_etype"].str.contains("verify", na=False)]
-            zero_verify_events = load_zero_verify_refill_gaps(start_date, end_date)
-            zero_verify_summary = summarize_zero_verify_refill_gaps(zero_verify_events)
-            avg_zero_refill_gap = zero_verify_events["hours_since_refill"].dropna().mean() if not zero_verify_events.empty else np.nan
+            zero_verify_events = pd.DataFrame()
+            zero_verify_summary = pd.DataFrame()
+            avg_zero_refill_gap = np.nan
 
             session_stats = ev.groupby("session_id").agg(total_time=("machine_time_sec", "sum"))
             avg_time      = session_stats["total_time"].mean()
@@ -4792,7 +4792,18 @@ if _is_main:
             m6.metric("Avg Session",        seconds_to_mmss(avg_time))
             m7.metric("Discrepancies",      int(df_events["discrepancy_qty"].ne(0).sum()))
 
-            if not zero_verify_events.empty:
+            run_zero_verify_watch = st.checkbox(
+                "Run Zero Verify Watch",
+                value=False,
+                help="Runs the heavier refill-history lookup only when you need the zero-verify root-cause view.",
+            )
+            if run_zero_verify_watch:
+                with st.spinner("Running zero-verify refill analysis..."):
+                    zero_verify_events = load_zero_verify_refill_gaps(start_date, end_date)
+                    zero_verify_summary = summarize_zero_verify_refill_gaps(zero_verify_events)
+                    avg_zero_refill_gap = zero_verify_events["hours_since_refill"].dropna().mean() if not zero_verify_events.empty else np.nan
+
+            if run_zero_verify_watch and not zero_verify_events.empty:
                 st.markdown("### Zero Verify Watch")
                 z1, z2, z3, z4, z5 = st.columns(5)
                 z1.metric("Zero Verify Events", f"{len(zero_verify_events):,}")
@@ -4842,8 +4853,10 @@ if _is_main:
                             "hours_since_refill": st.column_config.NumberColumn("Hours Since Refill", format="%.1f"),
                         },
                     )
-            else:
+            elif run_zero_verify_watch:
                 st.caption("Zero Verify Watch: no Verify Inventory transactions with quantity 0 in this window.")
+            else:
+                st.caption("Zero Verify Watch is available on demand for this date range.")
 
             st.divider()
 
@@ -5095,9 +5108,20 @@ if _is_main:
     elif selected_page == "🛡️ Compliance":
         if not df_events.empty:
             disc_df = df_events[df_events['discrepancy_qty'] != 0].copy()
-            zero_verify_events = load_zero_verify_refill_gaps(start_date, end_date)
-            zero_verify_summary = summarize_zero_verify_refill_gaps(zero_verify_events)
-            avg_zero_refill_gap = zero_verify_events["hours_since_refill"].dropna().mean() if not zero_verify_events.empty else np.nan
+            zero_verify_events = pd.DataFrame()
+            zero_verify_summary = pd.DataFrame()
+            avg_zero_refill_gap = np.nan
+            run_zero_verify_watch = st.checkbox(
+                "Run Zero Verify Watch",
+                value=False,
+                help="Runs the heavier refill-history lookup only when you need the zero-verify root-cause view.",
+                key="compliance_run_zero_verify_watch",
+            )
+            if run_zero_verify_watch:
+                with st.spinner("Running zero-verify refill analysis..."):
+                    zero_verify_events = load_zero_verify_refill_gaps(start_date, end_date)
+                    zero_verify_summary = summarize_zero_verify_refill_gaps(zero_verify_events)
+                    avg_zero_refill_gap = zero_verify_events["hours_since_refill"].dropna().mean() if not zero_verify_events.empty else np.nan
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("Count Errors", len(disc_df))
             c3.metric("Zero Verify Events", len(zero_verify_events))
@@ -5111,7 +5135,7 @@ if _is_main:
             else:
                 st.success("✅ Zero discrepancies found!")
 
-            if not zero_verify_events.empty:
+            if run_zero_verify_watch and not zero_verify_events.empty:
                 st.subheader("Meds Verified As Zero")
                 st.caption("Verify Inventory rows where the counted quantity was entered as 0.")
                 st.dataframe(
@@ -5132,6 +5156,8 @@ if _is_main:
                         "prior_refill_users": st.column_config.TextColumn("Prior Refill Users"),
                     },
                 )
+            elif run_zero_verify_watch:
+                st.caption("No Verify Inventory transactions with quantity 0 were found in this window.")
 
     # 6. LOAD/UNLOAD
     elif selected_page == "🚚 Load/Unload":
