@@ -3632,6 +3632,7 @@ def render_page_links():
     safe_page_link("pages/⚖️_Workload_Capacity_Simulator.py", label="Ops Simulator", icon="⚖️")
 
     st.markdown('<div class="rx-nav-label">Operations</div>', unsafe_allow_html=True)
+    safe_page_link("pages/Outdate_Tracker.py", label="Outdate Tracker", icon="📦")
     safe_page_link("pages/🏥_Pharmacy_Workflow.py", label="Pharmacy Workflow", icon="🏥")
     safe_page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
     safe_page_link("pages/WCC.py", label="WCC", icon="🍼")
