@@ -470,6 +470,14 @@ def init_db():
         """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_page TEXT;""",
         """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_key TEXT;""",
         """ALTER TABLE management_coaching_notes ADD COLUMN IF NOT EXISTS source_payload_json TEXT;""",
+        """ALTER TABLE events ALTER COLUMN dt TYPE TIMESTAMP
+            USING NULLIF(dt::text, '')::timestamp;""",
+        """ALTER TABLE config_events ALTER COLUMN dt TYPE TIMESTAMP
+            USING NULLIF(dt::text, '')::timestamp;""",
+        """ALTER TABLE pharmacy_orders ALTER COLUMN dt TYPE TIMESTAMP
+            USING NULLIF(dt::text, '')::timestamp;""",
+        """ALTER TABLE audit_transaction_detail_rc ALTER COLUMN dt TYPE TIMESTAMP
+            USING NULLIF(dt::text, '')::timestamp;""",
         """CREATE UNIQUE INDEX IF NOT EXISTS idx_management_coaching_notes_source_key
             ON management_coaching_notes (source_key)
             WHERE source_key IS NOT NULL;""",
@@ -2324,7 +2332,7 @@ def load_data(start_date, end_date):
             e.med_id,
             e.med_desc,
             e.event_type,
-            e.dt,
+            e.dt::timestamp AS dt,
             e.qty,
             e.beginning_qty,
             e.ending_qty,
@@ -2334,16 +2342,16 @@ def load_data(start_date, end_date):
             e.pk
         FROM events e
         LEFT JOIN med_costs c ON UPPER(TRIM(e.med_id)) = UPPER(TRIM(c.med_id))
-        WHERE e.dt >= %s AND e.dt < %s
+        WHERE e.dt::timestamp >= %s AND e.dt::timestamp < %s
     """
     queries = {
         "events": """
             WITH audit_days AS (
                 SELECT DISTINCT
-                    dt::date AS d,
+                    dt::timestamp::date AS d,
                     UPPER(TRIM(station_name)) AS device
                 FROM audit_transaction_detail_rc
-                WHERE dt >= %s AND dt < %s
+                WHERE dt::timestamp >= %s AND dt::timestamp < %s
             ),
             audit_events AS (
                 SELECT
@@ -2352,7 +2360,7 @@ def load_data(start_date, end_date):
                     a.med_id,
                     a.med_desc,
                     a.transaction_type AS event_type,
-                    a.dt,
+                    a.dt::timestamp AS dt,
                     a.qty,
                     a.beginning_qty,
                     a.ending_qty,
@@ -2362,7 +2370,7 @@ def load_data(start_date, end_date):
                     a.pk
                 FROM audit_transaction_detail_rc a
                 LEFT JOIN med_costs c ON UPPER(TRIM(a.med_id)) = UPPER(TRIM(c.med_id))
-                WHERE a.dt >= %s AND a.dt < %s
+                WHERE a.dt::timestamp >= %s AND a.dt::timestamp < %s
             ),
             legacy_events AS (
                 SELECT
@@ -2371,7 +2379,7 @@ def load_data(start_date, end_date):
                     e.med_id,
                     e.med_desc,
                     e.event_type,
-                    e.dt,
+                    e.dt::timestamp AS dt,
                     e.qty,
                     e.beginning_qty,
                     e.ending_qty,
@@ -2381,11 +2389,11 @@ def load_data(start_date, end_date):
                     e.pk
                 FROM events e
                 LEFT JOIN med_costs c ON UPPER(TRIM(e.med_id)) = UPPER(TRIM(c.med_id))
-                WHERE e.dt >= %s AND e.dt < %s
+                WHERE e.dt::timestamp >= %s AND e.dt::timestamp < %s
                   AND NOT EXISTS (
                       SELECT 1
                       FROM audit_days ad
-                      WHERE ad.d = e.dt::date
+                      WHERE ad.d = e.dt::timestamp::date
                         AND ad.device = UPPER(TRIM(e.device))
                   )
             )
@@ -2396,11 +2404,11 @@ def load_data(start_date, end_date):
         "config": """
             SELECT pk, dt, user_name, device, med_id, location, action_type, activity_category, 
                    min_qty, max_qty, is_standard 
-            FROM config_events WHERE dt >= %s AND dt < %s
+            FROM config_events WHERE dt::timestamp >= %s AND dt::timestamp < %s
         """,
         "pharm": """
             SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
-            FROM pharmacy_orders WHERE dt >= %s AND dt < %s
+            FROM pharmacy_orders WHERE dt::timestamp >= %s AND dt::timestamp < %s
         """,
         "schedule": """
             SELECT pk, dt, day_name, staff_name, shift_type, assignment_type, note,
