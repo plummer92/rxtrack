@@ -3869,28 +3869,27 @@ def render_sidebar():
     today = date.today()
     min_selectable_date = min(min_db, today)
     max_selectable_date = max(max_db, today)
-    present_dates = get_present_dates(min_db, max_db)
-    latest_activity_date = max((d for d in present_dates if d <= today), default=None)
+    latest_activity_date = max_db if max_db and max_db <= today else today
     default_analysis_date = latest_activity_date or (max_db if max_db and max_db <= today else today)
 
     if 'start_date' not in st.session_state:
         st.session_state.start_date = default_analysis_date
     if 'end_date' not in st.session_state:
         st.session_state.end_date = default_analysis_date
+    if 'applied_start_date' not in st.session_state:
+        st.session_state.applied_start_date = st.session_state.start_date
+    if 'applied_end_date' not in st.session_state:
+        st.session_state.applied_end_date = st.session_state.end_date
     if 'rxtrack_sidebar_filter_mode' not in st.session_state:
         st.session_state.rxtrack_sidebar_filter_mode = "Day"
-    selected_window_has_data = any(
-        st.session_state.start_date <= d <= st.session_state.end_date
-        for d in present_dates
-    )
-    if latest_activity_date and not selected_window_has_data:
-        st.session_state.start_date = default_analysis_date
-        st.session_state.end_date = default_analysis_date
-        st.session_state["rxtrack_sidebar_day"] = default_analysis_date
     st.session_state.start_date = min(max(st.session_state.start_date, min_selectable_date), max_selectable_date)
     st.session_state.end_date = min(max(st.session_state.end_date, min_selectable_date), max_selectable_date)
+    st.session_state.applied_start_date = min(max(st.session_state.applied_start_date, min_selectable_date), max_selectable_date)
+    st.session_state.applied_end_date = min(max(st.session_state.applied_end_date, min_selectable_date), max_selectable_date)
     if st.session_state.start_date > st.session_state.end_date:
         st.session_state.end_date = st.session_state.start_date
+    if st.session_state.applied_start_date > st.session_state.applied_end_date:
+        st.session_state.applied_end_date = st.session_state.applied_start_date
 
     with st.sidebar:
         st.markdown("""
@@ -3966,13 +3965,7 @@ def render_sidebar():
             st.session_state.end_date = week_start + timedelta(days=6)
 
         else:
-            if (
-                "rxtrack_sidebar_day" not in st.session_state
-                or (
-                    latest_activity_date
-                    and st.session_state["rxtrack_sidebar_day"] not in present_dates
-                )
-            ):
+            if "rxtrack_sidebar_day" not in st.session_state:
                 st.session_state["rxtrack_sidebar_day"] = st.session_state.start_date
             single_day = st.date_input(
                 "Select Day:",
@@ -3982,6 +3975,22 @@ def render_sidebar():
             )
             st.session_state.start_date = single_day
             st.session_state.end_date = single_day
+
+        st.divider()
+        pending_window = (
+            st.session_state.start_date != st.session_state.applied_start_date
+            or st.session_state.end_date != st.session_state.applied_end_date
+        )
+        st.caption(
+            f"Applied window: {st.session_state.applied_start_date:%m/%d/%y} "
+            f"to {st.session_state.applied_end_date:%m/%d/%y}"
+        )
+        if pending_window:
+            st.warning("Date changed. Click Apply Analysis Window to load data for the new selection.")
+        if st.button("Apply Analysis Window", type="primary", disabled=not pending_window):
+            st.session_state.applied_start_date = st.session_state.start_date
+            st.session_state.applied_end_date = st.session_state.end_date
+            st.rerun()
 
         st.divider()
 
@@ -3996,17 +4005,18 @@ def render_sidebar():
             if min_db and max_db and min_db <= max_db:
                 delta = (max_db - min_db).days
                 cal_start = max_db - timedelta(days=90) if delta > 90 else min_db
-                present_dates = get_present_dates(cal_start, max_db)
-                cal_html = '<div class="cal-grid">'
-                curr = cal_start
-                while curr <= max_db:
-                    color = "cal-present" if curr in present_dates else "cal-missing"
-                    cal_html += f'<div class="cal-day {color}" title="{curr}"></div>'
-                    curr += timedelta(days=1)
-                cal_html += '</div>'
-                st.markdown(cal_html, unsafe_allow_html=True)
+                if st.button("Load 90-day data calendar"):
+                    present_dates = get_present_dates(cal_start, max_db)
+                    cal_html = '<div class="cal-grid">'
+                    curr = cal_start
+                    while curr <= max_db:
+                        color = "cal-present" if curr in present_dates else "cal-missing"
+                        cal_html += f'<div class="cal-day {color}" title="{curr}"></div>'
+                        curr += timedelta(days=1)
+                    cal_html += '</div>'
+                    st.markdown(cal_html, unsafe_allow_html=True)
 
-    return st.session_state.start_date, st.session_state.end_date
+    return st.session_state.applied_start_date, st.session_state.applied_end_date
 
 
 
