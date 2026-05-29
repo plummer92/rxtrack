@@ -249,6 +249,80 @@ def display_compound_med_name(values):
     return sorted(cleaned, key=lambda value: (len(value), value.casefold()))[0]
 
 
+def display_dose_number(value):
+    text = str(value or "").strip()
+    return text if text else "Batch"
+
+
+def workflow_segment_label(stage, activity, category):
+    stage_text = str(stage or "").strip()
+    activity_text = str(activity or "").strip()
+    category_text = str(category or "").strip()
+    stage_key = stage_text.casefold()
+    activity_key = activity_text.casefold()
+    category_key = category_text.casefold()
+
+    if "initial creation" in stage_key or "initial creation" in activity_key:
+        return "Batch/order entered in MedKeeper"
+    if "prepare" in stage_key or "prepare" in activity_key or "gather" in activity_key:
+        if category_key == "waiting":
+            return "Waiting before prepare"
+        if "gather" in activity_key:
+            return "Gathering components"
+        return "Active prepare work"
+    if "approve" in stage_key or "approve" in activity_key:
+        if category_key == "waiting":
+            return "Waiting for pharmacist approval"
+        return "Pharmacist approval work"
+    if "secondary" in stage_key or "verification" in stage_key or "post verification" in activity_key:
+        if category_key == "waiting":
+            return "Waiting for secondary approval"
+        return "Secondary approval work"
+    if "component" in stage_key or "component" in activity_key:
+        if category_key == "waiting":
+            return "Waiting for component check"
+        return "Component check work"
+    if category_text and activity_text:
+        return f"{category_text}: {activity_text}"
+    return activity_text or stage_text or "Workflow segment"
+
+
+def format_timeline_time(value):
+    dt = pd.to_datetime(value, errors="coerce")
+    if pd.isna(dt):
+        return ""
+    return dt.strftime("%H:%M")
+
+
+def build_workflow_timeline_lines(timeline_df):
+    if timeline_df.empty:
+        return []
+
+    rows = timeline_df.sort_values(["start_dt", "stop_dt", "stage", "activity"], na_position="last").copy()
+    start_time = format_timeline_time(rows["start_dt"].iloc[0])
+    dose_label = display_dose_number(rows["dose_number"].iloc[0]) if "dose_number" in rows.columns else "Batch"
+    created_word = "Batch" if dose_label == "Batch" else "Order"
+    lines = [f"{start_time}  {created_word} entered / created in MedKeeper"]
+
+    for _, row in rows.iterrows():
+        minutes_value = pd.to_numeric(row.get("total_duration_minutes"), errors="coerce")
+        if pd.isna(minutes_value) or minutes_value < 0.5:
+            continue
+        label = row.get("timing_label") or workflow_segment_label(
+            row.get("stage"), row.get("activity"), row.get("category")
+        )
+        if label == "Batch/order entered in MedKeeper":
+            continue
+        start = format_timeline_time(row.get("start_dt"))
+        stop = format_timeline_time(row.get("stop_dt"))
+        if start and stop:
+            lines.append(f"{start} -> {stop}  {label}: {minutes_value:.1f} min")
+        elif start:
+            lines.append(f"{start}  {label}: {minutes_value:.1f} min")
+
+    return lines
+
+
 def build_medkeeper_phase_timing(workflow_df):
     if workflow_df.empty:
         return pd.DataFrame()
@@ -296,6 +370,7 @@ def build_medkeeper_phase_timing(workflow_df):
         row = {
             "order_lot_number": keys[0],
             "dose_number": keys[1],
+            "dose_display": display_dose_number(keys[1]),
             "drug_name": keys[2],
             "prepared_by": pick_user(group, status_map["started_prepare"], "prepared_by"),
             "approved_by": pick_user(group, status_map["started_approve"], "approved_by"),
@@ -1749,6 +1824,11 @@ else:
         st.warning("Workflow detail is loaded, but no expected MedKeeper status or Waiting/Working timing rows were found in the selected range.")
     else:
         wf_timing = wf[timing_status].copy()
+        wf_timing["dose_display"] = wf_timing["dose_number"].apply(display_dose_number)
+        wf_timing["timing_label"] = wf_timing.apply(
+            lambda row: workflow_segment_label(row.get("stage"), row.get("activity"), row.get("category")),
+            axis=1,
+        )
         working = wf_timing[wf_timing["category"].eq("Working")].copy()
         waiting = wf_timing[wf_timing["category"].eq("Waiting")].copy()
         workflow_orders = (
@@ -1857,7 +1937,7 @@ else:
                     "work columns measure time spent inside the active step."
                 )
                 phase_cols = [
-                    "order_lot_number", "dose_number", "drug_name", "event_sequence", "prepared_by", "approved_by",
+                    "order_lot_number", "dose_display", "drug_name", "event_sequence", "prepared_by", "approved_by",
                     "initial_creation", "ready_component_check", "started_component_check",
                     "ready_prepare", "started_prepare", "ready_approve", "started_approve",
                     "ready_post_label", "started_post_label", "completed",
@@ -1872,6 +1952,7 @@ else:
                     width="stretch",
                     hide_index=True,
                     column_config={
+                        "dose_display": st.column_config.TextColumn("Dose / Batch"),
                         "initial_creation": st.column_config.DatetimeColumn("1. Initial Creation", format="MM/DD/YY HH:mm"),
                         "ready_component_check": st.column_config.DatetimeColumn("2a. Ready Component Check", format="MM/DD/YY HH:mm"),
                         "started_component_check": st.column_config.DatetimeColumn("2b. Started Component Check", format="MM/DD/YY HH:mm"),
@@ -2058,26 +2139,75 @@ else:
             if not lot_options:
                 st.info("No order/lot values are available in the workflow detail rows.")
             else:
+                timeline_summary_rows = []
+                for keys, group in wf_timing.groupby(["order_lot_number", "dose_display", "drug_name"], dropna=False):
+                    group_sorted = group.sort_values(["start_dt", "stop_dt", "stage", "activity"], na_position="last")
+                    timeline_summary_rows.append(
+                        {
+                            "order_lot_number": keys[0],
+                            "dose_display": keys[1],
+                            "drug_name": keys[2],
+                            "start_dt": group_sorted["start_dt"].min(),
+                            "stop_dt": group_sorted["stop_dt"].max(),
+                            "working_minutes": group_sorted.loc[
+                                group_sorted["category"].eq("Working"), "total_duration_minutes"
+                            ].sum(),
+                            "waiting_minutes": group_sorted.loc[
+                                group_sorted["category"].eq("Waiting"), "total_duration_minutes"
+                            ].sum(),
+                            "timeline": "\n".join(build_workflow_timeline_lines(group_sorted)),
+                        }
+                    )
+                timeline_summary = pd.DataFrame(timeline_summary_rows)
+                if not timeline_summary.empty:
+                    st.markdown("**Timeline Summary by Med / Batch**")
+                    st.dataframe(
+                        timeline_summary.sort_values("start_dt", na_position="last"),
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "start_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
+                            "stop_dt": st.column_config.DatetimeColumn("Last Event", format="MM/DD/YY HH:mm"),
+                            "dose_display": st.column_config.TextColumn("Dose / Batch"),
+                            "working_minutes": st.column_config.NumberColumn("Working Min", format="%.1f"),
+                            "waiting_minutes": st.column_config.NumberColumn("Waiting Min", format="%.1f"),
+                            "timeline": st.column_config.TextColumn("Plain-English Timeline"),
+                        },
+                    )
+                    st.download_button(
+                        "Download timeline summary CSV",
+                        data=to_csv_bytes(timeline_summary),
+                        file_name="iv_room_workflow_timeline_summary.csv",
+                        mime="text/csv",
+                    )
+
                 selected_lot = st.selectbox("Order/Lot timeline", lot_options, index=0)
                 timeline_cols = [
-                    "start_dt", "stop_dt", "order_lot_number", "dose_number", "drug_name",
-                    "stage", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
+                    "start_dt", "stop_dt", "order_lot_number", "dose_display", "drug_name",
+                    "timing_label", "stage", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
                     "source_file",
                 ]
                 timeline = wf_timing[wf_timing["order_lot_number"].astype(str).eq(str(selected_lot))].copy()
+                timeline_sorted = timeline.sort_values(
+                    ["start_dt", "stop_dt", "stage", "activity"], na_position="last"
+                )
+                timeline_lines = build_workflow_timeline_lines(timeline_sorted)
+                if timeline_lines:
+                    st.markdown("**Plain-English Timeline**")
+                    st.code("\n".join(timeline_lines), language="text")
                 st.dataframe(
-                    timeline[[c for c in timeline_cols if c in timeline.columns]].sort_values(
-                        ["start_dt", "stage", "activity"], na_position="last"
-                    ),
+                    timeline_sorted[[c for c in timeline_cols if c in timeline_sorted.columns]],
                     width="stretch",
                     hide_index=True,
                     column_config={
                         "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
                         "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                        "dose_display": st.column_config.TextColumn("Dose / Batch"),
+                        "timing_label": st.column_config.TextColumn("Timing Meaning"),
                         "stage": st.column_config.TextColumn("Workflow Stage"),
                         "activity": st.column_config.TextColumn("Step"),
                         "category": st.column_config.TextColumn("Working vs Waiting"),
-                        "total_duration_minutes": st.column_config.NumberColumn("Minutes", format="%.2f"),
+                        "total_duration_minutes": st.column_config.NumberColumn("Segment Minutes", format="%.2f"),
                     },
                 )
 
