@@ -284,10 +284,14 @@ def workflow_segment_label(stage, activity, category):
         if category_key == "waiting":
             return "Waiting for secondary approval"
         return "Secondary approval work"
+    if "scan product" in activity_key or "image preparation" in activity_key:
+        if category_key == "waiting":
+            return "Waiting to start scan/image prep"
+        return "Scan/image prep work"
     if "component" in stage_key or "component" in activity_key:
         if category_key == "waiting":
-            return "Waiting for component check"
-        return "Component check work"
+            return "Waiting for component step"
+        return "Component step work"
     if category_text and activity_text:
         return f"{category_text}: {activity_text}"
     return activity_text or stage_text or "Workflow segment"
@@ -297,6 +301,8 @@ def workflow_stage_display(stage, activity):
     activity_key = str(activity or "").strip().casefold()
     if "post verification" in activity_key or "post-verification" in activity_key:
         return "Post Verification Label"
+    if "scan product" in activity_key or "image preparation" in activity_key:
+        return "Scan/Image Prep"
     return str(stage or "").strip() or "Unknown"
 
 
@@ -304,7 +310,7 @@ def format_timeline_time(value):
     dt = pd.to_datetime(value, errors="coerce")
     if pd.isna(dt):
         return ""
-    return dt.strftime("%H:%M")
+    return dt.strftime("%H:%M:%S")
 
 
 def build_workflow_timeline_lines(timeline_df):
@@ -2143,16 +2149,16 @@ else:
                     hide_index=True,
                     column_config={
                         "dose_display": st.column_config.TextColumn("Dose / Batch"),
-                        "initial_creation": st.column_config.DatetimeColumn("1. Initial Creation", format="MM/DD/YY HH:mm"),
-                        "ready_component_check": st.column_config.DatetimeColumn("2a. Ready Component Check", format="MM/DD/YY HH:mm"),
-                        "started_component_check": st.column_config.DatetimeColumn("2b. Started Component Check", format="MM/DD/YY HH:mm"),
-                        "ready_prepare": st.column_config.DatetimeColumn("3a. Ready Prepare", format="MM/DD/YY HH:mm"),
-                        "started_prepare": st.column_config.DatetimeColumn("3b. Started Prepare", format="MM/DD/YY HH:mm"),
-                        "ready_approve": st.column_config.DatetimeColumn("4a. Ready Approve", format="MM/DD/YY HH:mm"),
-                        "started_approve": st.column_config.DatetimeColumn("4b. Started Approve", format="MM/DD/YY HH:mm"),
-                        "ready_post_label": st.column_config.DatetimeColumn("5a. Ready Secondary/Post Verify", format="MM/DD/YY HH:mm"),
-                        "started_post_label": st.column_config.DatetimeColumn("5b. Started Secondary/Post Verify", format="MM/DD/YY HH:mm"),
-                        "completed": st.column_config.DatetimeColumn("6. Completed", format="MM/DD/YY HH:mm"),
+                        "initial_creation": st.column_config.DatetimeColumn("1. Initial Creation", format="MM/DD/YY HH:mm:ss"),
+                        "ready_component_check": st.column_config.DatetimeColumn("2a. Ready Scan/Image Prep", format="MM/DD/YY HH:mm:ss"),
+                        "started_component_check": st.column_config.DatetimeColumn("2b. Started Scan/Image Prep", format="MM/DD/YY HH:mm:ss"),
+                        "ready_prepare": st.column_config.DatetimeColumn("3a. Ready Prepare", format="MM/DD/YY HH:mm:ss"),
+                        "started_prepare": st.column_config.DatetimeColumn("3b. Started Prepare", format="MM/DD/YY HH:mm:ss"),
+                        "ready_approve": st.column_config.DatetimeColumn("4a. Ready Approve", format="MM/DD/YY HH:mm:ss"),
+                        "started_approve": st.column_config.DatetimeColumn("4b. Started Approve", format="MM/DD/YY HH:mm:ss"),
+                        "ready_post_label": st.column_config.DatetimeColumn("5a. Ready Post Verify Label", format="MM/DD/YY HH:mm:ss"),
+                        "started_post_label": st.column_config.DatetimeColumn("5b. Started Post Verify Label", format="MM/DD/YY HH:mm:ss"),
+                        "completed": st.column_config.DatetimeColumn("6. Completed", format="MM/DD/YY HH:mm:ss"),
                         "queue_to_prep_minutes": st.column_config.NumberColumn("Queue to Prep Min", format="%.1f"),
                         "component_check_minutes": st.column_config.NumberColumn("Component Check Min", format="%.1f"),
                         "tech_prep_minutes": st.column_config.NumberColumn("Tech Prep Min", format="%.1f"),
@@ -2356,8 +2362,8 @@ else:
                         width="stretch",
                         hide_index=True,
                         column_config={
-                            "start_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm"),
-                            "stop_dt": st.column_config.DatetimeColumn("Last Event", format="MM/DD/YY HH:mm"),
+                            "start_dt": st.column_config.DatetimeColumn("Started", format="MM/DD/YY HH:mm:ss"),
+                            "stop_dt": st.column_config.DatetimeColumn("Last Event", format="MM/DD/YY HH:mm:ss"),
                             "dose_display": st.column_config.TextColumn("Dose / Batch"),
                             "working_minutes": st.column_config.NumberColumn("Working Min", format="%.1f"),
                             "waiting_minutes": st.column_config.NumberColumn("Waiting Min", format="%.1f"),
@@ -2451,8 +2457,8 @@ else:
                         width="stretch",
                         hide_index=True,
                         column_config={
-                            "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
-                            "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                            "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm:ss"),
+                            "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm:ss"),
                             "dose_display": st.column_config.TextColumn("Dose / Batch"),
                             "timing_label": st.column_config.TextColumn("Timing Meaning"),
                             "stage_display": st.column_config.TextColumn("Workflow Stage"),
