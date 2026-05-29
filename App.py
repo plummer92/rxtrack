@@ -3554,7 +3554,7 @@ def get_management_password():
     """Return the configured management password without exposing it in the UI."""
     env_password = os.environ.get("RXTRACK_MANAGEMENT_PASSWORD") or os.environ.get("MANAGEMENT_PASSWORD")
     if env_password:
-        return str(env_password)
+        return str(env_password).strip()
 
     secret_paths = [
         ("management", "password"),
@@ -3564,14 +3564,14 @@ def get_management_password():
         try:
             value = st.secrets.get(section, {}).get(key)
             if value:
-                return str(value)
+                return str(value).strip()
         except Exception:
             pass
 
     try:
         value = st.secrets.get("management_password")
         if value:
-            return str(value)
+            return str(value).strip()
     except Exception:
         pass
     return "1234"
@@ -3581,7 +3581,7 @@ def get_app_password():
     """Return the optional app-wide password used for public deployments."""
     env_password = os.environ.get("RXTRACK_APP_PASSWORD") or os.environ.get("APP_PASSWORD")
     if env_password:
-        return str(env_password)
+        return str(env_password).strip()
 
     secret_paths = [
         ("rxtrack", "app_password"),
@@ -3591,14 +3591,14 @@ def get_app_password():
         try:
             value = st.secrets.get(section, {}).get(key)
             if value:
-                return str(value)
+                return str(value).strip()
         except Exception:
             pass
 
     try:
         value = st.secrets.get("app_password")
         if value:
-            return str(value)
+            return str(value).strip()
     except Exception:
         pass
     return None
