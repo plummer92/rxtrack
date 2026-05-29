@@ -1,3 +1,4 @@
+import html
 import pandas as pd
 import plotly.express as px
 import re
@@ -332,6 +333,177 @@ def build_workflow_timeline_lines(timeline_df):
             lines.append(f"{start}  {label}: {minutes_value:.1f} min")
 
     return lines
+
+
+def timeline_visual_segments(timeline_df):
+    if timeline_df.empty:
+        return []
+
+    rows = timeline_df.sort_values(["start_dt", "stop_dt", "stage", "activity"], na_position="last").copy()
+    segments = []
+    first_start = rows["start_dt"].iloc[0]
+    start_time = format_timeline_time(first_start)
+    dose_label = display_dose_number(rows["dose_number"].iloc[0]) if "dose_number" in rows.columns else "Batch"
+    created_word = "Batch" if dose_label == "Batch" else "Order"
+    segments.append(
+        {
+            "label": f"{created_word} created",
+            "time": start_time,
+            "minutes": "",
+            "category": "Created",
+            "stage": "Initial Creation",
+        }
+    )
+
+    for _, row in rows.iterrows():
+        label = row.get("timing_label") or workflow_segment_label(
+            row.get("stage"), row.get("activity"), row.get("category")
+        )
+        if label == "Batch/order entered in MedKeeper":
+            continue
+        minutes_value = pd.to_numeric(row.get("total_duration_minutes"), errors="coerce")
+        if pd.isna(minutes_value) or minutes_value <= 0:
+            continue
+        start = format_timeline_time(row.get("start_dt"))
+        stop = format_timeline_time(row.get("stop_dt"))
+        time_text = f"{start} - {stop}" if start and stop else start
+        segments.append(
+            {
+                "label": label,
+                "time": time_text,
+                "minutes": f"{minutes_value:.1f} min",
+                "category": str(row.get("category") or ""),
+                "stage": workflow_stage_display(row.get("stage"), row.get("activity")),
+            }
+        )
+
+    return segments
+
+
+def render_workflow_stepper(timeline_df):
+    segments = timeline_visual_segments(timeline_df)
+    if not segments:
+        return
+
+    parts = []
+    for idx, segment in enumerate(segments):
+        category_key = str(segment["category"]).casefold()
+        if category_key == "waiting":
+            class_name = "waiting"
+        elif category_key == "working":
+            class_name = "working"
+        elif category_key == "created":
+            class_name = "created"
+        else:
+            class_name = "other"
+        parts.append(
+            f"""
+            <div class="iv-step {class_name}">
+                <div class="iv-dot"></div>
+                <div class="iv-time">{html.escape(str(segment["time"]))}</div>
+                <div class="iv-label">{html.escape(str(segment["label"]))}</div>
+                <div class="iv-min">{html.escape(str(segment["minutes"]))}</div>
+                <div class="iv-stage">{html.escape(str(segment["stage"]))}</div>
+            </div>
+            """
+        )
+        if idx < len(segments) - 1:
+            parts.append('<div class="iv-arrow">&rarr;</div>')
+
+    st.markdown(
+        f"""
+        <style>
+        .iv-timeline-wrap {{
+            overflow-x: auto;
+            padding: 0.35rem 0 0.85rem 0;
+        }}
+        .iv-timeline {{
+            display: flex;
+            align-items: stretch;
+            gap: 0.45rem;
+            min-width: max-content;
+        }}
+        .iv-step {{
+            width: 178px;
+            border: 1px solid rgba(49, 51, 63, 0.18);
+            border-radius: 8px;
+            padding: 0.65rem 0.7rem;
+            background: rgba(250, 250, 250, 0.95);
+            box-shadow: 0 1px 2px rgba(49, 51, 63, 0.08);
+        }}
+        .iv-step.waiting {{ border-top: 5px solid #f59e0b; }}
+        .iv-step.working {{ border-top: 5px solid #0ea5e9; }}
+        .iv-step.created {{ border-top: 5px solid #64748b; }}
+        .iv-step.other {{ border-top: 5px solid #94a3b8; }}
+        .iv-dot {{
+            width: 13px;
+            height: 13px;
+            border-radius: 999px;
+            background: #64748b;
+            margin-bottom: 0.35rem;
+        }}
+        .iv-step.waiting .iv-dot {{ background: #f59e0b; }}
+        .iv-step.working .iv-dot {{ background: #0ea5e9; }}
+        .iv-time {{
+            font-size: 0.78rem;
+            color: #475569;
+            white-space: nowrap;
+            margin-bottom: 0.25rem;
+        }}
+        .iv-label {{
+            font-weight: 700;
+            font-size: 0.9rem;
+            line-height: 1.18;
+            color: #111827;
+            min-height: 2.1rem;
+        }}
+        .iv-min {{
+            margin-top: 0.45rem;
+            font-size: 1.05rem;
+            font-weight: 800;
+            color: #0f172a;
+        }}
+        .iv-stage {{
+            margin-top: 0.25rem;
+            font-size: 0.72rem;
+            color: #64748b;
+        }}
+        .iv-arrow {{
+            display: flex;
+            align-items: center;
+            color: #64748b;
+            font-size: 1.5rem;
+            padding: 0 0.1rem;
+        }}
+        </style>
+        <div class="iv-timeline-wrap">
+            <div class="iv-timeline">
+                {''.join(parts)}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def build_workflow_timeline_chart(timeline_df):
+    if timeline_df.empty:
+        return pd.DataFrame()
+
+    chart_df = timeline_df.copy()
+    chart_df["start_dt"] = pd.to_datetime(chart_df["start_dt"], errors="coerce")
+    chart_df["stop_dt"] = pd.to_datetime(chart_df["stop_dt"], errors="coerce")
+    chart_df["total_duration_minutes"] = pd.to_numeric(chart_df["total_duration_minutes"], errors="coerce")
+    chart_df = chart_df[
+        chart_df["start_dt"].notna()
+        & chart_df["stop_dt"].notna()
+        & chart_df["total_duration_minutes"].gt(0)
+    ].copy()
+    if chart_df.empty:
+        return chart_df
+    chart_df["timeline_axis"] = "Workflow"
+    chart_df["timing_label"] = chart_df["timing_label"].fillna("").astype(str)
+    return chart_df
 
 
 def build_medkeeper_phase_timing(workflow_df):
@@ -2207,6 +2379,42 @@ else:
                     ["start_dt", "stop_dt", "stage", "activity"], na_position="last"
                 )
                 timeline_lines = build_workflow_timeline_lines(timeline_sorted)
+                render_workflow_stepper(timeline_sorted)
+                chart_df = build_workflow_timeline_chart(timeline_sorted)
+                if not chart_df.empty:
+                    fig_timeline = px.timeline(
+                        chart_df,
+                        x_start="start_dt",
+                        x_end="stop_dt",
+                        y="timeline_axis",
+                        color="category",
+                        text="timing_label",
+                        color_discrete_map={
+                            "Waiting": "#f59e0b",
+                            "Working": "#0ea5e9",
+                            "Unknown": "#94a3b8",
+                        },
+                        hover_data={
+                            "drug_name": True,
+                            "stage_display": True,
+                            "activity": True,
+                            "timing_label": True,
+                            "total_duration_minutes": ":.1f",
+                            "prepared_by": True,
+                            "approved_by": True,
+                            "timeline_axis": False,
+                        },
+                    )
+                    fig_timeline.update_traces(textposition="inside", insidetextanchor="middle")
+                    fig_timeline.update_layout(
+                        height=230,
+                        margin=dict(l=10, r=10, t=10, b=10),
+                        xaxis_title=None,
+                        yaxis_title=None,
+                        legend_title_text=None,
+                    )
+                    fig_timeline.update_yaxes(visible=False)
+                    st.plotly_chart(fig_timeline, width="stretch")
                 if timeline_lines:
                     st.markdown("**Plain-English Timeline**")
                     st.code("\n".join(timeline_lines), language="text")
