@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 from sqlalchemy import text
 
 import App
@@ -410,12 +411,15 @@ def render_workflow_stepper(timeline_df):
         if idx < len(segments) - 1:
             parts.append('<div class="iv-arrow">&rarr;</div>')
 
-    st.markdown(
-        f"""
+    flow_html = f"""
         <style>
+        body {{
+            margin: 0;
+            font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }}
         .iv-timeline-wrap {{
             overflow-x: auto;
-            padding: 0.35rem 0 0.85rem 0;
+            padding: 0.35rem 0.1rem 0.85rem 0.1rem;
         }}
         .iv-timeline {{
             display: flex;
@@ -481,9 +485,8 @@ def render_workflow_stepper(timeline_df):
                 {''.join(parts)}
             </div>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """
+    components.html(flow_html, height=190, scrolling=True)
 
 
 def build_workflow_timeline_chart(timeline_df):
