@@ -3637,6 +3637,7 @@ def render_page_links():
     safe_page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
     safe_page_link("pages/WCC.py", label="WCC", icon="🍼")
     safe_page_link("pages/Device_Utilization.py", label="Device Utilization", icon="📟")
+    safe_page_link("pages/Zero_Verify_Watch.py", label="Zero Verify Watch", icon="🔎")
     safe_page_link("pages/🌙_Cartfill_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
     safe_page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")
     safe_page_link("pages/🗑️_Return_Bin_Tracker.py", label="Return Bin & Cassettes", icon="🗑️")
@@ -4938,7 +4939,9 @@ if _is_main:
                 st.info("Summary loaded. Turn on detailed overview sections to run the heavier charts and drilldowns.")
                 st.stop()
 
-            run_zero_verify_watch = st.checkbox(
+            run_zero_verify_watch = False
+            if False:
+                st.checkbox(
                 "Run Zero Verify Watch",
                 value=False,
                 help="Runs the heavier refill-history lookup only when you need the zero-verify root-cause view.",
@@ -5002,7 +5005,7 @@ if _is_main:
             elif run_zero_verify_watch:
                 st.caption("Zero Verify Watch: no Verify Inventory transactions with quantity 0 in this window.")
             else:
-                st.caption("Zero Verify Watch is available on demand for this date range.")
+                st.page_link("pages/Zero_Verify_Watch.py", label="Open Zero Verify Watch", icon="🔎")
 
             st.divider()
 
