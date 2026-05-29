@@ -223,6 +223,32 @@ def recipe_review_date(value):
     return parsed.date()
 
 
+MED_STRENGTH_PATTERN = re.compile(
+    r"(?ix)"
+    r"\b\d+(?:\.\d+)?\s*"
+    r"(?:mcg|mg|g|kg|units?|unit|iu|meq|mmol|mol|ml|l|%)"
+    r"(?:\s*/\s*\d+(?:\.\d+)?\s*(?:mcg|mg|g|kg|units?|unit|iu|meq|mmol|mol|ml|l|%))?\b"
+)
+
+
+def normalize_compound_med_name(value):
+    text = str(value or "").strip()
+    if not text:
+        return "Unknown medication"
+    text = re.sub(r"\([^)]*\)", " ", text)
+    text = MED_STRENGTH_PATTERN.sub(" ", text)
+    text = re.sub(r"\b(?:dose|bag|syringe|ivpb|inj|injection)\s*#?\d+\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip(" -,/").casefold()
+    return text or str(value or "").strip().casefold()
+
+
+def display_compound_med_name(values):
+    cleaned = [str(value or "").strip() for value in values if str(value or "").strip()]
+    if not cleaned:
+        return "Unknown medication"
+    return sorted(cleaned, key=lambda value: (len(value), value.casefold()))[0]
+
+
 def build_medkeeper_phase_timing(workflow_df):
     if workflow_df.empty:
         return pd.DataFrame()
@@ -241,6 +267,8 @@ def build_medkeeper_phase_timing(workflow_df):
 
     status_map = {
         "initial_creation": "Initial Creation",
+        "ready_component_check": "Ready for ComponentCheck",
+        "started_component_check": "Started ComponentCheck",
         "ready_prepare": "Ready for Scan Product and Image Preparation",
         "started_prepare": "Started Scan Product and Image Preparation",
         "ready_approve": "Ready for Approve",
@@ -283,6 +311,7 @@ def build_medkeeper_phase_timing(workflow_df):
             return (end - start).total_seconds() / 60
 
         row["queue_to_prep_minutes"] = minutes("ready_prepare", "started_prepare")
+        row["component_check_minutes"] = minutes("started_component_check", "ready_prepare")
         row["tech_prep_minutes"] = minutes("started_prepare", "ready_approve")
         row["pharmacist_wait_minutes"] = minutes("ready_approve", "started_approve")
         row["pharmacist_check_minutes"] = minutes("started_approve", "ready_post_label")
@@ -295,6 +324,10 @@ def build_medkeeper_phase_timing(workflow_df):
                 row["post_verification_minutes"],
             ]
             if value is not None
+        )
+        row["event_sequence"] = (
+            "Initial Creation -> Component Check -> Prepare -> Approve -> "
+            "Secondary Approval / Post Verification -> Completed"
         )
         rows.append(row)
 
@@ -675,8 +708,14 @@ top_preparer = (
     .sort_values(["preparations", "iv_orders"], ascending=False)
 )
 top_compound = (
-    filtered.groupby("drug_name", as_index=False)
-    .agg(preparations=("num_preparations", "sum"), iv_orders=("pk", "count"))
+    filtered.assign(compound_med_key=filtered["drug_name"].apply(normalize_compound_med_name))
+    .groupby("compound_med_key", as_index=False)
+    .agg(
+        drug_name=("drug_name", display_compound_med_name),
+        preparations=("num_preparations", "sum"),
+        iv_orders=("pk", "count"),
+        dose_variants=("dose_number", "nunique"),
+    )
     .sort_values(["preparations", "iv_orders"], ascending=False)
 )
 long_tat_rows = pd.DataFrame()
@@ -697,8 +736,9 @@ if not workflow_filtered.empty and "drug_name" in workflow_filtered.columns:
     step_source["workflow_step_name"] = step_source["workflow_step_name"].fillna("").astype(str).str.strip()
     step_source = step_source[step_source["drug_name"].ne("") & step_source["workflow_step_name"].ne("")]
     if not step_source.empty:
+        step_source["compound_med_key"] = step_source["drug_name"].apply(normalize_compound_med_name)
         recipe_steps = (
-            step_source.groupby("drug_name", as_index=False)
+            step_source.groupby("compound_med_key", as_index=False)
             .agg(workflow_steps_seen=("workflow_step_name", lambda s: " -> ".join(dict.fromkeys(s.tolist()))))
         )
 
@@ -706,11 +746,15 @@ st.subheader("Patient-Specific Recipe Log Starter")
 if patient_specific.empty:
     st.info("No patient-specific non-batch compounds are in the current filter window.")
 else:
+    patient_specific["compound_med_key"] = patient_specific["drug_name"].apply(normalize_compound_med_name)
     recipe_top = (
-        patient_specific.groupby("drug_name", as_index=False)
+        patient_specific.groupby("compound_med_key", as_index=False)
         .agg(
+            drug_name=("drug_name", display_compound_med_name),
             iv_orders=("pk", "count"),
             preparations=("num_preparations", "sum"),
+            dose_variants=("dose_number", "nunique"),
+            dose_examples=("dose_number", lambda s: ", ".join(sorted({str(v).strip() for v in s if str(v).strip()})[:5])),
             first_seen=("order_dt", "min"),
             last_seen=("order_dt", "max"),
             median_tat_minutes=("prepare_tat_minutes", "median"),
@@ -720,14 +764,20 @@ else:
     )
     recipe_top.insert(0, "rank", range(1, len(recipe_top) + 1))
     if not recipe_steps.empty:
-        recipe_top = recipe_top.merge(recipe_steps, on="drug_name", how="left")
+        recipe_top = recipe_top.merge(recipe_steps, on="compound_med_key", how="left")
     else:
         recipe_top["workflow_steps_seen"] = ""
     if not recipe_log.empty:
+        recipe_log_rollup = recipe_log.copy()
+        recipe_log_rollup["compound_med_key"] = recipe_log_rollup["drug_name"].apply(normalize_compound_med_name)
+        recipe_log_rollup = (
+            recipe_log_rollup.sort_values("last_reviewed", ascending=False, na_position="last")
+            .drop_duplicates("compound_med_key")
+        )
         recipe_top = recipe_top.merge(
-            recipe_log[
+            recipe_log_rollup[
                 [
-                    "drug_name", "recipe_status", "epic_recipe_text", "base_solution", "additives_components",
+                    "compound_med_key", "recipe_status", "epic_recipe_text", "base_solution", "additives_components",
                     "recipe_source", "supplies_needed", "step_1", "step_2", "step_3", "step_4",
                     "labeling_notes", "verification_notes", "stability_bud_source",
                     "no_epic_cnr_record", "approved_by", "last_reviewed",
@@ -750,7 +800,7 @@ else:
     recipe_top["no_epic_cnr_record"] = recipe_top["no_epic_cnr_record"].fillna(False).astype(bool)
 
     st.caption(
-        "Ranks patient-specific, non-batch compounds by preparation volume and shows saved recipe-log status."
+        "Ranks patient-specific, non-batch compounds by unique medication. Dose numbers are rolled together so the same med does not consume multiple Top 100 rows."
     )
     st.dataframe(
         recipe_top,
@@ -764,6 +814,7 @@ else:
             "saved_recipe": st.column_config.CheckboxColumn("Saved"),
             "median_tat_minutes": st.column_config.NumberColumn("Median TAT Min", format="%.1f"),
             "preparations": st.column_config.NumberColumn("Preparations", format="%.0f"),
+            "dose_variants": st.column_config.NumberColumn("Dose Variants", format="%d"),
         },
     )
     st.download_button(
@@ -1725,11 +1776,12 @@ else:
                 how="all",
             )
             if not phase_ready.empty:
-                p1, p2, p3, p4 = st.columns(4)
+                p1, p2, p3, p4, p5 = st.columns(5)
                 p1.metric("Median Queue to Prep", f"{phase_ready['queue_to_prep_minutes'].median():.1f} min")
-                p2.metric("Median Tech Prep", f"{phase_ready['tech_prep_minutes'].median():.1f} min")
-                p3.metric("Median Pharmacist Check", f"{phase_ready['pharmacist_check_minutes'].median():.1f} min")
-                p4.metric("Median Total Elapsed", f"{phase_ready['total_elapsed_minutes'].median():.1f} min")
+                p2.metric("Median Component Check", f"{phase_ready['component_check_minutes'].median():.1f} min")
+                p3.metric("Median Tech Prep", f"{phase_ready['tech_prep_minutes'].median():.1f} min")
+                p4.metric("Median Pharmacist Check", f"{phase_ready['pharmacist_check_minutes'].median():.1f} min")
+                p5.metric("Median Total Elapsed", f"{phase_ready['total_elapsed_minutes'].median():.1f} min")
 
         stage_summary = pd.DataFrame()
         if not wf_timing.empty:
@@ -1796,12 +1848,16 @@ else:
                 st.info("No MedKeeper phase rows matched the expected status names in this range.")
             else:
                 st.caption(
-                    "This view uses exact status transitions: Initial Creation, Ready/Started Scan Product and Image Preparation, "
-                    "Ready/Started Approve, Ready/Started Post Verification Label, and Completed."
+                    "Read the workflow left to right: Initial Creation -> Component Check -> Prepare -> Approve -> "
+                    "Secondary Approval / Post Verification -> Completed. Queue columns measure waiting between events; "
+                    "work columns measure time spent inside the active step."
                 )
                 phase_cols = [
-                    "order_lot_number", "dose_number", "drug_name", "prepared_by", "approved_by",
-                    "queue_to_prep_minutes", "tech_prep_minutes", "pharmacist_wait_minutes",
+                    "order_lot_number", "dose_number", "drug_name", "event_sequence", "prepared_by", "approved_by",
+                    "initial_creation", "ready_component_check", "started_component_check",
+                    "ready_prepare", "started_prepare", "ready_approve", "started_approve",
+                    "ready_post_label", "started_post_label", "completed",
+                    "queue_to_prep_minutes", "component_check_minutes", "tech_prep_minutes", "pharmacist_wait_minutes",
                     "pharmacist_check_minutes", "post_verification_minutes", "hands_on_minutes",
                     "total_elapsed_minutes",
                 ]
@@ -1812,7 +1868,18 @@ else:
                     width="stretch",
                     hide_index=True,
                     column_config={
+                        "initial_creation": st.column_config.DatetimeColumn("1. Initial Creation", format="MM/DD/YY HH:mm"),
+                        "ready_component_check": st.column_config.DatetimeColumn("2a. Ready Component Check", format="MM/DD/YY HH:mm"),
+                        "started_component_check": st.column_config.DatetimeColumn("2b. Started Component Check", format="MM/DD/YY HH:mm"),
+                        "ready_prepare": st.column_config.DatetimeColumn("3a. Ready Prepare", format="MM/DD/YY HH:mm"),
+                        "started_prepare": st.column_config.DatetimeColumn("3b. Started Prepare", format="MM/DD/YY HH:mm"),
+                        "ready_approve": st.column_config.DatetimeColumn("4a. Ready Approve", format="MM/DD/YY HH:mm"),
+                        "started_approve": st.column_config.DatetimeColumn("4b. Started Approve", format="MM/DD/YY HH:mm"),
+                        "ready_post_label": st.column_config.DatetimeColumn("5a. Ready Secondary/Post Verify", format="MM/DD/YY HH:mm"),
+                        "started_post_label": st.column_config.DatetimeColumn("5b. Started Secondary/Post Verify", format="MM/DD/YY HH:mm"),
+                        "completed": st.column_config.DatetimeColumn("6. Completed", format="MM/DD/YY HH:mm"),
                         "queue_to_prep_minutes": st.column_config.NumberColumn("Queue to Prep Min", format="%.1f"),
+                        "component_check_minutes": st.column_config.NumberColumn("Component Check Min", format="%.1f"),
                         "tech_prep_minutes": st.column_config.NumberColumn("Tech Prep Min", format="%.1f"),
                         "pharmacist_wait_minutes": st.column_config.NumberColumn("Pharm Wait Min", format="%.1f"),
                         "pharmacist_check_minutes": st.column_config.NumberColumn("Pharm Check Min", format="%.1f"),
