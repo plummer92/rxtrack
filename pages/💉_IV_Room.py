@@ -783,7 +783,7 @@ else:
                     "no_epic_cnr_record", "approved_by", "last_reviewed",
                 ]
             ],
-            on="drug_name",
+            on="compound_med_key",
             how="left",
         )
     else:
