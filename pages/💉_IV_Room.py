@@ -2371,71 +2371,96 @@ else:
                         mime="text/csv",
                     )
 
-                selected_lot = st.selectbox("Order/Lot timeline", lot_options, index=0)
-                timeline_cols = [
-                    "start_dt", "stop_dt", "order_lot_number", "dose_display", "drug_name",
-                    "timing_label", "stage_display", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
-                    "source_file",
-                ]
-                timeline = wf_timing[wf_timing["order_lot_number"].astype(str).eq(str(selected_lot))].copy()
-                timeline_sorted = timeline.sort_values(
-                    ["start_dt", "stop_dt", "stage", "activity"], na_position="last"
+                drug_options = sorted(wf_timing["drug_name"].dropna().astype(str).unique().tolist())
+                selected_drug = st.selectbox("Medication timeline", drug_options, index=0)
+                drug_timelines = (
+                    timeline_summary[timeline_summary["drug_name"].astype(str).eq(str(selected_drug))].copy()
+                    if not timeline_summary.empty
+                    else pd.DataFrame()
                 )
-                timeline_lines = build_workflow_timeline_lines(timeline_sorted)
-                render_workflow_stepper(timeline_sorted)
-                chart_df = build_workflow_timeline_chart(timeline_sorted)
-                if not chart_df.empty:
-                    fig_timeline = px.timeline(
-                        chart_df,
-                        x_start="start_dt",
-                        x_end="stop_dt",
-                        y="timeline_axis",
-                        color="category",
-                        text="timing_label",
-                        color_discrete_map={
-                            "Waiting": "#f59e0b",
-                            "Working": "#0ea5e9",
-                            "Unknown": "#94a3b8",
-                        },
-                        hover_data={
-                            "drug_name": True,
-                            "stage_display": True,
-                            "activity": True,
-                            "timing_label": True,
-                            "total_duration_minutes": ":.1f",
-                            "prepared_by": True,
-                            "approved_by": True,
-                            "timeline_axis": False,
+                if drug_timelines.empty:
+                    st.info("No workflow timeline rows are available for the selected medication.")
+                else:
+                    drug_timelines = drug_timelines.sort_values("start_dt", na_position="last")
+                    drug_timelines["timeline_choice"] = drug_timelines.apply(
+                        lambda row: (
+                            f"{row['dose_display']} | {row['order_lot_number']} | "
+                            f"{pd.to_datetime(row['start_dt']).strftime('%m/%d %H:%M') if pd.notna(row['start_dt']) else 'No start'}"
+                        ),
+                        axis=1,
+                    )
+                    selected_choice = st.selectbox(
+                        "Dose / batch instance",
+                        drug_timelines["timeline_choice"].tolist(),
+                        index=0,
+                    )
+                    selected_lot = drug_timelines.loc[
+                        drug_timelines["timeline_choice"].eq(selected_choice), "order_lot_number"
+                    ].iloc[0]
+                    timeline_cols = [
+                        "start_dt", "stop_dt", "order_lot_number", "dose_display", "drug_name",
+                        "timing_label", "stage_display", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
+                        "source_file",
+                    ]
+                    timeline = wf_timing[wf_timing["order_lot_number"].astype(str).eq(str(selected_lot))].copy()
+                    timeline_sorted = timeline.sort_values(
+                        ["start_dt", "stop_dt", "stage", "activity"], na_position="last"
+                    )
+                    timeline_lines = build_workflow_timeline_lines(timeline_sorted)
+                    render_workflow_stepper(timeline_sorted)
+                    chart_df = build_workflow_timeline_chart(timeline_sorted)
+                    if not chart_df.empty:
+                        fig_timeline = px.timeline(
+                            chart_df,
+                            x_start="start_dt",
+                            x_end="stop_dt",
+                            y="timeline_axis",
+                            color="category",
+                            text="timing_label",
+                            color_discrete_map={
+                                "Waiting": "#f59e0b",
+                                "Working": "#0ea5e9",
+                                "Unknown": "#94a3b8",
+                            },
+                            hover_data={
+                                "drug_name": True,
+                                "stage_display": True,
+                                "activity": True,
+                                "timing_label": True,
+                                "total_duration_minutes": ":.1f",
+                                "prepared_by": True,
+                                "approved_by": True,
+                                "timeline_axis": False,
+                            },
+                        )
+                        fig_timeline.update_traces(textposition="inside", insidetextanchor="middle")
+                        fig_timeline.update_layout(
+                            height=230,
+                            margin=dict(l=10, r=10, t=10, b=10),
+                            xaxis_title=None,
+                            yaxis_title=None,
+                            legend_title_text=None,
+                        )
+                        fig_timeline.update_yaxes(visible=False)
+                        st.plotly_chart(fig_timeline, width="stretch")
+                    if timeline_lines:
+                        st.markdown("**Plain-English Timeline**")
+                        st.code("\n".join(timeline_lines), language="text")
+                    st.dataframe(
+                        timeline_sorted[[c for c in timeline_cols if c in timeline_sorted.columns]],
+                        width="stretch",
+                        hide_index=True,
+                        column_config={
+                            "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
+                            "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
+                            "dose_display": st.column_config.TextColumn("Dose / Batch"),
+                            "timing_label": st.column_config.TextColumn("Timing Meaning"),
+                            "stage_display": st.column_config.TextColumn("Workflow Stage"),
+                            "activity": st.column_config.TextColumn("Step"),
+                            "category": st.column_config.TextColumn("Working vs Waiting"),
+                            "total_duration_minutes": st.column_config.NumberColumn("Segment Minutes", format="%.2f"),
                         },
                     )
-                    fig_timeline.update_traces(textposition="inside", insidetextanchor="middle")
-                    fig_timeline.update_layout(
-                        height=230,
-                        margin=dict(l=10, r=10, t=10, b=10),
-                        xaxis_title=None,
-                        yaxis_title=None,
-                        legend_title_text=None,
-                    )
-                    fig_timeline.update_yaxes(visible=False)
-                    st.plotly_chart(fig_timeline, width="stretch")
-                if timeline_lines:
-                    st.markdown("**Plain-English Timeline**")
-                    st.code("\n".join(timeline_lines), language="text")
-                st.dataframe(
-                    timeline_sorted[[c for c in timeline_cols if c in timeline_sorted.columns]],
-                    width="stretch",
-                    hide_index=True,
-                    column_config={
-                        "start_dt": st.column_config.DatetimeColumn("Start", format="MM/DD/YY HH:mm"),
-                        "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
-                        "dose_display": st.column_config.TextColumn("Dose / Batch"),
-                        "timing_label": st.column_config.TextColumn("Timing Meaning"),
-                        "stage_display": st.column_config.TextColumn("Workflow Stage"),
-                        "activity": st.column_config.TextColumn("Step"),
-                        "category": st.column_config.TextColumn("Working vs Waiting"),
-                        "total_duration_minutes": st.column_config.NumberColumn("Segment Minutes", format="%.2f"),
-                    },
-                )
 
 st.subheader("User Shift Drilldown")
 user_candidates = set()
