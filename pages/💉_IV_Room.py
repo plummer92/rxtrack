@@ -264,6 +264,10 @@ def workflow_segment_label(stage, activity, category):
 
     if "initial creation" in stage_key or "initial creation" in activity_key:
         return "Batch/order entered in MedKeeper"
+    if "post verification" in activity_key or "post-verification" in activity_key:
+        if category_key == "waiting":
+            return "Waiting for post-verification label"
+        return "Post-verification label work"
     if "prepare" in stage_key or "prepare" in activity_key or "gather" in activity_key:
         if category_key == "waiting":
             return "Waiting before prepare"
@@ -285,6 +289,13 @@ def workflow_segment_label(stage, activity, category):
     if category_text and activity_text:
         return f"{category_text}: {activity_text}"
     return activity_text or stage_text or "Workflow segment"
+
+
+def workflow_stage_display(stage, activity):
+    activity_key = str(activity or "").strip().casefold()
+    if "post verification" in activity_key or "post-verification" in activity_key:
+        return "Post Verification Label"
+    return str(stage or "").strip() or "Unknown"
 
 
 def format_timeline_time(value):
@@ -1829,6 +1840,10 @@ else:
             lambda row: workflow_segment_label(row.get("stage"), row.get("activity"), row.get("category")),
             axis=1,
         )
+        wf_timing["stage_display"] = wf_timing.apply(
+            lambda row: workflow_stage_display(row.get("stage"), row.get("activity")),
+            axis=1,
+        )
         working = wf_timing[wf_timing["category"].eq("Working")].copy()
         waiting = wf_timing[wf_timing["category"].eq("Waiting")].copy()
         workflow_orders = (
@@ -1870,17 +1885,17 @@ else:
         stage_summary = pd.DataFrame()
         if not wf_timing.empty:
             stage_summary = (
-                wf_timing.groupby(["stage", "activity", "category"], as_index=False)
+                wf_timing.groupby(["stage_display", "activity", "category"], as_index=False)
                 .agg(
                     rows=("pk", "count"),
                     total_minutes=("total_duration_minutes", "sum"),
                     median_minutes=("total_duration_minutes", "median"),
                     p90_minutes=("total_duration_minutes", lambda s: s.quantile(0.90)),
                 )
-                .sort_values(["stage", "category", "total_minutes"], ascending=[True, True, False])
+                .sort_values(["stage_display", "category", "total_minutes"], ascending=[True, True, False])
                 .rename(
                     columns={
-                        "stage": "Workflow Stage",
+                        "stage_display": "Workflow Stage",
                         "activity": "Step",
                         "category": "Working vs Waiting",
                         "rows": "Rows",
@@ -2184,7 +2199,7 @@ else:
                 selected_lot = st.selectbox("Order/Lot timeline", lot_options, index=0)
                 timeline_cols = [
                     "start_dt", "stop_dt", "order_lot_number", "dose_display", "drug_name",
-                    "timing_label", "stage", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
+                    "timing_label", "stage_display", "activity", "category", "total_duration_minutes", "prepared_by", "approved_by",
                     "source_file",
                 ]
                 timeline = wf_timing[wf_timing["order_lot_number"].astype(str).eq(str(selected_lot))].copy()
@@ -2204,7 +2219,7 @@ else:
                         "stop_dt": st.column_config.DatetimeColumn("Stop", format="MM/DD/YY HH:mm"),
                         "dose_display": st.column_config.TextColumn("Dose / Batch"),
                         "timing_label": st.column_config.TextColumn("Timing Meaning"),
-                        "stage": st.column_config.TextColumn("Workflow Stage"),
+                        "stage_display": st.column_config.TextColumn("Workflow Stage"),
                         "activity": st.column_config.TextColumn("Step"),
                         "category": st.column_config.TextColumn("Working vs Waiting"),
                         "total_duration_minutes": st.column_config.NumberColumn("Segment Minutes", format="%.2f"),
