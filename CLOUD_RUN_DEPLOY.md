@@ -28,12 +28,27 @@ gcloud secrets create management-password --replication-policy="automatic"
 gcloud secrets versions add management-password --data-file=-
 ```
 
+Recommended app-wide password for public Cloud Run URLs:
+
+```powershell
+gcloud secrets create rxtrack-app-password --replication-policy="automatic"
+gcloud secrets versions add rxtrack-app-password --data-file=-
+```
+
+Paste the app password, then press `Ctrl+Z` and Enter in PowerShell.
+
 ## 3. Deploy a test copy first
 
 From the repo folder:
 
 ```powershell
 gcloud run deploy rxtrack-test --source . --region us-central1 --allow-unauthenticated --memory 2Gi --cpu 1 --timeout 3600 --set-secrets NEON_DB_URL=neon-db-url:latest
+```
+
+Recommended password-protected test deploy:
+
+```powershell
+gcloud run deploy rxtrack-test --source . --region us-central1 --allow-unauthenticated --memory 2Gi --cpu 1 --timeout 3600 --set-secrets NEON_DB_URL=neon-db-url:latest,APP_PASSWORD=rxtrack-app-password:latest
 ```
 
 If you created the optional management password secret, use:
@@ -50,6 +65,12 @@ Only after the test copy is boring and reliable:
 
 ```powershell
 gcloud run deploy rxtrack --source . --region us-central1 --allow-unauthenticated --memory 2Gi --cpu 1 --timeout 3600 --set-secrets NEON_DB_URL=neon-db-url:latest
+```
+
+Recommended password-protected production deploy:
+
+```powershell
+gcloud run deploy rxtrack --source . --region us-central1 --allow-unauthenticated --memory 2Gi --cpu 1 --timeout 3600 --set-secrets NEON_DB_URL=neon-db-url:latest,APP_PASSWORD=rxtrack-app-password:latest
 ```
 
 Or with the optional management password secret:

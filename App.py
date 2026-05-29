@@ -3577,6 +3577,68 @@ def get_management_password():
     return "1234"
 
 
+def get_app_password():
+    """Return the optional app-wide password used for public deployments."""
+    env_password = os.environ.get("RXTRACK_APP_PASSWORD") or os.environ.get("APP_PASSWORD")
+    if env_password:
+        return str(env_password)
+
+    secret_paths = [
+        ("rxtrack", "app_password"),
+        ("app", "password"),
+    ]
+    for section, key in secret_paths:
+        try:
+            value = st.secrets.get(section, {}).get(key)
+            if value:
+                return str(value)
+        except Exception:
+            pass
+
+    try:
+        value = st.secrets.get("app_password")
+        if value:
+            return str(value)
+    except Exception:
+        pass
+    return None
+
+
+def app_access_unlocked():
+    return bool(st.session_state.get("_rxtrack_app_unlocked", False))
+
+
+def render_app_login():
+    password = get_app_password()
+    if not password or app_access_unlocked():
+        return True
+
+    st.markdown("## RxTrack")
+    st.caption("Enter the app password to continue.")
+    with st.form("rxtrack_app_login"):
+        entered = st.text_input("App password", type="password")
+        submitted = st.form_submit_button("Unlock")
+    if submitted:
+        if hmac.compare_digest(entered or "", password):
+            st.session_state["_rxtrack_app_unlocked"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
+def require_app_access():
+    if not render_app_login():
+        st.stop()
+
+
+def render_app_logout():
+    if get_app_password() and app_access_unlocked():
+        if st.button("Lock App", key="rxtrack_app_logout"):
+            st.session_state["_rxtrack_app_unlocked"] = False
+            st.rerun()
+
+
 def management_access_unlocked():
     return bool(st.session_state.get("_rxtrack_management_unlocked", False))
 
@@ -3667,8 +3729,9 @@ def render_page_links():
 
 def render_sidebar_chrome():
     """Use this on pages that need the shared nav styling without the date filters."""
-    init_db()
     apply_global_styles()
+    require_app_access()
+    init_db()
     with st.sidebar:
         st.markdown("""
             <div class="rx-shell">
@@ -3680,6 +3743,7 @@ def render_sidebar_chrome():
         st.divider()
         render_management_sidebar_gate()
         render_management_logout()
+        render_app_logout()
         render_demo_mode_toggle()
         render_ui_debug_toggle()
 
@@ -3865,8 +3929,9 @@ def render_ui_debugger(page_name, intro_mode=None, extra=None):
 # --- SHARED SIDEBAR RENDERER ---
 def render_sidebar():
     """Call this at the top of any page to always show the date range sidebar."""
-    init_db()
     apply_global_styles()
+    require_app_access()
+    init_db()
     n_events, n_pharm, n_sched, n_att, min_db, max_db = get_stats_range()
     today = date.today()
     min_selectable_date = min(min_db, today)
@@ -3905,6 +3970,7 @@ def render_sidebar():
         st.divider()
         render_management_sidebar_gate()
         render_management_logout()
+        render_app_logout()
         render_demo_mode_toggle()
         render_ui_debug_toggle()
         st.markdown("### Analysis Window")
@@ -4038,6 +4104,7 @@ if _is_main:
         initial_sidebar_state="expanded"
     )
     apply_global_styles()
+    require_app_access()
 
     # Suppress DB/Pandas warnings
     warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
