@@ -389,8 +389,10 @@ def load_device_care_area_map(start, end):
 
 def has_active_order_value(value):
     text_value = str(value or "").strip()
-    if not text_value or text_value.lower() in {"0", "0.0", "false", "no", "none", "nan"}:
+    if not text_value or text_value.lower() in {"0", "0.0", "false", "n", "no", "none", "nan"}:
         return False
+    if text_value.lower() in {"1", "1.0", "true", "y", "yes"}:
+        return True
     numeric_parts = pd.Series([text_value]).str.extractall(r"(-?\d+(?:\.\d+)?)")[0]
     if not numeric_parts.empty:
         numbers = pd.to_numeric(numeric_parts, errors="coerce").dropna()
@@ -428,7 +430,7 @@ def attach_inventory_timeline_to_unloads(unloads, inventory_timeline):
             enriched_rows.append(out)
             continue
 
-        eligible = snapshots[snapshots["snapshot_ts"].le(unload_dt)]
+        eligible = snapshots[snapshots["snapshot_date"].le(unload_dt.date())]
         if eligible.empty:
             enriched_rows.append(out)
             continue
@@ -963,13 +965,13 @@ else:
             "care_area_count": st.column_config.NumberColumn("Care Area Count", format="%d"),
             "care_area_options": "Care Area Options",
             "location": "Location",
-            "inventory_snapshot_ts": st.column_config.DatetimeColumn("Inventory Snapshot", format="MM/DD/YY HH:mm"),
-            "prior_inventory_snapshot_ts": st.column_config.DatetimeColumn("Prior Snapshot", format="MM/DD/YY HH:mm"),
-            "days_unused_at_unload": st.column_config.NumberColumn("Days Unused at Unload", format="%.0f"),
-            "active_orders_at_unload": "Active Orders at Unload",
+            "inventory_snapshot_ts": st.column_config.DatetimeColumn("Matched Inventory Upload", format="MM/DD/YY HH:mm"),
+            "prior_inventory_snapshot_ts": st.column_config.DatetimeColumn("Prior Inventory Upload", format="MM/DD/YY HH:mm"),
+            "days_unused_at_unload": st.column_config.NumberColumn("Days Unused from Matched Snapshot", format="%.0f"),
+            "active_orders_at_unload": "Active Orders from Matched Snapshot",
             "prior_active_orders": "Prior Active Orders",
             "active_orders_went_away": "Orders Cleared",
-            "max_days_unused": st.column_config.NumberColumn("Max Days Unused", format="%.0f"),
+            "max_days_unused": st.column_config.NumberColumn("Max Days Unused in Window", format="%.0f"),
             "active_orders": "Active Orders",
             "pocket_locations": "Known Pockets",
             "outdate_tracking": "Outdate Tracking",
