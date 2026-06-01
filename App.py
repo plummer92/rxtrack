@@ -3699,6 +3699,7 @@ def render_page_links():
     safe_page_link("pages/💉_IV_Room.py", label="IV Room", icon="💉")
     safe_page_link("pages/WCC.py", label="WCC", icon="🍼")
     safe_page_link("pages/Device_Utilization.py", label="Device Utilization", icon="📟")
+    safe_page_link("pages/Pocket_Investigation.py", label="Pocket Investigation", icon="🕵️")
     safe_page_link("pages/Zero_Verify_Watch.py", label="Zero Verify Watch", icon="🔎")
     safe_page_link("pages/🌙_Cartfill_Optimizer.py", label="Cartfill Optimizer", icon="🌙")
     safe_page_link("pages/🔄_Return_Reconciliation.py", label="Return Reconciliation", icon="🔄")

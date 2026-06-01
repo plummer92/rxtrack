@@ -24,7 +24,6 @@ else:
     st.caption("Track usage, stockouts, and refill volume by device.")
 
 
-DEFAULT_CATHLAB_DEVICES = ["SJSCATHL8", "SJSCATHL12"]
 REFILL_PATTERN = r"restock|refill|\bload\b|replenish"
 REFILL_EXCLUDE_PATTERN = r"cancel|unload|empty|outdate"
 USAGE_PATTERN = r"remove|dispense|vend|deduct|withdraw|issue|administer"
@@ -615,7 +614,7 @@ def _suggest_reachable_refill_label(pressure_hour, blocked_start, blocked_end):
     if _is_blocked_hour(pressure_hour, blocked_start, blocked_end):
         pre_hour = max(int(blocked_start) - 1, 0)
         post_hour = int(blocked_end) % 24
-        return f"{pre_hour:02d}:00 top-off or {post_hour:02d}:00 post-case"
+        return f"{pre_hour:02d}:00 top-off or {post_hour:02d}:00 after access window"
     return f"{max(pressure_hour - 1, 0):02d}:00"
 
 
@@ -641,10 +640,12 @@ def _case_window_label(hour, blocked_start, blocked_end):
     if pd.isna(hour):
         return "Unknown"
     hour = int(hour)
+    if blocked_start == blocked_end:
+        return "All day"
     if _is_blocked_hour(hour, blocked_start, blocked_end):
-        return "During cases"
+        return "Limited access"
     if blocked_start < blocked_end:
-        return "Pre-case" if hour < blocked_start else "Post-case"
+        return "Before access window" if hour < blocked_start else "After access window"
     return "Open access"
 
 
@@ -765,8 +766,9 @@ def build_refill_time_suggestions(events, orders, audit_usage, blocked_start, bl
             "current_refill_pattern": current_refill_pattern,
             "rationale": (
                 f"{rationale_prefix}: peak usage/stockout pressure around {int(peak['hour']):02d}:00 "
-                f"from {', '.join(pressure_reasons)}. Room access limited {int(blocked_start):02d}:00-"
-                f"{int(blocked_end):02d}:00. Verified-zero rows ({verified_zero_total}) were not scored."
+                f"from {', '.join(pressure_reasons)}. Limited-access window "
+                f"{int(blocked_start):02d}:00-{int(blocked_end):02d}:00 "
+                f"({'off' if blocked_start == blocked_end else 'on'}). Verified-zero rows ({verified_zero_total}) were not scored."
             ),
         })
 
@@ -1048,14 +1050,14 @@ def build_twice_daily_optimizer(
                 "captured_unique_meds": covered_unique_meds,
                 "demand_capture_pct": demand_capture_pct,
                 "space_pressure_meds": space_pressure_meds,
-                "avg_1430_pull_lines": avg_pull_lines,
-                "avg_1430_pull_qty": avg_pull_qty,
-                "avg_1430_pull_span_min": avg_pull_span,
+                "avg_current_pull_lines": avg_pull_lines,
+                "avg_current_pull_qty": avg_pull_qty,
+                "avg_current_pull_span_min": avg_pull_span,
                 "why": (
                     f"{_hour_label(hour)} captures about {covered_usage_qty:.0f} usage qty "
                     f"({demand_capture_pct:.0f}% of selected-window usage) with {covered_unique_meds} meds touched. "
                     f"Prep would start around {_hour_label(pull_start_hour)} and meds would be staged about {staged_hours:.0f} hours. "
-                    f"Average current Cath Lab pull workload near 14:30 is {avg_pull_lines:.1f} lines / {avg_pull_qty:.1f} qty."
+                    f"Average current pull workload near the configured pull hour is {avg_pull_lines:.1f} lines / {avg_pull_qty:.1f} qty."
                 ),
             })
 
@@ -1264,12 +1266,7 @@ def build_recommendation_summary(selected_devices, current_summary, prior_summar
 
 
 candidate_devices = load_device_candidates()
-default_devices = [device for device in DEFAULT_CATHLAB_DEVICES if device in candidate_devices]
-if not default_devices:
-    default_devices = [
-        device for device in candidate_devices
-        if "CATH" in device and (device.endswith("8") or device.endswith("12") or "L8" in device or "L12" in device)
-    ][:2]
+default_devices = []
 
 with st.expander("Device selection", expanded=True):
     c1, c2 = st.columns([1, 2])
@@ -1300,7 +1297,7 @@ with st.expander("Device selection", expanded=True):
         selected_devices = st.multiselect(
             "Devices",
             options=device_options,
-            default=[d for d in default_devices if d in device_options],
+            default=[],
             key="device_utilization_devices",
         )
     selected_devices = [_clean_device_name(device) for device in selected_devices if _clean_device_name(device) in device_options]
@@ -1310,28 +1307,34 @@ if not selected_devices:
     st.warning("Choose at least one device to analyze.")
     st.stop()
 
-with st.expander("Cath Lab access assumptions", expanded=False):
+with st.expander("Access window assumptions", expanded=False):
+    access_limited = st.checkbox(
+        "Apply limited-access window",
+        value=False,
+        key="device_utilization_access_limited",
+        help="Turn this on only for areas where a room/procedure schedule limits when pharmacy can restock the device.",
+    )
     a1, a2 = st.columns(2)
     with a1:
-        blocked_start = st.number_input(
-            "Room limited-access start hour",
+        blocked_start_input = st.number_input(
+            "Limited-access start hour",
             min_value=0,
             max_value=23,
             value=7,
             step=1,
             key="device_utilization_blocked_start",
-            help="Default assumes scheduled Cath Lab procedure activity starts around 07:00.",
         )
     with a2:
-        blocked_end = st.number_input(
-            "Room limited-access end hour",
+        blocked_end_input = st.number_input(
+            "Limited-access end hour",
             min_value=0,
             max_value=23,
             value=17,
             step=1,
             key="device_utilization_blocked_end",
-            help="Default assumes the room is easier to access again around 17:00.",
         )
+    blocked_start = int(blocked_start_input) if access_limited else 0
+    blocked_end = int(blocked_end_input) if access_limited else 0
 
 with st.expander("Carousel pull/check workflow assumptions", expanded=False):
     w1, w2, w3, w4 = st.columns(4)
@@ -1379,23 +1382,23 @@ with st.expander("Carousel pull/check workflow assumptions", expanded=False):
 with st.expander("Twice-daily optimizer assumptions", expanded=False):
     o1, o2, o3 = st.columns(3)
     with o1:
-        cath_pull_hour = st.number_input(
-            "Current Cath Lab pull hour",
+        current_pull_hour = st.number_input(
+            "Current pull hour",
             min_value=0,
             max_value=23,
             value=14,
             step=1,
-            key="device_utilization_cath_pull_hour",
-            help="Used to estimate the current 14:30-ish Cath Lab pull workload from Pharmacy Orders.",
+            key="device_utilization_current_pull_hour",
+            help="Used to estimate the current scheduled pull workload from Pharmacy Orders.",
         )
     with o2:
-        cath_pull_window = st.number_input(
+        current_pull_window = st.number_input(
             "Pull hour window",
             min_value=0,
             max_value=4,
             value=1,
             step=1,
-            key="device_utilization_cath_pull_window",
+            key="device_utilization_current_pull_window",
             help="Includes Pyxis pull rows within this many hours of the current pull hour.",
         )
     with o3:
@@ -1488,8 +1491,8 @@ delivery_summary, delivery_by_hour, delivery_by_user = build_refill_delivery_pro
 med_signal_detail = build_med_signal_detail(events, orders, audit_usage, inventory, gap_df)
 pull_workload_summary, pull_workload_daily = build_pyxis_pull_workload(
     orders,
-    int(cath_pull_hour),
-    int(cath_pull_window),
+    int(current_pull_hour),
+    int(current_pull_window),
 )
 optimizer_plan = build_twice_daily_optimizer(
     selected_devices,
@@ -1538,7 +1541,7 @@ else:
 tab_recommendation, tab_trend, tab_case_window, tab_usage, tab_refill_times, tab_optimizer, tab_workflow, tab_zero_gap, tab_pull_miss, tab_weekend, tab_problem_meds, tab_inventory, tab_raw = st.tabs([
     "Recommendation",
     "Daily Trend",
-    "Case Window",
+    "Access Window",
     "Usage",
     "Optimal Refill Times",
     "Twice-Daily Optimizer",
@@ -1605,9 +1608,14 @@ with tab_trend:
 with tab_case_window:
     case_summary = build_case_window_summary(events, orders, audit_usage, int(blocked_start), int(blocked_end))
     if case_summary.empty:
-        st.info("No usage, refill, or stockout activity was found to split by case-window timing.")
+        st.info("No usage, refill, or stockout activity was found to split by access-window timing.")
     else:
-        st.caption(f"Pre-case, during cases, and post-case are based on limited-access hours {int(blocked_start):02d}:00-{int(blocked_end):02d}:00.")
+        if int(blocked_start) == int(blocked_end):
+            st.caption("Limited-access filtering is off, so activity is grouped as All day.")
+        else:
+            st.caption(
+                f"Access-window groups are based on limited-access hours {int(blocked_start):02d}:00-{int(blocked_end):02d}:00."
+            )
         chart_cols = [col for col in ["usage_qty", "refill_qty", "stockout_orders"] if col in case_summary.columns]
         chart_data = case_summary.melt(["device", "case_window"], value_vars=chart_cols, var_name="measure", value_name="value")
         st.plotly_chart(
@@ -1692,7 +1700,7 @@ with tab_refill_times:
 with tab_optimizer:
     st.subheader("Twice-Daily Delivery Optimizer")
     st.caption(
-        "Scores possible second-delivery times using clinical usage pressure, cabinet space limits, current 14:30 Pyxis pull workload, "
+        "Scores possible second-delivery times using clinical usage pressure, cabinet space limits, current Pyxis pull workload, "
         "pull/check lead time, and staging risk. This is an explainable optimization model, not a black-box prediction."
     )
     if optimizer_plan.empty:
@@ -1714,9 +1722,9 @@ with tab_optimizer:
                 "captured_unique_meds": st.column_config.NumberColumn("Captured Meds", format="%d"),
                 "demand_capture_pct": st.column_config.NumberColumn("Demand Capture", format="%.0f%%"),
                 "space_pressure_meds": st.column_config.NumberColumn("Space-Pressure Meds", format="%d"),
-                "avg_1430_pull_lines": st.column_config.NumberColumn("Avg 14:30 Pull Lines", format="%.1f"),
-                "avg_1430_pull_qty": st.column_config.NumberColumn("Avg 14:30 Pull Qty", format="%.1f"),
-                "avg_1430_pull_span_min": st.column_config.NumberColumn("Avg Pull Span Min", format="%.1f"),
+                "avg_current_pull_lines": st.column_config.NumberColumn("Avg Current Pull Lines", format="%.1f"),
+                "avg_current_pull_qty": st.column_config.NumberColumn("Avg Current Pull Qty", format="%.1f"),
+                "avg_current_pull_span_min": st.column_config.NumberColumn("Avg Pull Span Min", format="%.1f"),
                 "why": st.column_config.TextColumn("Why"),
             },
         )
@@ -1731,14 +1739,14 @@ with tab_optimizer:
                 "staged_hours": st.column_config.NumberColumn("Staged Hours", format="%.0f"),
                 "captured_usage_qty": st.column_config.NumberColumn("Captured Usage Qty", format="%.0f"),
                 "demand_capture_pct": st.column_config.NumberColumn("Demand Capture", format="%.0f%%"),
-                "avg_1430_pull_lines": st.column_config.NumberColumn("Avg 14:30 Pull Lines", format="%.1f"),
+                "avg_current_pull_lines": st.column_config.NumberColumn("Avg Current Pull Lines", format="%.1f"),
             },
         )
 
     st.divider()
-    st.subheader("Current Cath Lab Pull Workload")
+    st.subheader("Current Pull Workload")
     st.caption(
-        f"Uses Pharmacy Orders marked as Pyxis pull within +/- {int(cath_pull_window)} hour(s) of {int(cath_pull_hour):02d}:00."
+        f"Uses Pharmacy Orders marked as Pyxis pull within +/- {int(current_pull_window)} hour(s) of {int(current_pull_hour):02d}:00."
     )
     if pull_workload_summary.empty:
         st.info("No Pyxis pull order rows matched the selected devices and current pull window.")
