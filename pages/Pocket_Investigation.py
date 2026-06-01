@@ -57,6 +57,72 @@ def load_devices():
     return sorted({device for device in devices if device})
 
 
+@st.cache_data(ttl=300)
+def load_device_pockets(device):
+    queries = [
+        (
+            "SELECT DISTINCT pocket_location AS pocket FROM device_inventory "
+            "WHERE UPPER(TRIM(device)) = :device AND pocket_location IS NOT NULL"
+        ),
+        (
+            "SELECT DISTINCT pocket_location AS pocket FROM device_inventory_history "
+            "WHERE UPPER(TRIM(device)) = :device AND pocket_location IS NOT NULL"
+        ),
+        (
+            "SELECT DISTINCT drawer_subdrawer_pocket AS pocket FROM audit_transaction_detail_rc "
+            "WHERE UPPER(TRIM(station_name)) = :device AND drawer_subdrawer_pocket IS NOT NULL"
+        ),
+    ]
+    frames = []
+    with engine.connect() as conn:
+        for query in queries:
+            try:
+                frames.append(pd.read_sql(text(query), conn, params={"device": device}))
+            except Exception:
+                continue
+    if not frames:
+        return []
+    pockets = pd.concat(frames, ignore_index=True)["pocket"].dropna().astype(str).str.strip()
+    return sorted({pocket for pocket in pockets if pocket}, key=str.casefold)
+
+
+@st.cache_data(ttl=300)
+def load_device_meds(device):
+    queries = [
+        (
+            "SELECT DISTINCT med_desc FROM device_inventory "
+            "WHERE UPPER(TRIM(device)) = :device AND med_desc IS NOT NULL"
+        ),
+        (
+            "SELECT DISTINCT med_desc FROM device_inventory_history "
+            "WHERE UPPER(TRIM(device)) = :device AND med_desc IS NOT NULL"
+        ),
+        (
+            "SELECT DISTINCT med_desc FROM audit_transaction_detail_rc "
+            "WHERE UPPER(TRIM(station_name)) = :device AND med_desc IS NOT NULL"
+        ),
+        (
+            "SELECT DISTINCT med_desc FROM events "
+            "WHERE UPPER(TRIM(device)) = :device AND med_desc IS NOT NULL"
+        ),
+        (
+            "SELECT DISTINCT med_desc FROM pharmacy_orders "
+            "WHERE UPPER(TRIM(destination)) = :device AND med_desc IS NOT NULL"
+        ),
+    ]
+    frames = []
+    with engine.connect() as conn:
+        for query in queries:
+            try:
+                frames.append(pd.read_sql(text(query), conn, params={"device": device}))
+            except Exception:
+                continue
+    if not frames:
+        return []
+    meds = pd.concat(frames, ignore_index=True)["med_desc"].dropna().astype(str).str.strip()
+    return sorted({med for med in meds if med}, key=str.casefold)
+
+
 def read_sql_safe(query, params):
     try:
         with engine.connect() as conn:
@@ -388,6 +454,14 @@ def build_pocket_users(audit_events):
     ).reset_index().sort_values(["pocket_events", "last_touch"], ascending=[False, False])
 
 
+def choose_from_lookup(label, options, key, other_placeholder):
+    choices = [""] + list(options) + ["Type manually..."]
+    choice = st.selectbox(label, choices, key=f"{key}_choice")
+    if choice == "Type manually...":
+        return st.text_input(label, value="", placeholder=other_placeholder, key=f"{key}_manual")
+    return choice
+
+
 def build_evidence_flags(chain, snapshots, expected_med, unexpected_med, discovery_dt):
     flags = []
     chain_before = chain[chain["dt"].le(discovery_dt)].copy() if not chain.empty else pd.DataFrame()
@@ -466,14 +540,28 @@ with st.expander("Investigation Setup", expanded=True):
         device_search = st.text_input("Filter device", value="", key="pocket_investigation_device_search").strip().upper()
         device_options = [device for device in devices if not device_search or device_search in device]
         selected_device = st.selectbox("Station / device", device_options or devices, key="pocket_investigation_device")
+        setup_device = clean_device(selected_device)
     with c2:
         discovery_date = st.date_input("Discovery date", value=date.today())
     with c3:
         discovery_time = st.time_input("Discovery time", value=time(8, 0))
 
+    pocket_options = load_device_pockets(setup_device)
+    med_options = load_device_meds(setup_device)
+
     d1, d2, d3 = st.columns([1, 1, 1])
     with d1:
-        pocket = st.text_input("Pocket / drawer / bin", value="", placeholder="Example: Drw 3 / SubDrw A / Pkt 2")
+        pocket_choices = ["All pockets"] + pocket_options + ["Type manually..."]
+        pocket_choice = st.selectbox("Pocket / drawer / bin", pocket_choices, key="pocket_investigation_pocket_choice")
+        if pocket_choice == "Type manually...":
+            pocket = st.text_input(
+                "Pocket / drawer / bin text",
+                value="",
+                placeholder="Example: Drw 3 / SubDrw A / Pkt 2",
+                key="pocket_investigation_pocket_manual",
+            )
+        else:
+            pocket = "" if pocket_choice == "All pockets" else pocket_choice
     with d2:
         lookback_days = st.number_input("Lookback days", min_value=1, max_value=180, value=45, step=1)
     with d3:
@@ -481,9 +569,19 @@ with st.expander("Investigation Setup", expanded=True):
 
     m1, m2 = st.columns(2)
     with m1:
-        expected_med = st.text_input("Expected med", value="", placeholder="Dobutamine 250")
+        expected_med = choose_from_lookup(
+            "Expected med",
+            med_options,
+            "pocket_investigation_expected_med",
+            "Dobutamine 250",
+        )
     with m2:
-        unexpected_med = st.text_input("Unexpected med", value="", placeholder="Med found in same pocket")
+        unexpected_med = choose_from_lookup(
+            "Unexpected med",
+            med_options,
+            "pocket_investigation_unexpected_med",
+            "Med found in same pocket",
+        )
 
 discovery_dt = datetime.combine(discovery_date, discovery_time)
 start_dt = discovery_dt - timedelta(days=int(lookback_days))
