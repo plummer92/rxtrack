@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from sqlalchemy import text
 import App
 from rxtrack_shared import (
     add_return_compare_qty,
@@ -216,6 +217,41 @@ def is_likely_bulk_package_return(df):
     return clean_bulk_count | buyer_overstock_return
 
 
+@st.cache_data(ttl=300)
+def load_unload_inventory_context(start, end):
+    try:
+        with engine.connect() as conn:
+            return pd.read_sql(
+                text(
+                    """
+                    SELECT
+                        UPPER(TRIM(device)) AS device,
+                        UPPER(TRIM(med_id)) AS med_id,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(pocket_location), ''), ', ') AS pocket_locations,
+                        MAX(days_unused) AS max_days_unused,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(outdate_tracking), ''), ', ') AS outdate_tracking,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(status), ''), ', ') AS inventory_status
+                    FROM (
+                        SELECT device, med_id, pocket_location, days_unused, outdate_tracking, status
+                        FROM device_inventory
+                        WHERE med_id IS NOT NULL
+                        UNION ALL
+                        SELECT device, med_id, pocket_location, days_unused, outdate_tracking, status
+                        FROM device_inventory_history
+                        WHERE snapshot_date BETWEEN :start_date AND :end_date
+                          AND med_id IS NOT NULL
+                    ) inv
+                    WHERE device IS NOT NULL
+                    GROUP BY UPPER(TRIM(device)), UPPER(TRIM(med_id))
+                    """
+                ),
+                conn,
+                params={"start_date": start, "end_date": end},
+            )
+    except Exception:
+        return pd.DataFrame()
+
+
 def split_returns_by_unload_timing(return_df, unload_df, match_window_hours=12):
     if (
         return_df.empty
@@ -348,6 +384,7 @@ detail_pharm_return = ensure_date_column(detail_pharm_return)
 detail_inv_moves    = ensure_date_column(detail_inv_moves)
 detail_restocks     = ensure_date_column(detail_restocks)
 detail_pyxis_reference_removals = ensure_date_column(detail_pyxis_reference_removals)
+inventory_context = load_unload_inventory_context(start_date, end_date)
 
 pharm_return, timing_excluded_returns = split_returns_by_unload_timing(
     pharm_return,
@@ -500,20 +537,118 @@ if user_unloads.empty:
 else:
     user_unloads = user_unloads.sort_values("dt", ascending=False)
     user_unloads = add_return_compare_qty(user_unloads, source="pyxis")
+    if not inventory_context.empty and {"device", "med_id"}.issubset(user_unloads.columns):
+        unload_keys = user_unloads.copy()
+        unload_keys["_device_key"] = unload_keys["device"].fillna("").astype(str).str.strip().str.upper()
+        unload_keys["_med_key"] = unload_keys["med_id"].fillna("").astype(str).str.strip().str.upper()
+        context_keys = inventory_context.copy()
+        context_keys["_device_key"] = context_keys["device"].fillna("").astype(str).str.strip().str.upper()
+        context_keys["_med_key"] = context_keys["med_id"].fillna("").astype(str).str.strip().str.upper()
+        user_unloads = unload_keys.merge(
+            context_keys.drop(columns=["device", "med_id"], errors="ignore"),
+            on=["_device_key", "_med_key"],
+            how="left",
+        ).drop(columns=["_device_key", "_med_key"], errors="ignore")
+
+    user_unloads["hour"] = pd.to_datetime(user_unloads["dt"], errors="coerce").dt.hour
+    user_unloads["unload_bucket"] = "Other unload"
+    if "event_type" in user_unloads.columns:
+        unload_text = user_unloads["event_type"].fillna("").astype(str)
+        user_unloads.loc[unload_text.str.contains("outdate|expire|28", case=False, regex=True, na=False), "unload_bucket"] = "Outdate / expiration signal"
+    if "max_days_unused" in user_unloads.columns:
+        days_unused = pd.to_numeric(user_unloads["max_days_unused"], errors="coerce")
+        user_unloads.loc[days_unused.ge(28), "unload_bucket"] = "28+ days unused signal"
+
     total_user_unload_qty = user_unloads["qty"].sum() if "qty" in user_unloads.columns else 0
     unique_unload_meds = user_unloads["med_id"].nunique() if "med_id" in user_unloads.columns else 0
     active_unload_days = user_unloads["date"].nunique() if "date" in user_unloads.columns else 0
+    unique_unload_devices = user_unloads["device"].nunique() if "device" in user_unloads.columns else 0
+    likely_28_day_rows = int(user_unloads["unload_bucket"].eq("28+ days unused signal").sum())
 
-    p1, p2, p3, p4 = st.columns(4)
+    p1, p2, p3, p4, p5, p6 = st.columns(6)
     p1.metric("Unload Rows", f"{len(user_unloads):,}")
     p2.metric("Unload Qty", f"{total_user_unload_qty:,.0f}")
     p3.metric("Unique Meds", f"{unique_unload_meds:,}")
-    p4.metric("Active Unload Days", f"{active_unload_days:,}")
+    p4.metric("Devices Hit", f"{unique_unload_devices:,}")
+    p5.metric("28+ Day Signals", f"{likely_28_day_rows:,}")
+    p6.metric("Active Days", f"{active_unload_days:,}")
+
+    if selected_unload_user != "All Users":
+        st.caption(
+            "Spike read: if rows are spread across many devices and mostly tagged as 28+ days unused, this looks like a route/backlog cleanup. "
+            "If it is concentrated in one or two devices or a small set of meds, investigate that cabinet/pocket instead."
+        )
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            by_device = user_unloads.groupby("device", dropna=False).agg(
+                unload_rows=("pk", "count"),
+                unload_qty=("qty", "sum"),
+                unique_meds=("med_id", "nunique"),
+                first_unload=("dt", "min"),
+                last_unload=("dt", "max"),
+            ).reset_index().sort_values(["unload_rows", "unload_qty"], ascending=[False, False])
+            st.markdown("**Devices driving the unloads**")
+            st.dataframe(
+                by_device,
+                width="stretch",
+                hide_index=True,
+                column_config={
+                    "first_unload": st.column_config.DatetimeColumn("First", format="HH:mm"),
+                    "last_unload": st.column_config.DatetimeColumn("Last", format="HH:mm"),
+                },
+            )
+        with a2:
+            by_hour = user_unloads.groupby("hour", dropna=False).agg(
+                unload_rows=("pk", "count"),
+                unload_qty=("qty", "sum"),
+                devices=("device", "nunique"),
+                unique_meds=("med_id", "nunique"),
+            ).reset_index().sort_values("hour")
+            st.markdown("**Unload timing**")
+            st.dataframe(by_hour, width="stretch", hide_index=True)
+        with a3:
+            by_bucket = user_unloads.groupby("unload_bucket", dropna=False).agg(
+                unload_rows=("pk", "count"),
+                unload_qty=("qty", "sum"),
+                devices=("device", "nunique"),
+                unique_meds=("med_id", "nunique"),
+            ).reset_index().sort_values("unload_rows", ascending=False)
+            st.markdown("**Why it may be high**")
+            st.dataframe(by_bucket, width="stretch", hide_index=True)
+
+        med_aggs = {
+            "unload_rows": ("pk", "count"),
+            "unload_qty": ("qty", "sum"),
+            "devices": ("device", "nunique"),
+        }
+        if "max_days_unused" in user_unloads.columns:
+            med_aggs["max_days_unused"] = ("max_days_unused", "max")
+        if "pocket_locations" in user_unloads.columns:
+            med_aggs["pocket_locations"] = (
+                "pocket_locations",
+                lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v).strip()}))[:300],
+            )
+        by_med = (
+            user_unloads.groupby(["med_id", "med_desc"], dropna=False)
+            .agg(**med_aggs)
+            .reset_index()
+            .sort_values(["unload_rows", "devices", "unload_qty"], ascending=[False, False, False])
+        )
+        st.markdown("**Meds driving the unloads**")
+        st.dataframe(
+            by_med.head(50),
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "max_days_unused": st.column_config.NumberColumn("Max Days Unused", format="%.0f"),
+            },
+        )
 
     unload_display_cols = [
         c for c in [
             "dt", "date", "user_name", "device", "event_type", "med_id",
-            "med_desc", "qty", "return_unit_note", "compare_qty", "beginning_qty", "ending_qty"
+            "med_desc", "qty", "return_unit_note", "compare_qty", "beginning_qty", "ending_qty",
+            "max_days_unused", "pocket_locations", "outdate_tracking", "unload_bucket"
         ]
         if c in user_unloads.columns
     ]
@@ -534,6 +669,10 @@ else:
             "compare_qty": st.column_config.NumberColumn("Compare Qty", format="%.2f"),
             "beginning_qty": st.column_config.NumberColumn("Beginning Qty", format="%.0f"),
             "ending_qty": st.column_config.NumberColumn("Ending Qty", format="%.0f"),
+            "max_days_unused": st.column_config.NumberColumn("Max Days Unused", format="%.0f"),
+            "pocket_locations": "Known Pockets",
+            "outdate_tracking": "Outdate Tracking",
+            "unload_bucket": "Spike Bucket",
         },
     )
 
