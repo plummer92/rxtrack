@@ -254,6 +254,130 @@ def load_unload_inventory_context(start, end):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_unload_inventory_timeline(start, end):
+    timeline_start = (pd.Timestamp(start) - pd.Timedelta(days=14)).date()
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                text(
+                    """
+                    SELECT
+                        snapshot_date::date AS snapshot_date,
+                        UPPER(TRIM(device)) AS device,
+                        UPPER(TRIM(med_id)) AS med_id,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(pocket_location), ''), ', ') AS pocket_locations,
+                        MAX(days_unused) AS days_unused,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(active_orders), ''), ', ') AS active_orders,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(outdate_tracking), ''), ', ') AS outdate_tracking,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(standard_stock), ''), ', ') AS standard_stock,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(status), ''), ', ') AS inventory_status
+                    FROM device_inventory_history
+                    WHERE snapshot_date BETWEEN :timeline_start AND :end_date
+                      AND device IS NOT NULL
+                      AND med_id IS NOT NULL
+                    GROUP BY snapshot_date::date, UPPER(TRIM(device)), UPPER(TRIM(med_id))
+                    UNION ALL
+                    SELECT
+                        COALESCE(snapshot_dt::date, CURRENT_DATE) AS snapshot_date,
+                        UPPER(TRIM(device)) AS device,
+                        UPPER(TRIM(med_id)) AS med_id,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(pocket_location), ''), ', ') AS pocket_locations,
+                        MAX(days_unused) AS days_unused,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(active_orders), ''), ', ') AS active_orders,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(outdate_tracking), ''), ', ') AS outdate_tracking,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(standard_stock), ''), ', ') AS standard_stock,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(status), ''), ', ') AS inventory_status
+                    FROM device_inventory
+                    WHERE device IS NOT NULL
+                      AND med_id IS NOT NULL
+                    GROUP BY COALESCE(snapshot_dt::date, CURRENT_DATE), UPPER(TRIM(device)), UPPER(TRIM(med_id))
+                    ORDER BY snapshot_date
+                    """
+                ),
+                conn,
+                params={"timeline_start": timeline_start, "end_date": end},
+            )
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.date
+    df["days_unused"] = pd.to_numeric(df["days_unused"], errors="coerce")
+    return df.dropna(subset=["snapshot_date"])
+
+
+def has_active_order_value(value):
+    text_value = str(value or "").strip()
+    if not text_value or text_value.lower() in {"0", "0.0", "false", "no", "none", "nan"}:
+        return False
+    numeric_parts = pd.Series([text_value]).str.extractall(r"(-?\d+(?:\.\d+)?)")[0]
+    if not numeric_parts.empty:
+        numbers = pd.to_numeric(numeric_parts, errors="coerce").dropna()
+        if not numbers.empty:
+            return bool(numbers.gt(0).any())
+    return True
+
+
+def attach_inventory_timeline_to_unloads(unloads, inventory_timeline):
+    if unloads.empty or inventory_timeline.empty or not {"device", "med_id", "date"}.issubset(unloads.columns):
+        return unloads
+
+    timeline = inventory_timeline.copy()
+    timeline["_device_key"] = timeline["device"].fillna("").astype(str).str.strip().str.upper()
+    timeline["_med_key"] = timeline["med_id"].fillna("").astype(str).str.strip().str.upper()
+    timeline = timeline.sort_values(["_device_key", "_med_key", "snapshot_date"])
+    timeline_lookup = {
+        key: group.reset_index(drop=True)
+        for key, group in timeline.groupby(["_device_key", "_med_key"], dropna=False)
+    }
+
+    enriched_rows = []
+    for _, row in unloads.iterrows():
+        out = row.to_dict()
+        device_key = str(row.get("device") or "").strip().upper()
+        med_key = str(row.get("med_id") or "").strip().upper()
+        unload_date = row.get("date")
+        if pd.isna(unload_date):
+            enriched_rows.append(out)
+            continue
+        unload_date = pd.Timestamp(unload_date).date()
+        snapshots = timeline_lookup.get((device_key, med_key))
+        if snapshots is None or snapshots.empty:
+            enriched_rows.append(out)
+            continue
+
+        eligible = snapshots[snapshots["snapshot_date"].le(unload_date)]
+        if eligible.empty:
+            enriched_rows.append(out)
+            continue
+        current = eligible.iloc[-1]
+        prior = eligible[eligible["snapshot_date"].lt(current["snapshot_date"])].tail(1)
+        prior_row = prior.iloc[0] if not prior.empty else None
+
+        active_orders_at_unload = current.get("active_orders")
+        prior_active_orders = prior_row.get("active_orders") if prior_row is not None else ""
+        active_at_unload = has_active_order_value(active_orders_at_unload)
+        active_prior = has_active_order_value(prior_active_orders)
+
+        out.update({
+            "inventory_snapshot_date": current.get("snapshot_date"),
+            "prior_inventory_snapshot_date": prior_row.get("snapshot_date") if prior_row is not None else pd.NaT,
+            "days_unused_at_unload": current.get("days_unused"),
+            "active_orders_at_unload": active_orders_at_unload,
+            "prior_active_orders": prior_active_orders,
+            "active_orders_present_at_unload": active_at_unload,
+            "active_orders_present_prior": active_prior,
+            "active_orders_went_away": active_prior and not active_at_unload,
+            "pocket_locations_at_unload": current.get("pocket_locations"),
+            "outdate_tracking_at_unload": current.get("outdate_tracking"),
+            "standard_stock_at_unload": current.get("standard_stock"),
+        })
+        enriched_rows.append(out)
+
+    return pd.DataFrame(enriched_rows)
+
+
 def split_returns_by_unload_timing(return_df, unload_df, match_window_hours=12):
     if (
         return_df.empty
@@ -387,6 +511,7 @@ detail_inv_moves    = ensure_date_column(detail_inv_moves)
 detail_restocks     = ensure_date_column(detail_restocks)
 detail_pyxis_reference_removals = ensure_date_column(detail_pyxis_reference_removals)
 inventory_context = load_unload_inventory_context(start_date, end_date)
+inventory_timeline = load_unload_inventory_timeline(start_date, end_date)
 
 pharm_return, timing_excluded_returns = split_returns_by_unload_timing(
     pharm_return,
@@ -539,6 +664,7 @@ if user_unloads.empty:
 else:
     user_unloads = user_unloads.sort_values("dt", ascending=False)
     user_unloads = add_return_compare_qty(user_unloads, source="pyxis")
+    user_unloads = attach_inventory_timeline_to_unloads(user_unloads, inventory_timeline)
     if not inventory_context.empty and {"device", "med_id"}.issubset(user_unloads.columns):
         unload_keys = user_unloads.copy()
         unload_keys["_device_key"] = unload_keys["device"].fillna("").astype(str).str.strip().str.upper()
@@ -557,24 +683,30 @@ else:
     if "event_type" in user_unloads.columns:
         unload_text = user_unloads["event_type"].fillna("").astype(str)
         user_unloads.loc[unload_text.str.contains("outdate|expire|28", case=False, regex=True, na=False), "unload_bucket"] = "Outdate / expiration signal"
-    if "max_days_unused" in user_unloads.columns:
-        days_unused = pd.to_numeric(user_unloads["max_days_unused"], errors="coerce")
+    if "days_unused_at_unload" in user_unloads.columns or "max_days_unused" in user_unloads.columns:
+        if "days_unused_at_unload" in user_unloads.columns:
+            days_unused = pd.to_numeric(user_unloads["days_unused_at_unload"], errors="coerce")
+        else:
+            days_unused = pd.to_numeric(user_unloads["max_days_unused"], errors="coerce")
         user_unloads.loc[days_unused.ge(28), "unload_bucket"] = "28+ days unused signal"
-        if "active_orders" in user_unloads.columns:
+        if "active_orders_present_at_unload" in user_unloads.columns:
+            has_active_order = user_unloads["active_orders_present_at_unload"].fillna(False).astype(bool)
+            went_away = user_unloads.get("active_orders_went_away", pd.Series(False, index=user_unloads.index)).fillna(False).astype(bool)
+            user_unloads.loc[days_unused.ge(28) & has_active_order, "unload_bucket"] = "28+ unused but active orders remained"
+            user_unloads.loc[days_unused.ge(28) & ~has_active_order & went_away, "unload_bucket"] = "28+ unused, orders cleared since prior snapshot"
+            user_unloads.loc[days_unused.ge(28) & ~has_active_order & ~went_away, "unload_bucket"] = "28+ unused, no active orders"
+        elif "active_orders" in user_unloads.columns:
             active_order_text = user_unloads["active_orders"].fillna("").astype(str).str.strip()
-            has_active_order = active_order_text.ne("") & ~active_order_text.str.fullmatch(
-                r"0|0\.0|false|no|none|nan",
-                case=False,
-            )
-            user_unloads.loc[days_unused.ge(28) & has_active_order, "unload_bucket"] = "28+ days unused with active orders"
-            user_unloads.loc[days_unused.ge(28) & ~has_active_order, "unload_bucket"] = "28+ days unused, no active orders"
+            has_active_order = active_order_text.apply(has_active_order_value)
+            user_unloads.loc[days_unused.ge(28) & has_active_order, "unload_bucket"] = "28+ unused but active orders remained"
+            user_unloads.loc[days_unused.ge(28) & ~has_active_order, "unload_bucket"] = "28+ unused, no active orders"
 
     total_user_unload_qty = user_unloads["qty"].sum() if "qty" in user_unloads.columns else 0
     unique_unload_meds = user_unloads["med_id"].nunique() if "med_id" in user_unloads.columns else 0
     active_unload_days = user_unloads["date"].nunique() if "date" in user_unloads.columns else 0
     unique_unload_devices = user_unloads["device"].nunique() if "device" in user_unloads.columns else 0
-    likely_28_day_rows = int(user_unloads["unload_bucket"].astype(str).str.contains("28\\+ days unused", regex=True, na=False).sum())
-    active_order_unloads = int(user_unloads["unload_bucket"].eq("28+ days unused with active orders").sum())
+    likely_28_day_rows = int(user_unloads["unload_bucket"].astype(str).str.contains(r"28\+.*unused", regex=True, na=False).sum())
+    active_order_unloads = int(user_unloads["unload_bucket"].eq("28+ unused but active orders remained").sum())
 
     p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
     p1.metric("Unload Rows", f"{len(user_unloads):,}")
@@ -635,11 +767,25 @@ else:
         }
         if "max_days_unused" in user_unloads.columns:
             med_aggs["max_days_unused"] = ("max_days_unused", "max")
+        if "days_unused_at_unload" in user_unloads.columns:
+            med_aggs["days_unused_at_unload"] = ("days_unused_at_unload", "max")
         if "pocket_locations" in user_unloads.columns:
             med_aggs["pocket_locations"] = (
                 "pocket_locations",
                 lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v).strip()}))[:300],
             )
+        if "active_orders_at_unload" in user_unloads.columns:
+            med_aggs["active_orders_at_unload"] = (
+                "active_orders_at_unload",
+                lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v).strip()}))[:300],
+            )
+        if "prior_active_orders" in user_unloads.columns:
+            med_aggs["prior_active_orders"] = (
+                "prior_active_orders",
+                lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v).strip()}))[:300],
+            )
+        if "active_orders_went_away" in user_unloads.columns:
+            med_aggs["orders_cleared_rows"] = ("active_orders_went_away", "sum")
         if "active_orders" in user_unloads.columns:
             med_aggs["active_orders"] = (
                 "active_orders",
@@ -665,6 +811,8 @@ else:
         c for c in [
             "dt", "date", "user_name", "device", "event_type", "med_id",
             "med_desc", "qty", "return_unit_note", "compare_qty", "beginning_qty", "ending_qty",
+            "inventory_snapshot_date", "days_unused_at_unload", "active_orders_at_unload",
+            "prior_inventory_snapshot_date", "prior_active_orders", "active_orders_went_away",
             "max_days_unused", "active_orders", "pocket_locations", "outdate_tracking", "standard_stock", "unload_bucket"
         ]
         if c in user_unloads.columns
@@ -686,6 +834,12 @@ else:
             "compare_qty": st.column_config.NumberColumn("Compare Qty", format="%.2f"),
             "beginning_qty": st.column_config.NumberColumn("Beginning Qty", format="%.0f"),
             "ending_qty": st.column_config.NumberColumn("Ending Qty", format="%.0f"),
+            "inventory_snapshot_date": st.column_config.DateColumn("Inventory Snapshot"),
+            "prior_inventory_snapshot_date": st.column_config.DateColumn("Prior Snapshot"),
+            "days_unused_at_unload": st.column_config.NumberColumn("Days Unused at Unload", format="%.0f"),
+            "active_orders_at_unload": "Active Orders at Unload",
+            "prior_active_orders": "Prior Active Orders",
+            "active_orders_went_away": "Orders Cleared",
             "max_days_unused": st.column_config.NumberColumn("Max Days Unused", format="%.0f"),
             "active_orders": "Active Orders",
             "pocket_locations": "Known Pockets",
