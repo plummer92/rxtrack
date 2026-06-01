@@ -230,13 +230,15 @@ def load_unload_inventory_context(start, end):
                         STRING_AGG(DISTINCT NULLIF(TRIM(pocket_location), ''), ', ') AS pocket_locations,
                         MAX(days_unused) AS max_days_unused,
                         STRING_AGG(DISTINCT NULLIF(TRIM(outdate_tracking), ''), ', ') AS outdate_tracking,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(active_orders), ''), ', ') AS active_orders,
+                        STRING_AGG(DISTINCT NULLIF(TRIM(standard_stock), ''), ', ') AS standard_stock,
                         STRING_AGG(DISTINCT NULLIF(TRIM(status), ''), ', ') AS inventory_status
                     FROM (
-                        SELECT device, med_id, pocket_location, days_unused, outdate_tracking, status
+                        SELECT device, med_id, pocket_location, days_unused, outdate_tracking, active_orders, standard_stock, status
                         FROM device_inventory
                         WHERE med_id IS NOT NULL
                         UNION ALL
-                        SELECT device, med_id, pocket_location, days_unused, outdate_tracking, status
+                        SELECT device, med_id, pocket_location, days_unused, outdate_tracking, active_orders, standard_stock, status
                         FROM device_inventory_history
                         WHERE snapshot_date BETWEEN :start_date AND :end_date
                           AND med_id IS NOT NULL
@@ -558,20 +560,30 @@ else:
     if "max_days_unused" in user_unloads.columns:
         days_unused = pd.to_numeric(user_unloads["max_days_unused"], errors="coerce")
         user_unloads.loc[days_unused.ge(28), "unload_bucket"] = "28+ days unused signal"
+        if "active_orders" in user_unloads.columns:
+            active_order_text = user_unloads["active_orders"].fillna("").astype(str).str.strip()
+            has_active_order = active_order_text.ne("") & ~active_order_text.str.fullmatch(
+                r"0|0\.0|false|no|none|nan",
+                case=False,
+            )
+            user_unloads.loc[days_unused.ge(28) & has_active_order, "unload_bucket"] = "28+ days unused with active orders"
+            user_unloads.loc[days_unused.ge(28) & ~has_active_order, "unload_bucket"] = "28+ days unused, no active orders"
 
     total_user_unload_qty = user_unloads["qty"].sum() if "qty" in user_unloads.columns else 0
     unique_unload_meds = user_unloads["med_id"].nunique() if "med_id" in user_unloads.columns else 0
     active_unload_days = user_unloads["date"].nunique() if "date" in user_unloads.columns else 0
     unique_unload_devices = user_unloads["device"].nunique() if "device" in user_unloads.columns else 0
-    likely_28_day_rows = int(user_unloads["unload_bucket"].eq("28+ days unused signal").sum())
+    likely_28_day_rows = int(user_unloads["unload_bucket"].astype(str).str.contains("28\\+ days unused", regex=True, na=False).sum())
+    active_order_unloads = int(user_unloads["unload_bucket"].eq("28+ days unused with active orders").sum())
 
-    p1, p2, p3, p4, p5, p6 = st.columns(6)
+    p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
     p1.metric("Unload Rows", f"{len(user_unloads):,}")
     p2.metric("Unload Qty", f"{total_user_unload_qty:,.0f}")
     p3.metric("Unique Meds", f"{unique_unload_meds:,}")
     p4.metric("Devices Hit", f"{unique_unload_devices:,}")
     p5.metric("28+ Day Signals", f"{likely_28_day_rows:,}")
-    p6.metric("Active Days", f"{active_unload_days:,}")
+    p6.metric("28+ w/ Orders", f"{active_order_unloads:,}")
+    p7.metric("Active Days", f"{active_unload_days:,}")
 
     if selected_unload_user != "All Users":
         st.caption(
@@ -628,6 +640,11 @@ else:
                 "pocket_locations",
                 lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v).strip()}))[:300],
             )
+        if "active_orders" in user_unloads.columns:
+            med_aggs["active_orders"] = (
+                "active_orders",
+                lambda s: ", ".join(sorted({str(v) for v in s.dropna() if str(v).strip()}))[:300],
+            )
         by_med = (
             user_unloads.groupby(["med_id", "med_desc"], dropna=False)
             .agg(**med_aggs)
@@ -648,7 +665,7 @@ else:
         c for c in [
             "dt", "date", "user_name", "device", "event_type", "med_id",
             "med_desc", "qty", "return_unit_note", "compare_qty", "beginning_qty", "ending_qty",
-            "max_days_unused", "pocket_locations", "outdate_tracking", "unload_bucket"
+            "max_days_unused", "active_orders", "pocket_locations", "outdate_tracking", "standard_stock", "unload_bucket"
         ]
         if c in user_unloads.columns
     ]
@@ -670,8 +687,10 @@ else:
             "beginning_qty": st.column_config.NumberColumn("Beginning Qty", format="%.0f"),
             "ending_qty": st.column_config.NumberColumn("Ending Qty", format="%.0f"),
             "max_days_unused": st.column_config.NumberColumn("Max Days Unused", format="%.0f"),
+            "active_orders": "Active Orders",
             "pocket_locations": "Known Pockets",
             "outdate_tracking": "Outdate Tracking",
+            "standard_stock": "Standard Stock",
             "unload_bucket": "Spike Bucket",
         },
     )
