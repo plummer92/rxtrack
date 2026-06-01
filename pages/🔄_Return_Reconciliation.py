@@ -338,6 +338,55 @@ def load_unload_care_area_context(start, end):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_device_care_area_map(start, end):
+    lookback_start = (pd.Timestamp(start) - pd.Timedelta(days=45)).to_pydatetime()
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                text(
+                    """
+                    SELECT
+                        UPPER(TRIM(station_name)) AS device,
+                        NULLIF(TRIM(care_area_name), '') AS care_area_name,
+                        COUNT(*) AS audit_rows,
+                        MAX(dt::timestamp) AS last_seen
+                    FROM audit_transaction_detail_rc
+                    WHERE dt::timestamp >= :lookback_start
+                      AND dt::timestamp < :end_ts
+                      AND station_name IS NOT NULL
+                      AND care_area_name IS NOT NULL
+                      AND TRIM(care_area_name) <> ''
+                    GROUP BY UPPER(TRIM(station_name)), NULLIF(TRIM(care_area_name), '')
+                    ORDER BY device, audit_rows DESC, last_seen DESC
+                    """
+                ),
+                conn,
+                params={
+                    "lookback_start": lookback_start,
+                    "end_ts": pd.Timestamp(end) + pd.Timedelta(days=1),
+                },
+            )
+    except Exception:
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    df["last_seen"] = pd.to_datetime(df["last_seen"], errors="coerce")
+    ranked = df.sort_values(["device", "audit_rows", "last_seen"], ascending=[True, False, False]).copy()
+    primary = ranked.groupby("device", as_index=False).first().rename(
+        columns={
+            "care_area_name": "primary_care_area",
+            "audit_rows": "primary_care_area_rows",
+            "last_seen": "primary_care_area_last_seen",
+        }
+    )
+    area_counts = ranked.groupby("device", as_index=False).agg(
+        care_area_count=("care_area_name", "nunique"),
+        care_area_options=("care_area_name", lambda s: ", ".join(s.dropna().astype(str).head(5))),
+    )
+    return primary.merge(area_counts, on="device", how="left")
+
+
 def has_active_order_value(value):
     text_value = str(value or "").strip()
     if not text_value or text_value.lower() in {"0", "0.0", "false", "no", "none", "nan"}:
@@ -545,6 +594,7 @@ detail_pyxis_reference_removals = ensure_date_column(detail_pyxis_reference_remo
 inventory_context = load_unload_inventory_context(start_date, end_date)
 inventory_timeline = load_unload_inventory_timeline(start_date, end_date)
 care_area_context = load_unload_care_area_context(start_date, end_date)
+device_care_area_map = load_device_care_area_map(start_date, end_date)
 
 pharm_return, timing_excluded_returns = split_returns_by_unload_timing(
     pharm_return,
@@ -704,6 +754,16 @@ else:
             how="left",
             suffixes=("", "_audit"),
         )
+    if not device_care_area_map.empty and "device" in user_unloads.columns:
+        unload_device_keys = user_unloads.copy()
+        unload_device_keys["_device_key"] = unload_device_keys["device"].fillna("").astype(str).str.strip().str.upper()
+        care_area_keys = device_care_area_map.copy()
+        care_area_keys["_device_key"] = care_area_keys["device"].fillna("").astype(str).str.strip().str.upper()
+        user_unloads = unload_device_keys.merge(
+            care_area_keys.drop(columns=["device"], errors="ignore"),
+            on="_device_key",
+            how="left",
+        ).drop(columns=["_device_key"], errors="ignore")
     user_unloads = attach_inventory_timeline_to_unloads(user_unloads, inventory_timeline)
     if not inventory_context.empty and {"device", "med_id"}.issubset(user_unloads.columns):
         unload_keys = user_unloads.copy()
@@ -747,15 +807,25 @@ else:
     unique_unload_devices = user_unloads["device"].nunique() if "device" in user_unloads.columns else 0
     likely_28_day_rows = int(user_unloads["unload_bucket"].astype(str).str.contains(r"28\+.*unused", regex=True, na=False).sum())
     active_order_unloads = int(user_unloads["unload_bucket"].eq("28+ unused but active orders remained").sum())
+    ambiguous_care_area_devices = int(
+        user_unloads.loc[
+            pd.to_numeric(
+                user_unloads.get("care_area_count", pd.Series(0, index=user_unloads.index)),
+                errors="coerce",
+            ).fillna(0).gt(1),
+            "device",
+        ].nunique()
+    ) if "device" in user_unloads.columns else 0
 
-    p1, p2, p3, p4, p5, p6, p7 = st.columns(7)
+    p1, p2, p3, p4, p5, p6, p7, p8 = st.columns(8)
     p1.metric("Unload Rows", f"{len(user_unloads):,}")
     p2.metric("Unload Qty", f"{total_user_unload_qty:,.0f}")
     p3.metric("Unique Meds", f"{unique_unload_meds:,}")
     p4.metric("Devices Hit", f"{unique_unload_devices:,}")
     p5.metric("28+ Day Signals", f"{likely_28_day_rows:,}")
     p6.metric("28+ w/ Orders", f"{active_order_unloads:,}")
-    p7.metric("Active Days", f"{active_unload_days:,}")
+    p7.metric("Care Area Conflicts", f"{ambiguous_care_area_devices:,}")
+    p8.metric("Active Days", f"{active_unload_days:,}")
 
     if selected_unload_user != "All Users":
         st.caption(
@@ -767,6 +837,8 @@ else:
             device_group_cols = ["device"]
             if "care_area_name" in user_unloads.columns:
                 device_group_cols.append("care_area_name")
+            if "primary_care_area" in user_unloads.columns:
+                device_group_cols.append("primary_care_area")
             by_device = user_unloads.groupby(device_group_cols, dropna=False).agg(
                 unload_rows=("pk", "count"),
                 unload_qty=("qty", "sum"),
@@ -774,6 +846,12 @@ else:
                 first_unload=("dt", "min"),
                 last_unload=("dt", "max"),
             ).reset_index().sort_values(["unload_rows", "unload_qty"], ascending=[False, False])
+            if "care_area_options" in user_unloads.columns:
+                by_device = by_device.merge(
+                    user_unloads[["device", "care_area_options", "care_area_count"]].drop_duplicates("device"),
+                    on="device",
+                    how="left",
+                )
             st.markdown("**Devices driving the unloads**")
             st.dataframe(
                 by_device,
@@ -854,7 +932,8 @@ else:
         c for c in [
             "dt", "date", "user_name", "device", "event_type", "med_id",
             "med_desc", "qty", "return_unit_note", "compare_qty", "beginning_qty", "ending_qty",
-            "care_area_name", "location", "inventory_snapshot_ts", "days_unused_at_unload", "active_orders_at_unload",
+            "care_area_name", "primary_care_area", "care_area_count", "care_area_options", "location",
+            "inventory_snapshot_ts", "days_unused_at_unload", "active_orders_at_unload",
             "prior_inventory_snapshot_ts", "prior_active_orders", "active_orders_went_away",
             "max_days_unused", "active_orders", "pocket_locations", "outdate_tracking", "standard_stock", "unload_bucket"
         ]
@@ -878,6 +957,9 @@ else:
             "beginning_qty": st.column_config.NumberColumn("Beginning Qty", format="%.0f"),
             "ending_qty": st.column_config.NumberColumn("Ending Qty", format="%.0f"),
             "care_area_name": "Care Area",
+            "primary_care_area": "Primary Care Area",
+            "care_area_count": st.column_config.NumberColumn("Care Area Count", format="%d"),
+            "care_area_options": "Care Area Options",
             "location": "Location",
             "inventory_snapshot_ts": st.column_config.DatetimeColumn("Inventory Snapshot", format="MM/DD/YY HH:mm"),
             "prior_inventory_snapshot_ts": st.column_config.DatetimeColumn("Prior Snapshot", format="MM/DD/YY HH:mm"),
