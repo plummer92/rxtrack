@@ -305,7 +305,7 @@ def load_unload_inventory_timeline(start, end):
     if df.empty:
         return df
     df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce").dt.date
-    df["snapshot_ts"] = pd.to_datetime(df["snapshot_ts"], errors="coerce")
+    df["snapshot_ts"] = pd.to_datetime(df["snapshot_ts"], errors="coerce", utc=True).dt.tz_convert(None)
     df["days_unused"] = pd.to_numeric(df["days_unused"], errors="coerce")
     return df.dropna(subset=["snapshot_date", "snapshot_ts"])
 
@@ -421,6 +421,8 @@ def attach_inventory_timeline_to_unloads(unloads, inventory_timeline):
         if pd.isna(unload_dt):
             enriched_rows.append(out)
             continue
+        if getattr(unload_dt, "tzinfo", None) is not None:
+            unload_dt = unload_dt.tz_convert(None)
         snapshots = timeline_lookup.get((device_key, med_key))
         if snapshots is None or snapshots.empty:
             enriched_rows.append(out)
