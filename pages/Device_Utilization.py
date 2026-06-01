@@ -1284,6 +1284,18 @@ with st.expander("Device selection", expanded=True):
     if not device_options and candidate_devices:
         device_options = candidate_devices
         st.warning("No devices matched that filter, so the full device list is shown.")
+    last_search = st.session_state.get("device_utilization_last_search")
+    if last_search != search_text:
+        current_selection = st.session_state.get("device_utilization_devices", [])
+        current_selection = [_clean_device_name(device) for device in current_selection]
+        if search_text:
+            st.session_state["device_utilization_devices"] = device_options if len(device_options) <= 10 else []
+        else:
+            retained_selection = [device for device in current_selection if device in device_options]
+            st.session_state["device_utilization_devices"] = retained_selection or [
+                device for device in default_devices if device in device_options
+            ]
+        st.session_state["device_utilization_last_search"] = search_text
     with c2:
         selected_devices = st.multiselect(
             "Devices",
@@ -1291,6 +1303,7 @@ with st.expander("Device selection", expanded=True):
             default=[d for d in default_devices if d in device_options],
             key="device_utilization_devices",
         )
+    selected_devices = [_clean_device_name(device) for device in selected_devices if _clean_device_name(device) in device_options]
     st.caption("The dropdown includes every device found in Events, Pharmacy Orders, or Device Inventory.")
 
 if not selected_devices:
