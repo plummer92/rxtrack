@@ -487,7 +487,68 @@ def save_refill_occurrence(
     """)
     with engine.begin() as conn:
         result = conn.execute(sql, payload)
+    save_refill_occurrence_to_management(payload)
     return result.rowcount or 0
+
+
+def save_refill_occurrence_to_management(payload: dict) -> int:
+    staff_name = str(payload.get("occurrence_user") or "").strip()
+    if not staff_name:
+        return 0
+
+    refill_dt = pd.to_datetime(payload.get("refill_dt"), errors="coerce")
+    refill_label = refill_dt.strftime("%m/%d/%y %H:%M") if pd.notna(refill_dt) else "unknown time"
+    summary = (
+        f"Refill-entry occurrence logged for {staff_name}.\n\n"
+        f"Medication: {payload.get('med_desc') or payload.get('med_id')}\n"
+        f"Device: {payload.get('device')}\n"
+        f"Pocket: {payload.get('pocket')}\n"
+        f"Refill time: {refill_label}\n"
+        f"Entered refill qty: {fmt_qty(payload.get('entered_qty'))}\n"
+        f"Matched carousel pull qty: {fmt_qty(payload.get('matched_pull_qty'))}\n"
+        f"Entered minus matched pull: {fmt_qty(payload.get('entered_vs_matched_pull'))}\n"
+        f"Expected ending count: {fmt_qty(payload.get('expected_ending_qty'))}\n"
+        f"Actual ending count: {fmt_qty(payload.get('ending_qty'))}\n"
+        f"Actual minus expected ending: {fmt_qty(payload.get('expected_ending_variance'))}\n\n"
+        f"Note: {payload.get('note') or 'No note entered.'}"
+    )
+    next_steps = (
+        "Review the refill paper trail with the colleague. Coaching focus: enter the actual quantity loaded/refilled "
+        "from the carousel pull, not the final pocket count or an accidentally keyed value. Document follow-up after review."
+    )
+    sql = text("""
+        INSERT INTO management_coaching_notes
+            (staff_name, topic, coaching_date, follow_up_date, status, summary, next_steps, source_page, source_key, source_payload_json)
+        VALUES
+            (:staff_name, :topic, CURRENT_DATE, CURRENT_DATE, 'Open', :summary, :next_steps, :source_page, :source_key, :source_payload_json)
+        ON CONFLICT (source_key) WHERE source_key IS NOT NULL DO UPDATE SET
+            coaching_date = CURRENT_DATE,
+            follow_up_date = CURRENT_DATE,
+            status = CASE
+                WHEN management_coaching_notes.status = 'Closed' THEN 'Open'
+                ELSE management_coaching_notes.status
+            END,
+            summary = EXCLUDED.summary,
+            next_steps = EXCLUDED.next_steps,
+            source_payload_json = EXCLUDED.source_payload_json,
+            updated_at = NOW()
+    """)
+    management_payload = {
+        "staff_name": staff_name,
+        "topic": "Discrepancy",
+        "summary": summary,
+        "next_steps": next_steps,
+        "source_page": "Discrepancy Deep Dive - Refill Entry Occurrence",
+        "source_key": f"refill-entry-occurrence:{payload.get('occurrence_key')}",
+        "source_payload_json": payload.get("source_payload_json") or "{}",
+    }
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(sql, management_payload)
+        return result.rowcount or 0
+    except Exception as exc:
+        st.warning(f"[save_refill_occurrence_to_management] {exc}")
+        return 0
 
 
 def save_completed_rows(rows: pd.DataFrame, notes: str = "", manual_correction_by: str | None = None) -> int:
