@@ -131,7 +131,7 @@ EVIDENCE_OPTIONS = [
 
 
 st.set_page_config(
-    page_title="Verify Count Audit",
+    page_title="Discrepancy Deep Dive",
     page_icon="🚨",
     layout="wide",
 )
@@ -141,7 +141,7 @@ engine = App.engine
 App.init_db()
 render_sidebar = App.render_sidebar
 start_date, end_date = render_sidebar()
-App.require_management_access("Verify Count Audit")
+App.require_management_access("Discrepancy Deep Dive")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -2219,16 +2219,16 @@ def build_count_audit_dataset(start, end) -> pd.DataFrame:
 
 if hasattr(App, "render_page_intro"):
     App.render_page_intro(
-        "Verify Count Audit",
-        "Find Verify Inventory mismatches and the last refill/load user for that same med and device, all on one coaching row.",
+        "Discrepancy Deep Dive",
+        "Review clinical count-control activity, refill paper trails, and carousel return evidence without the older Verify Audit workflow.",
         kicker="Discrepancy Review",
     )
-    _debug_event("Discrepancy Deep Dive", "verify_count_audit_loaded")
+    _debug_event("Discrepancy Deep Dive", "paper_trail_review_loaded")
     _debug_panel("Discrepancy Deep Dive", intro_mode="shared")
 else:
-    st.header("Verify Count Audit")
-    st.caption("Verify Inventory mismatch plus the most recent prior refill/load for the same med and device.")
-    _debug_event("Discrepancy Deep Dive", "verify_count_audit_fallback_header")
+    st.header("Discrepancy Deep Dive")
+    st.caption("Clinical count-control review, refill paper trails, and carousel return evidence.")
+    _debug_event("Discrepancy Deep Dive", "paper_trail_review_fallback_header")
     _debug_panel("Discrepancy Deep Dive", intro_mode="fallback")
 
 with st.spinner("Building clinical count control audit..."):
@@ -2237,6 +2237,12 @@ with st.spinner("Building clinical count control audit..."):
 render_clinical_count_control_audit(clinical_count_control_df)
 
 render_carousel_return_paper_trail_section(start_date, end_date)
+
+st.info(
+    "The older Verify Audit workflow has been retired from this page. Use the clinical control paper trail "
+    "and refill occurrence logging above to save reviewed transactions into Management Coaching."
+)
+st.stop()
 
 with st.spinner("Building verify count audit..."):
     audit_df = build_count_audit_dataset(start_date, end_date).copy()
