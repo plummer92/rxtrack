@@ -362,9 +362,15 @@ with st.spinner("Loading session data..."):
 # ----------------------------
 # Data Unification
 # ----------------------------
+def is_carousel_work_area(value):
+    text_value = str(value or "").strip().lower()
+    return bool(re.search(r"\bcar\s*\d+\b|carousel|cubic", text_value))
+
+
 px_df = df_events[['user_name', 'dt', 'device', 'event_type', 'med_desc', 'qty', 'pk']].copy() if not df_events.empty else pd.DataFrame()
 if not px_df.empty:
     px_df['source'] = 'Pyxis'
+    px_df.loc[px_df['device'].apply(is_carousel_work_area), 'source'] = 'Pharmacy'
 
 ph = df_pharm[['user_name', 'dt', 'destination', 'priority', 'med_desc', 'qty', 'pk']].copy() if not df_pharm.empty else pd.DataFrame()
 if not ph.empty:
@@ -389,9 +395,7 @@ def pharmacy_work_label(event_values, destinations, start_dt):
         for value in destinations
         if str(value or "").strip()
     )
-    carousel_destination = bool(
-        re.search(r"\bcar\s*\d+\b|carousel|cubic", destination_text)
-    )
+    carousel_destination = is_carousel_work_area(destination_text)
     if "pyxis" in joined and "pull" in joined:
         if carousel_destination:
             if pd.notna(start_dt) and int(start_dt.hour) < 7:
