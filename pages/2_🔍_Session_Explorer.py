@@ -619,14 +619,15 @@ with tab1:
     min_dur = c2.number_input("Min Duration (sec)", 0, 3600, 0)
 
     all_sources = sorted(sessions_for_day['Source'].dropna().unique())
-    if "session_view_sources" in st.session_state:
+    if "session_view_sources" not in st.session_state:
+        st.session_state.session_view_sources = all_sources
+    else:
         st.session_state.session_view_sources = [
             source for source in st.session_state.session_view_sources if source in all_sources
         ]
     sel_source = c3.multiselect(
         "Filter Source",
         all_sources,
-        default=all_sources,
         key="session_view_sources",
     )
 
@@ -673,6 +674,10 @@ with tab1:
     disp['Start_Time'] = disp['Start'].dt.strftime('%H:%M:%S')
     disp['End_Time'] = disp['End'].dt.strftime('%H:%M:%S')
     disp['Duration_Str'] = disp['Duration'].apply(seconds_to_mmss)
+    disp['Time_Bucket'] = disp['Source Type'].replace({
+        'Pharmacy': 'Pharmacy Time',
+        'Pyxis': 'Pyxis Time',
+    })
 
     disp['Walk_Disp'] = disp['Walk Time'].apply(
         lambda x: seconds_to_mmss(x) if pd.notnull(x) and x >= 0 else "-"
@@ -682,8 +687,15 @@ with tab1:
 
     event = st.dataframe(
         disp[['session_id', 'User', 'Date', 'Source', 'Device',
-              'Start_Time', 'End_Time', 'Destinations', 'Tx Count',
-              'Duration_Str', 'Walk_Disp']],
+              'Time_Bucket', 'Start_Time', 'End_Time', 'Destinations', 'Tx Count',
+              'Duration_Str', 'Walk_Disp']].rename(columns={
+                  'session_id': 'Session ID',
+                  'Time_Bucket': 'Time Bucket',
+                  'Start_Time': 'Start Time',
+                  'End_Time': 'End Time',
+                  'Duration_Str': 'Duration',
+                  'Walk_Disp': 'Walk Time',
+              }),
         use_container_width=True,
         on_select="rerun",
         selection_mode="single-row",
