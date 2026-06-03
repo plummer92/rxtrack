@@ -1,5 +1,6 @@
 ﻿import io
 import json
+import re
 from datetime import timedelta
 
 import numpy as np
@@ -928,6 +929,258 @@ def load_pull_evidence_for_refill(device, med_id, refill_dt):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_carousel_return_processing(start, end):
+    """Pharmacy workflow rows that represent returns processed back into carousel inventory."""
+    try:
+        sql = text("""
+            SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+            FROM pharmacy_orders
+            WHERE dt::date BETWEEN :start AND :end
+              AND (
+                    priority ILIKE '%return%'
+                 OR priority ILIKE '%instant restock%'
+              )
+            ORDER BY dt DESC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"start": start, "end": end})
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        for col in ["queue_id", "priority", "med_id", "med_desc", "destination", "user_name"]:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+        priority_text = df["priority"].str.lower()
+        df["return_type"] = "Return"
+        df.loc[priority_text.str.contains("instant", na=False) & priority_text.str.contains("return", na=False), "return_type"] = "Instant Return"
+        df.loc[priority_text.str.contains("instant", na=False) & priority_text.str.contains("restock", na=False), "return_type"] = "Instant Restock"
+        return df.dropna(subset=["dt"])
+    except Exception as exc:
+        st.warning(f"[load_carousel_return_processing] {exc}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_return_source_paper_trail(med_id, return_dt, lookback_days=14):
+    """Audit Transaction Detail RC rows that may explain where a carousel return came from."""
+    try:
+        return_ts = pd.to_datetime(return_dt, errors="coerce")
+        if pd.isna(return_ts):
+            return pd.DataFrame()
+        start_window = return_ts - timedelta(days=lookback_days)
+        sql = text("""
+            SELECT
+                pk,
+                dt,
+                user_name,
+                user_type,
+                care_area_name,
+                location,
+                station_name AS device,
+                drawer_subdrawer_pocket,
+                transaction_type AS event_type,
+                med_id,
+                med_desc,
+                qty,
+                beginning_qty,
+                ending_qty,
+                discrepancy_difference,
+                COALESCE(NULLIF(discrepancy_reason, ''), discrepancy_resolution_desc) AS discrepancy_reason,
+                correction,
+                resolution_user,
+                waste_amount,
+                waste_reason,
+                witness_user_name,
+                source_filename
+            FROM audit_transaction_detail_rc
+            WHERE dt BETWEEN :start_window AND :return_ts
+              AND UPPER(TRIM(med_id)) = UPPER(TRIM(:med_id))
+            ORDER BY dt DESC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={
+                    "start_window": start_window,
+                    "return_ts": return_ts,
+                    "med_id": str(med_id or ""),
+                },
+            )
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        for col in ["qty", "beginning_qty", "ending_qty", "discrepancy_difference", "waste_amount"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        for col in [
+            "user_name", "user_type", "care_area_name", "location", "device",
+            "drawer_subdrawer_pocket", "event_type", "med_id", "med_desc",
+            "discrepancy_reason", "correction", "resolution_user", "waste_reason",
+            "witness_user_name", "source_filename",
+        ]:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+        df["minutes_before_carousel_return"] = (return_ts - df["dt"]).dt.total_seconds() / 60
+        event_text = df["event_type"].str.lower()
+        pocket_text = df["drawer_subdrawer_pocket"].str.lower()
+        df["source_signal"] = "Other same-med RC activity"
+        df.loc[event_text.str.contains("return", na=False) & pocket_text.str.contains(r"return\s*bin|internal", regex=True, na=False), "source_signal"] = "Returned to bin/internal"
+        df.loc[event_text.str.contains("return", na=False) & ~pocket_text.str.contains(r"return\s*bin|internal", regex=True, na=False), "source_signal"] = "Returned to Pyxis pocket"
+        df.loc[event_text.str.contains(r"empty|return\s*bin", regex=True, na=False), "source_signal"] = "Return bin emptied"
+        df.loc[event_text.str.contains(r"\bunload\b|destock", regex=True, na=False), "source_signal"] = "Pyxis unload/destock"
+        df.loc[event_text.str.contains(r"vend|remove", regex=True, na=False), "source_signal"] = "Clinical vend/removal"
+        df.loc[event_text.str.contains(r"verify|inventory|count", regex=True, na=False), "source_signal"] = "Inventory/count check"
+        return df.dropna(subset=["dt"])
+    except Exception as exc:
+        st.warning(f"[load_return_source_paper_trail] {exc}")
+        return pd.DataFrame()
+
+
+def render_carousel_return_paper_trail_section(start, end):
+    with st.expander("Carousel Return Processing Paper Trail", expanded=False):
+        st.caption(
+            "Shows pharmacy workflow return rows that were processed into carousel inventory. "
+            "Click a row to inspect same-med Audit Transaction Detail RC activity before that return."
+        )
+        returns = load_carousel_return_processing(start, end)
+        if returns.empty:
+            st.info("No carousel return-processing rows were found in Pharmacy Workflow for this date range.")
+            return
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Return Rows", f"{len(returns):,}")
+        r2.metric("Return Qty", f"{returns['qty'].sum():,.0f}")
+        r3.metric("Meds", f"{returns['med_id'].nunique():,}")
+        r4.metric("Users", f"{returns['user_name'].nunique():,}")
+
+        f1, f2, f3 = st.columns([1, 1, 1])
+        selected_return_types = f1.multiselect(
+            "Return Type",
+            sorted(returns["return_type"].dropna().unique()),
+            default=sorted(returns["return_type"].dropna().unique()),
+            key=f"carousel_return_type_filter_{start}_{end}",
+        )
+        selected_return_users = f2.multiselect(
+            "Processed By",
+            sorted(returns["user_name"].dropna().unique()),
+            placeholder="All users",
+            key=f"carousel_return_user_filter_{start}_{end}",
+        )
+        selected_return_destinations = f3.multiselect(
+            "Carousel/Destination",
+            sorted(returns["destination"].dropna().unique()),
+            placeholder="All destinations",
+            key=f"carousel_return_destination_filter_{start}_{end}",
+        )
+
+        visible_returns = returns.copy()
+        if selected_return_types:
+            visible_returns = visible_returns[visible_returns["return_type"].isin(selected_return_types)]
+        else:
+            visible_returns = visible_returns.iloc[0:0]
+        if selected_return_users:
+            visible_returns = visible_returns[visible_returns["user_name"].isin(selected_return_users)]
+        if selected_return_destinations:
+            visible_returns = visible_returns[visible_returns["destination"].isin(selected_return_destinations)]
+
+        return_cols = ["pk", "dt", "return_type", "priority", "user_name", "destination", "med_id", "med_desc", "qty", "queue_id"]
+        st.caption("Select a carousel return row to see where that med appears to have come from.")
+        return_selection = st.dataframe(
+            visible_returns[return_cols].head(2000),
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            column_config={
+                "pk": None,
+                "dt": st.column_config.DatetimeColumn("Processed Time", format="MM/DD/YY HH:mm:ss"),
+                "return_type": st.column_config.TextColumn("Return Type"),
+                "priority": st.column_config.TextColumn("Priority"),
+                "user_name": st.column_config.TextColumn("Processed By"),
+                "destination": st.column_config.TextColumn("Destination"),
+                "med_id": st.column_config.TextColumn("Med ID"),
+                "med_desc": st.column_config.TextColumn("Medication"),
+                "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+                "queue_id": st.column_config.TextColumn("Queue ID"),
+            },
+        )
+        if len(visible_returns) > 2000:
+            st.caption(f"Showing first 2,000 of {len(visible_returns):,} visible rows.")
+
+        if len(return_selection.selection.rows) > 0:
+            selected_return = visible_returns[return_cols].head(2000).iloc[return_selection.selection.rows[0]]
+            st.markdown("#### Selected Return Source Trail")
+            lookback_days = st.number_input(
+                "Return source lookback days",
+                min_value=1,
+                max_value=90,
+                value=14,
+                step=1,
+                key=f"carousel_return_source_lookback_{selected_return['pk']}_{start}_{end}",
+            )
+            source_trail = load_return_source_paper_trail(
+                selected_return["med_id"],
+                selected_return["dt"],
+                int(lookback_days),
+            )
+            if source_trail.empty:
+                st.info("No same-med RC rows were found before that carousel return in the selected lookback window.")
+            else:
+                source_summary = (
+                    source_trail.groupby("source_signal")
+                    .agg(rows=("pk", "count"), qty=("qty", "sum"), devices=("device", "nunique"), users=("user_name", "nunique"))
+                    .reset_index()
+                    .sort_values(["rows", "qty"], ascending=False)
+                )
+                st.dataframe(
+                    source_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "source_signal": st.column_config.TextColumn("Source Signal"),
+                        "rows": st.column_config.NumberColumn("Rows", format="%d"),
+                        "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+                        "devices": st.column_config.NumberColumn("Devices", format="%d"),
+                        "users": st.column_config.NumberColumn("Users", format="%d"),
+                    },
+                )
+                source_cols = [
+                    "dt", "minutes_before_carousel_return", "source_signal", "user_name", "user_type",
+                    "device", "drawer_subdrawer_pocket", "event_type", "qty",
+                    "beginning_qty", "ending_qty", "discrepancy_difference",
+                    "discrepancy_reason", "correction", "resolution_user",
+                    "care_area_name", "location", "source_filename",
+                ]
+                st.dataframe(
+                    source_trail[source_cols].head(2000),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "dt": st.column_config.DatetimeColumn("RC Time", format="MM/DD/YY HH:mm:ss"),
+                        "minutes_before_carousel_return": st.column_config.NumberColumn("Min Before Return", format="%.0f"),
+                        "source_signal": st.column_config.TextColumn("Signal"),
+                        "drawer_subdrawer_pocket": st.column_config.TextColumn("Pocket"),
+                        "event_type": st.column_config.TextColumn("RC Transaction"),
+                        "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+                        "beginning_qty": st.column_config.NumberColumn("Begin", format="%.0f"),
+                        "ending_qty": st.column_config.NumberColumn("End", format="%.0f"),
+                        "discrepancy_difference": st.column_config.NumberColumn("Discrepancy Diff", format="%.0f"),
+                    },
+                )
+                st.download_button(
+                    "Export Selected Return Source Trail",
+                    data=to_excel_bytes(source_trail),
+                    file_name="selected_carousel_return_source_trail.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+        st.download_button(
+            "Export Carousel Return Processing Rows",
+            data=to_excel_bytes(visible_returns),
+            file_name="carousel_return_processing_rows.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
 def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
     with st.expander("Clinical Count Control Audit", expanded=not clinical_control_df.empty):
         st.caption(
@@ -1570,6 +1823,8 @@ with st.spinner("Building clinical count control audit..."):
     clinical_count_control_df = load_clinical_count_control_audit(start_date, end_date)
 
 render_clinical_count_control_audit(clinical_count_control_df)
+
+render_carousel_return_paper_trail_section(start_date, end_date)
 
 with st.spinner("Building verify count audit..."):
     audit_df = build_count_audit_dataset(start_date, end_date).copy()
