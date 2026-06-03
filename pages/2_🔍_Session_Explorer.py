@@ -93,17 +93,68 @@ def load_inventory_verification_events(start_date, end_date):
     """Load Pyxis inventory verification rows with count-before/count-after fields."""
     try:
         sql = text("""
-            SELECT
-                pk, dt, user_name, device, med_id, med_desc, event_type, qty,
-                beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
-            FROM events
-            WHERE dt::date BETWEEN :start_date AND :end_date
-              AND (
-                    event_type ILIKE '%verify%'
-                 OR event_type ILIKE '%verified%'
-                 OR event_type ILIKE '%inventory%'
-                 OR event_type ILIKE '%count%'
-              )
+            WITH audit_days AS (
+                SELECT DISTINCT
+                    dt::date AS d,
+                    UPPER(TRIM(station_name)) AS device
+                FROM audit_transaction_detail_rc
+                WHERE dt::date BETWEEN :start_date AND :end_date
+            ),
+            audit_events AS (
+                SELECT
+                    pk,
+                    dt::timestamp AS dt,
+                    user_name,
+                    station_name AS device,
+                    med_id,
+                    med_desc,
+                    transaction_type AS event_type,
+                    qty,
+                    beginning_qty,
+                    ending_qty,
+                    discrepancy_difference AS discrepancy_qty,
+                    COALESCE(NULLIF(discrepancy_reason, ''), discrepancy_resolution_desc) AS discrepancy_reason
+                FROM audit_transaction_detail_rc
+                WHERE dt::date BETWEEN :start_date AND :end_date
+                  AND (
+                        transaction_type ILIKE '%verify%'
+                     OR transaction_type ILIKE '%verified%'
+                     OR transaction_type ILIKE '%inventory%'
+                     OR transaction_type ILIKE '%count%'
+                  )
+            ),
+            legacy_events AS (
+                SELECT
+                    pk,
+                    dt::timestamp AS dt,
+                    user_name,
+                    device,
+                    med_id,
+                    med_desc,
+                    event_type,
+                    qty,
+                    beginning_qty,
+                    ending_qty,
+                    discrepancy_qty,
+                    discrepancy_reason
+                FROM events e
+                WHERE dt::date BETWEEN :start_date AND :end_date
+                  AND (
+                        event_type ILIKE '%verify%'
+                     OR event_type ILIKE '%verified%'
+                     OR event_type ILIKE '%inventory%'
+                     OR event_type ILIKE '%count%'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM audit_days ad
+                      WHERE ad.d = e.dt::date
+                        AND ad.device = UPPER(TRIM(e.device))
+                  )
+            )
+            SELECT * FROM audit_events
+            UNION ALL
+            SELECT * FROM legacy_events
             ORDER BY dt
         """)
         with engine.connect() as conn:
@@ -160,22 +211,80 @@ def load_same_med_device_history(device, med_id, selected_dt):
     """Load prior inventory verification events for the same Pyxis device and med_id."""
     try:
         sql = text("""
-            SELECT
-                pk, dt::timestamp AS dt, user_name, device, med_id, med_desc, event_type, qty,
-                beginning_qty, ending_qty, discrepancy_qty, discrepancy_reason
-            FROM events
-            WHERE device = :device
-              AND med_id = :med_id
-              AND dt::timestamp <= CAST(:selected_dt AS timestamp)
-              AND (
-                    event_type ILIKE '%verify%'
-                 OR event_type ILIKE '%verified%'
-                 OR event_type ILIKE '%inventory%'
-                 OR event_type ILIKE '%count%'
-              )
-              AND event_type NOT ILIKE '%empty%'
-              AND event_type NOT ILIKE '%return bin%'
-              AND event_type NOT ILIKE '%refill%'
+            WITH audit_days AS (
+                SELECT DISTINCT
+                    dt::date AS d,
+                    UPPER(TRIM(station_name)) AS device
+                FROM audit_transaction_detail_rc
+                WHERE UPPER(TRIM(station_name)) = UPPER(TRIM(:device))
+                  AND UPPER(TRIM(med_id)) = UPPER(TRIM(:med_id))
+                  AND dt::timestamp <= CAST(:selected_dt AS timestamp)
+            ),
+            audit_events AS (
+                SELECT
+                    pk,
+                    dt::timestamp AS dt,
+                    user_name,
+                    station_name AS device,
+                    med_id,
+                    med_desc,
+                    transaction_type AS event_type,
+                    qty,
+                    beginning_qty,
+                    ending_qty,
+                    discrepancy_difference AS discrepancy_qty,
+                    COALESCE(NULLIF(discrepancy_reason, ''), discrepancy_resolution_desc) AS discrepancy_reason
+                FROM audit_transaction_detail_rc
+                WHERE UPPER(TRIM(station_name)) = UPPER(TRIM(:device))
+                  AND UPPER(TRIM(med_id)) = UPPER(TRIM(:med_id))
+                  AND dt::timestamp <= CAST(:selected_dt AS timestamp)
+                  AND (
+                        transaction_type ILIKE '%verify%'
+                     OR transaction_type ILIKE '%verified%'
+                     OR transaction_type ILIKE '%inventory%'
+                     OR transaction_type ILIKE '%count%'
+                  )
+                  AND transaction_type NOT ILIKE '%empty%'
+                  AND transaction_type NOT ILIKE '%return bin%'
+                  AND transaction_type NOT ILIKE '%refill%'
+            ),
+            legacy_events AS (
+                SELECT
+                    pk,
+                    dt::timestamp AS dt,
+                    user_name,
+                    device,
+                    med_id,
+                    med_desc,
+                    event_type,
+                    qty,
+                    beginning_qty,
+                    ending_qty,
+                    discrepancy_qty,
+                    discrepancy_reason
+                FROM events e
+                WHERE UPPER(TRIM(device)) = UPPER(TRIM(:device))
+                  AND UPPER(TRIM(med_id)) = UPPER(TRIM(:med_id))
+                  AND dt::timestamp <= CAST(:selected_dt AS timestamp)
+                  AND (
+                        event_type ILIKE '%verify%'
+                     OR event_type ILIKE '%verified%'
+                     OR event_type ILIKE '%inventory%'
+                     OR event_type ILIKE '%count%'
+                  )
+                  AND event_type NOT ILIKE '%empty%'
+                  AND event_type NOT ILIKE '%return bin%'
+                  AND event_type NOT ILIKE '%refill%'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM audit_days ad
+                      WHERE ad.d = e.dt::date
+                        AND ad.device = UPPER(TRIM(e.device))
+                  )
+            )
+            SELECT * FROM audit_events
+            UNION ALL
+            SELECT * FROM legacy_events
             ORDER BY dt::timestamp DESC
         """)
         with engine.connect() as conn:
@@ -269,7 +378,8 @@ if combined.empty:
     st.stop()
 
 combined['dt'] = pd.to_datetime(combined['dt'])
-combined.sort_values(['user_name', 'dt'], inplace=True)
+combined['match_key'] = combined['user_name'].apply(normalize_name)
+combined.sort_values(['match_key', 'dt'], inplace=True)
 
 def pharmacy_work_label(event_values, start_dt):
     values = [str(value or "").strip() for value in event_values if str(value or "").strip()]
@@ -297,7 +407,7 @@ def destination_group_label(destinations):
 # ----------------------------
 # Session Logic
 # ----------------------------
-combined['prev_user'] = combined['user_name'].shift()
+combined['prev_user'] = combined['match_key'].shift()
 combined['session_work_key'] = np.where(
     combined['source'].eq('Pharmacy'),
     'Pharmacy',
@@ -309,7 +419,7 @@ combined['prev_dt'] = combined['dt'].shift()
 combined['gap'] = (combined['dt'] - combined['prev_dt']).dt.total_seconds().fillna(0)
 
 combined['is_new_session'] = np.where(
-    (combined['user_name'] != combined['prev_user']) |
+    (combined['match_key'] != combined['prev_user']) |
     (combined['session_work_key'] != combined['prev_work_key']) |
     (combined['gap'] > 1200),
     1, 0
@@ -321,6 +431,7 @@ combined['session_id'] = combined['is_new_session'].cumsum()
 # Aggregate Sessions
 # ----------------------------
 sessions = combined.groupby('session_id').agg(
+    Tech_Key=('match_key', 'first'),
     User=('user_name', 'first'),
     Device=('device', 'first'),
     Work_Key=('session_work_key', 'first'),
@@ -429,6 +540,16 @@ def pharmacy_session_users(session_frame):
     pharmacy_sessions = session_frame[session_frame["Source Type"].eq("Pharmacy")]
     return sorted(pharmacy_sessions["User"].dropna().astype(str).unique())
 
+
+def selected_user_keys(session_frame, selected_users):
+    if session_frame.empty or not selected_users or "Tech_Key" not in session_frame.columns:
+        return set()
+    return set(
+        session_frame[session_frame["User"].isin(selected_users)]["Tech_Key"]
+        .dropna()
+        .astype(str)
+    )
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -498,7 +619,8 @@ with tab1:
     view = sessions_for_day.copy()
 
     if sel_u:
-        view = view[view['User'].isin(sel_u)]
+        selected_keys = selected_user_keys(sessions_for_day, sel_u)
+        view = view[view['Tech_Key'].isin(selected_keys)]
 
     if min_dur:
         view = view[view['Duration'] >= min_dur]
@@ -586,7 +708,8 @@ with tab1:
         else:
             st.write(f"Debugging data for: **{sel_u}**")
 
-            debug_view = combined[combined['user_name'].isin(sel_u)].sort_values('dt')
+            selected_keys = selected_user_keys(sessions_for_day, sel_u)
+            debug_view = combined[combined['match_key'].isin(selected_keys)].sort_values('dt')
 
             if debug_view.empty:
                 st.warning("No raw events found for selected user.")
@@ -644,7 +767,8 @@ with tab_visualizer:
                 key="movement_visualizer_user",
             )
 
-            route_sessions = movement_day_sessions[movement_day_sessions["User"].eq(movement_user)].copy()
+            movement_keys = selected_user_keys(movement_day_sessions, [movement_user])
+            route_sessions = movement_day_sessions[movement_day_sessions["Tech_Key"].isin(movement_keys)].copy()
             route_segments = build_movement_segments(route_sessions)
 
             if route_segments.empty:
@@ -1066,12 +1190,52 @@ def load_shift_schedule(sel_date):
 
 @st.cache_data(ttl=300)
 def load_day_events(sel_date):
-    """Load all Pyxis events for a given date."""
+    """Load all Pyxis events for a given date, preferring RC audit rows when present."""
     try:
         sql = text("""
-            SELECT pk, dt, user_name, device, med_id, med_desc, event_type, qty
-            FROM events
-            WHERE dt::date = :d
+            WITH audit_days AS (
+                SELECT DISTINCT
+                    dt::date AS d,
+                    UPPER(TRIM(station_name)) AS device
+                FROM audit_transaction_detail_rc
+                WHERE dt::date = :d
+            ),
+            audit_events AS (
+                SELECT
+                    pk,
+                    dt::timestamp AS dt,
+                    user_name,
+                    station_name AS device,
+                    med_id,
+                    med_desc,
+                    transaction_type AS event_type,
+                    qty
+                FROM audit_transaction_detail_rc
+                WHERE dt::date = :d
+            ),
+            legacy_events AS (
+                SELECT
+                    pk,
+                    dt::timestamp AS dt,
+                    user_name,
+                    device,
+                    med_id,
+                    med_desc,
+                    event_type,
+                    qty
+                FROM events e
+                WHERE dt::date = :d
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM audit_days ad
+                      WHERE ad.d = e.dt::date
+                        AND ad.device = UPPER(TRIM(e.device))
+                  )
+            )
+            SELECT * FROM audit_events
+            UNION ALL
+            SELECT * FROM legacy_events
+            ORDER BY dt
         """)
         with engine.connect() as conn:
             df = pd.read_sql(sql, conn, params={"d": str(sel_date)})
