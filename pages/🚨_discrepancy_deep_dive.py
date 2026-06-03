@@ -804,6 +804,85 @@ def load_clinical_count_control_audit(start, end):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_rc_pocket_timeline(device, med_id, pocket, selected_dt, selected_pk="", lookback_days=30, forward_days=3):
+    """Load the RC paper trail for one device / med / pocket around a selected event."""
+    try:
+        selected_ts = pd.to_datetime(selected_dt, errors="coerce")
+        if pd.isna(selected_ts):
+            return pd.DataFrame()
+        start_window = selected_ts - timedelta(days=lookback_days)
+        end_window = selected_ts + timedelta(days=forward_days)
+        sql = text("""
+            SELECT
+                pk,
+                dt,
+                user_name,
+                user_type,
+                care_area_name,
+                location,
+                station_name AS device,
+                drawer_subdrawer_pocket,
+                transaction_type AS event_type,
+                med_id,
+                med_desc,
+                qty,
+                beginning_qty,
+                ending_qty,
+                discrepancy_difference,
+                COALESCE(NULLIF(discrepancy_reason, ''), discrepancy_resolution_desc) AS discrepancy_reason,
+                correction_quantity_before,
+                correction_quantity_after,
+                correction,
+                resolution_user,
+                resolution_dt,
+                waste_amount,
+                waste_reason,
+                witness_user_name,
+                source_filename
+            FROM audit_transaction_detail_rc
+            WHERE dt BETWEEN :start_window AND :end_window
+              AND UPPER(TRIM(station_name)) = UPPER(TRIM(:device))
+              AND UPPER(TRIM(med_id)) = UPPER(TRIM(:med_id))
+              AND (
+                    COALESCE(:pocket, '') = ''
+                 OR UPPER(TRIM(COALESCE(drawer_subdrawer_pocket, ''))) = UPPER(TRIM(:pocket))
+              )
+            ORDER BY dt ASC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={
+                    "start_window": start_window,
+                    "end_window": end_window,
+                    "device": str(device or ""),
+                    "med_id": str(med_id or ""),
+                    "pocket": str(pocket or ""),
+                },
+            )
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["resolution_dt"] = pd.to_datetime(df["resolution_dt"], errors="coerce")
+        for col in [
+            "qty", "beginning_qty", "ending_qty", "discrepancy_difference",
+            "correction_quantity_before", "correction_quantity_after", "waste_amount",
+        ]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["count_delta"] = np.where(
+            df["beginning_qty"].notna() & df["ending_qty"].notna(),
+            df["ending_qty"].fillna(0) - df["beginning_qty"].fillna(0),
+            df["discrepancy_difference"].fillna(0),
+        )
+        df["selected_event"] = df["pk"].astype(str).eq(str(selected_pk or ""))
+        return df.dropna(subset=["dt"])
+    except Exception as exc:
+        st.warning(f"[load_rc_pocket_timeline] {exc}")
+        return pd.DataFrame()
+
+
 def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
     with st.expander("Clinical Count Control Audit", expanded=not clinical_control_df.empty):
         st.caption(
@@ -910,16 +989,20 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
             "the nurse removed medication."
         )
         display_cols = [
-            "dt", "control_category", "known_pharmacy_colleague", "user_name", "user_type", "care_area_name", "location",
+            "pk", "dt", "control_category", "known_pharmacy_colleague", "user_name", "user_type", "care_area_name", "location",
             "device", "drawer_subdrawer_pocket", "event_type", "med_id", "med_desc",
             "qty", "beginning_qty", "ending_qty", "count_delta", "discrepancy_difference",
             "discrepancy_reason", "correction", "resolution_user", "source_filename",
         ]
-        st.dataframe(
-            visible[display_cols].head(2000),
+        visible_display = visible[display_cols].head(2000).copy()
+        clinical_selection = st.dataframe(
+            visible_display,
             use_container_width=True,
             hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
             column_config={
+                "pk": None,
                 "dt": st.column_config.DatetimeColumn("Time", format="MM/DD/YY HH:mm:ss"),
                 "control_category": st.column_config.TextColumn("Category"),
                 "known_pharmacy_colleague": st.column_config.CheckboxColumn("Known Pharmacy"),
@@ -937,6 +1020,77 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
         )
         if len(visible) > 2000:
             st.caption(f"Showing first 2,000 of {len(visible):,} visible rows. Export for the full filtered set.")
+
+        if len(clinical_selection.selection.rows) > 0:
+            selected_row = visible_display.iloc[clinical_selection.selection.rows[0]]
+            st.markdown("#### Selected Event Paper Trail")
+            st.caption(
+                "Shows Audit Transaction Detail RC rows for the same device, medication, and pocket around the selected event."
+            )
+            lookback_days = st.number_input(
+                "Timeline lookback days",
+                min_value=1,
+                max_value=180,
+                value=30,
+                step=1,
+                key=f"clinical_count_control_timeline_lookback_{start_date}_{end_date}",
+            )
+            forward_days = st.number_input(
+                "Timeline forward days",
+                min_value=0,
+                max_value=30,
+                value=3,
+                step=1,
+                key=f"clinical_count_control_timeline_forward_{start_date}_{end_date}",
+            )
+            timeline = load_rc_pocket_timeline(
+                selected_row["device"],
+                selected_row["med_id"],
+                selected_row["drawer_subdrawer_pocket"],
+                selected_row["dt"],
+                selected_row["pk"],
+                int(lookback_days),
+                int(forward_days),
+            )
+            if timeline.empty:
+                st.info("No matching RC paper trail rows were found for that same device, med, and pocket.")
+            else:
+                selected_time = pd.to_datetime(selected_row["dt"], errors="coerce")
+                timeline["minutes_from_selected"] = (
+                    (timeline["dt"] - selected_time).dt.total_seconds() / 60
+                    if pd.notna(selected_time)
+                    else np.nan
+                )
+                trail_cols = [
+                    "selected_event", "dt", "minutes_from_selected", "user_name", "user_type",
+                    "event_type", "qty", "beginning_qty", "ending_qty", "count_delta",
+                    "discrepancy_difference", "discrepancy_reason", "correction",
+                    "resolution_user", "resolution_dt", "waste_amount", "waste_reason",
+                    "witness_user_name", "care_area_name", "location", "source_filename",
+                ]
+                st.dataframe(
+                    timeline[trail_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "selected_event": st.column_config.CheckboxColumn("Selected"),
+                        "dt": st.column_config.DatetimeColumn("Time", format="MM/DD/YY HH:mm:ss"),
+                        "minutes_from_selected": st.column_config.NumberColumn("Min From Selected", format="%.1f"),
+                        "event_type": st.column_config.TextColumn("Transaction"),
+                        "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+                        "beginning_qty": st.column_config.NumberColumn("Begin", format="%.0f"),
+                        "ending_qty": st.column_config.NumberColumn("End", format="%.0f"),
+                        "count_delta": st.column_config.NumberColumn("Count Delta", format="%.0f"),
+                        "discrepancy_difference": st.column_config.NumberColumn("Discrepancy Diff", format="%.0f"),
+                        "resolution_dt": st.column_config.DatetimeColumn("Resolution Time", format="MM/DD/YY HH:mm:ss"),
+                    },
+                )
+                st.download_button(
+                    "Export Selected Event Paper Trail",
+                    data=to_excel_bytes(timeline),
+                    file_name="clinical_count_control_paper_trail.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
         st.download_button(
             "Export Clinical Count Control Audit",
             data=to_excel_bytes(visible),
