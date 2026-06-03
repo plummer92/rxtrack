@@ -35,6 +35,89 @@ INVENTORY_CHANGE_EVENT_PATTERN = (
 PATIENT_CASSETTE_PATTERN = r"patient\s*cass|cassette|cass\b"
 COACHING_LOG_TABLE = "verify_count_audit_coaching_log"
 MANUAL_CORRECTION_USERS = ["Jared Wolfe"]
+KNOWN_PHARMACY_COLLEAGUES = [
+    "Koehler, Dave",
+    "Gartshore, Taylor",
+    "Simmons, Amber",
+    "Todd, Samantha",
+    "Torbert, Jake",
+    "Sloman, Lindsey",
+    "Gathard, Sydney",
+    "Strader, Brandi",
+    "Gall, Mallory",
+    "Ho, Ali",
+    "Kain, Amy",
+    "Mauney, Sarah",
+    "Clay, Nicholas",
+    "Keane, Bronagh",
+    "Madonia, Tori",
+    "Sprehe, Rebekah",
+    "Brockhouse, Jamie",
+    "Voigt, Ashley",
+    "Ozere, Kara",
+    "Dillon, Austin",
+    "Barker, Brett",
+    "Wunderlich, Ben",
+    "Zitzke, Jessica",
+    "Vizral, Isaac",
+    "Zhu, Michael",
+    "Gardner, Sara",
+    "McNeely, Bryant",
+    "Bernstein, Shirley",
+    "Bhandari, Shiva",
+    "Ryan, Alden",
+    "Wunderlich, Emily",
+    "Jabusch, Daniel",
+    "Gonzalez, Tiffany",
+    "Wilson, Ian",
+    "Frazier, Liz",
+    "Smith, Lori",
+    "Ridley, Erica",
+    "Neale, Sara",
+    "Schleeper, Cady",
+    "Evanich, David",
+    "Haley, Lu Ann",
+    "Dykstra, Javier",
+    "Javier Dykstra",
+    "Kincaid, Shelby",
+    "Smith, Matthew",
+    "Klosowski, Joe",
+    "Davidson, Tamra",
+    "Cole, Jaycie",
+    "Wallace, Lillian",
+    "Wolfe, Jared",
+    "Smith, Kati",
+    "Moquia, Wilmar",
+    "Lorenson, Jessica",
+    "Torricelli, Bill",
+    "Patterson, Berni",
+    "Kaylor, Heather",
+    "Voudrie, Lauren",
+    "Allen, Logan",
+    "Shields, Melissa",
+    "Spain, Dee",
+    "Dorsey, Latessa",
+    "Valenti, Kris",
+    "Scott, Jason",
+    "Willman, Dave",
+    "Saleh, Shaima",
+    "Schuerman, Adrean",
+    "Morgan, Mia",
+    "Yates, Christine",
+    "Underwood, Rick",
+    "Little, Erica",
+    "Simmons, Nicole",
+    "Cady, Elizabeth",
+    "Stewart, Anna",
+    "Harris, Megan",
+    "Carty, Crystal",
+    "Reynolds, Morissa",
+    "Alishaqi, Rand",
+    "Shultz, Richard",
+    "Garman, Krista",
+    "Foley, Jaimes",
+    "Lax, Kristin",
+]
 EVIDENCE_OPTIONS = [
     "Strong refill-entry pattern",
     "Possible refill-entry pattern",
@@ -70,6 +153,10 @@ def fmt_qty(value) -> str:
     if pd.isna(value):
         return "missing"
     return f"{float(value):.0f}"
+
+
+def pharmacy_colleague_keys() -> set[str]:
+    return {App.normalize_name(name) for name in KNOWN_PHARMACY_COLLEAGUES if App.normalize_name(name)}
 
 
 def build_coaching_actions(
@@ -651,6 +738,9 @@ def load_clinical_count_control_audit(start, end):
             "correction_quantity_before", "correction_quantity_after", "waste_amount",
         ]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+        known_pharmacy_keys = pharmacy_colleague_keys()
+        df["user_match_key"] = df["user_name"].apply(App.normalize_name)
+        df["known_pharmacy_colleague"] = df["user_match_key"].isin(known_pharmacy_keys)
 
         event_text = df["event_type"].str.lower()
         normal_vend = event_text.str.contains(r"vend|remove", regex=True, na=False)
@@ -708,17 +798,34 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
             st.info("No clinical Audit Transaction Detail RC rows were found for the selected date range.")
             return
 
-        review_df = clinical_control_df[clinical_control_df["needs_review"]].copy()
-        expected_df = clinical_control_df[~clinical_control_df["needs_review"]].copy()
+        include_known_pharmacy = st.checkbox(
+            "Include known pharmacy colleagues",
+            value=False,
+            help="Keep this off when auditing nursing/clinical count-control activity. Turn it on to inspect pharmacy colleagues that appear in RC clinical-user rows.",
+            key=f"clinical_count_control_include_pharmacy_{start_date}_{end_date}",
+        )
+        known_pharmacy_rows = clinical_control_df["known_pharmacy_colleague"].fillna(False)
+        scoped_control_df = clinical_control_df.copy() if include_known_pharmacy else clinical_control_df[~known_pharmacy_rows].copy()
+        excluded_pharmacy_count = int(known_pharmacy_rows.sum())
+
+        if excluded_pharmacy_count and not include_known_pharmacy:
+            st.caption(f"Excluded {excluded_pharmacy_count:,} known pharmacy-colleague row(s) from the clinical audit.")
+
+        if scoped_control_df.empty:
+            st.info("No non-pharmacy clinical count-control rows were found after excluding known pharmacy colleagues.")
+            return
+
+        review_df = scoped_control_df[scoped_control_df["needs_review"]].copy()
+        expected_df = scoped_control_df[~scoped_control_df["needs_review"]].copy()
         k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Clinical RC Rows", f"{len(clinical_control_df):,}")
+        k1.metric("Clinical RC Rows", f"{len(scoped_control_df):,}")
         k2.metric("Needs Review", f"{len(review_df):,}")
-        k3.metric("Refill/Load/Unload", f"{int((clinical_control_df['control_category'] == 'Clinical refill/load/unload').sum()):,}")
-        k4.metric("Count Corrections", f"{int((clinical_control_df['control_category'] == 'Clinical count correction').sum()):,}")
+        k3.metric("Refill/Load/Unload", f"{int((scoped_control_df['control_category'] == 'Clinical refill/load/unload').sum()):,}")
+        k4.metric("Count Corrections", f"{int((scoped_control_df['control_category'] == 'Clinical count correction').sum()):,}")
         k5.metric("Expected Vend/Waste", f"{len(expected_df):,}")
 
         category_summary = (
-            clinical_control_df.groupby("control_category")
+            scoped_control_df.groupby("control_category")
             .agg(
                 rows=("pk", "count"),
                 users=("user_name", "nunique"),
@@ -744,7 +851,7 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
         )
 
         c1, c2, c3 = st.columns([1, 1, 1])
-        categories = sorted(clinical_control_df["control_category"].dropna().unique())
+        categories = sorted(scoped_control_df["control_category"].dropna().unique())
         selected_categories = c1.multiselect(
             "Categories",
             categories,
@@ -756,18 +863,18 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
         )
         selected_users = c2.multiselect(
             "Clinical User",
-            sorted(clinical_control_df["user_name"].dropna().unique()),
+            sorted(scoped_control_df["user_name"].dropna().unique()),
             placeholder="All users",
             key=f"clinical_count_control_users_{start_date}_{end_date}",
         )
         selected_devices = c3.multiselect(
             "Device",
-            sorted(clinical_control_df["device"].dropna().unique()),
+            sorted(scoped_control_df["device"].dropna().unique()),
             placeholder="All devices",
             key=f"clinical_count_control_devices_{start_date}_{end_date}",
         )
 
-        visible = clinical_control_df.copy()
+        visible = scoped_control_df.copy()
         if selected_categories:
             visible = visible[visible["control_category"].isin(selected_categories)]
         else:
@@ -782,7 +889,7 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
             "Rows needing review are refill/load/unload, count corrections, or non-vend count changes."
         )
         display_cols = [
-            "dt", "control_category", "user_name", "user_type", "care_area_name", "location",
+            "dt", "control_category", "known_pharmacy_colleague", "user_name", "user_type", "care_area_name", "location",
             "device", "drawer_subdrawer_pocket", "event_type", "med_id", "med_desc",
             "qty", "beginning_qty", "ending_qty", "count_delta", "discrepancy_difference",
             "discrepancy_reason", "correction", "resolution_user", "source_filename",
@@ -794,6 +901,7 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
             column_config={
                 "dt": st.column_config.DatetimeColumn("Time", format="MM/DD/YY HH:mm:ss"),
                 "control_category": st.column_config.TextColumn("Category"),
+                "known_pharmacy_colleague": st.column_config.CheckboxColumn("Known Pharmacy"),
                 "user_name": st.column_config.TextColumn("User"),
                 "user_type": st.column_config.TextColumn("User Type"),
                 "care_area_name": st.column_config.TextColumn("Care Area"),
