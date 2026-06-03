@@ -381,13 +381,27 @@ combined['dt'] = pd.to_datetime(combined['dt'])
 combined['match_key'] = combined['user_name'].apply(normalize_name)
 combined.sort_values(['match_key', 'dt'], inplace=True)
 
-def pharmacy_work_label(event_values, start_dt):
+def pharmacy_work_label(event_values, destinations, start_dt):
     values = [str(value or "").strip() for value in event_values if str(value or "").strip()]
     joined = " ".join(values).lower()
+    destination_text = " ".join(
+        str(value or "").strip().lower()
+        for value in destinations
+        if str(value or "").strip()
+    )
+    carousel_destination = bool(
+        re.search(r"\bcar\s*\d+\b|carousel|cubic", destination_text)
+    )
     if "pyxis" in joined and "pull" in joined:
+        if carousel_destination:
+            if pd.notna(start_dt) and int(start_dt.hour) < 7:
+                return "0400 Carousel Pull"
+            return "Carousel Pull"
         if pd.notna(start_dt) and int(start_dt.hour) < 7:
             return "0400 Pyxis Pull"
         return "Pyxis Pull"
+    if carousel_destination:
+        return "Carousel Work"
     if values:
         return pd.Series(values).mode().iloc[0]
     return "Pharmacy Work"
@@ -452,7 +466,7 @@ sessions.rename(columns={
 sessions['Source Type'] = sessions['Source']
 session_labels = combined.groupby('session_id').apply(
     lambda group: pd.Series({
-        'Display Source': pharmacy_work_label(group['event_type'], group['dt'].min())
+        'Display Source': pharmacy_work_label(group['event_type'], group['device'], group['dt'].min())
         if group['source'].iloc[0] == 'Pharmacy'
         else group['source'].iloc[0],
         'Display Device': destination_group_label(group['device']),
