@@ -595,6 +595,228 @@ def load_clinical_activity(start, end, lookback_days=60):
 
 
 @st.cache_data(ttl=300)
+def load_clinical_count_control_audit(start, end):
+    """Clinical RC rows that show whether non-pharmacy users are changing Pyxis counts."""
+    try:
+        sql = text("""
+            SELECT
+                pk,
+                dt,
+                user_name,
+                user_type,
+                care_area_name,
+                location,
+                station_name AS device,
+                transaction_type AS event_type,
+                med_id,
+                med_desc,
+                drawer_subdrawer_pocket,
+                qty,
+                beginning_qty,
+                ending_qty,
+                discrepancy_difference,
+                COALESCE(NULLIF(discrepancy_reason, ''), discrepancy_resolution_desc) AS discrepancy_reason,
+                correction_quantity_before,
+                correction_quantity_after,
+                correction,
+                resolution_user,
+                waste_amount,
+                source_filename
+            FROM audit_transaction_detail_rc
+            WHERE dt::date BETWEEN :start AND :end
+              AND (
+                    user_type ILIKE '%registered nurse%'
+                 OR user_type ILIKE '%nurse%'
+                 OR user_type ILIKE '%anesthesia%'
+                 OR user_type ILIKE '%respiratory%'
+              )
+            ORDER BY dt DESC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"start": start, "end": end})
+        if df.empty:
+            return df
+
+        df = df.copy()
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        text_cols = [
+            "user_name", "user_type", "care_area_name", "location", "device", "event_type",
+            "med_id", "med_desc", "drawer_subdrawer_pocket", "discrepancy_reason",
+            "correction", "resolution_user", "source_filename",
+        ]
+        for col in text_cols:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+        for col in [
+            "qty", "beginning_qty", "ending_qty", "discrepancy_difference",
+            "correction_quantity_before", "correction_quantity_after", "waste_amount",
+        ]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        event_text = df["event_type"].str.lower()
+        normal_vend = event_text.str.contains(r"vend|remove", regex=True, na=False)
+        normal_waste = event_text.str.contains(r"waste", regex=True, na=False)
+        refill_load = event_text.str.contains(
+            r"restock|refill|replenish|\bload\b|unload|outdate|empty",
+            regex=True,
+            na=False,
+        )
+        inventory_control = event_text.str.contains(
+            r"verify|verified|inventory|count|adjust|correct|correction",
+            regex=True,
+            na=False,
+        )
+        has_begin_end = df["beginning_qty"].notna() & df["ending_qty"].notna()
+        begin_end_changed = has_begin_end & df["beginning_qty"].sub(df["ending_qty"]).abs().gt(0.001)
+        discrepancy_changed = df["discrepancy_difference"].fillna(0).abs().gt(0.001)
+        correction_changed = (
+            df["correction_quantity_before"].notna()
+            & df["correction_quantity_after"].notna()
+            & df["correction_quantity_before"].sub(df["correction_quantity_after"]).abs().gt(0.001)
+        )
+        df["count_changed"] = begin_end_changed | discrepancy_changed | correction_changed
+        df["count_delta"] = np.where(
+            has_begin_end,
+            df["ending_qty"].fillna(0) - df["beginning_qty"].fillna(0),
+            df["discrepancy_difference"].fillna(0),
+        )
+
+        df["control_category"] = "Other clinical RC activity"
+        df.loc[normal_vend | normal_waste, "control_category"] = "Expected clinical vend/waste"
+        df.loc[inventory_control & ~df["count_changed"], "control_category"] = "Clinical inventory check, no change"
+        df.loc[inventory_control & df["count_changed"], "control_category"] = "Clinical count correction"
+        df.loc[df["count_changed"] & ~(normal_vend | normal_waste | inventory_control | refill_load), "control_category"] = "Clinical count change outside vend"
+        df.loc[refill_load, "control_category"] = "Clinical refill/load/unload"
+        df["needs_review"] = df["control_category"].isin([
+            "Clinical refill/load/unload",
+            "Clinical count correction",
+            "Clinical count change outside vend",
+            "Other clinical RC activity",
+        ])
+        return df.dropna(subset=["dt"])
+    except Exception as exc:
+        st.warning(f"[load_clinical_count_control_audit] {exc}")
+        return pd.DataFrame()
+
+
+def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
+    with st.expander("Clinical Count Control Audit", expanded=not clinical_control_df.empty):
+        st.caption(
+            "Uses Audit Transaction Detail RC to check whether clinical users are only vending/wasting meds, "
+            "or whether they performed refill/load/unload or count-changing inventory activity."
+        )
+        if clinical_control_df.empty:
+            st.info("No clinical Audit Transaction Detail RC rows were found for the selected date range.")
+            return
+
+        review_df = clinical_control_df[clinical_control_df["needs_review"]].copy()
+        expected_df = clinical_control_df[~clinical_control_df["needs_review"]].copy()
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Clinical RC Rows", f"{len(clinical_control_df):,}")
+        k2.metric("Needs Review", f"{len(review_df):,}")
+        k3.metric("Refill/Load/Unload", f"{int((clinical_control_df['control_category'] == 'Clinical refill/load/unload').sum()):,}")
+        k4.metric("Count Corrections", f"{int((clinical_control_df['control_category'] == 'Clinical count correction').sum()):,}")
+        k5.metric("Expected Vend/Waste", f"{len(expected_df):,}")
+
+        category_summary = (
+            clinical_control_df.groupby("control_category")
+            .agg(
+                rows=("pk", "count"),
+                users=("user_name", "nunique"),
+                devices=("device", "nunique"),
+                meds=("med_id", "nunique"),
+                total_abs_count_delta=("count_delta", lambda s: pd.to_numeric(s, errors="coerce").abs().sum()),
+            )
+            .reset_index()
+            .sort_values(["rows", "total_abs_count_delta"], ascending=False)
+        )
+        st.dataframe(
+            category_summary,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "control_category": st.column_config.TextColumn("Category"),
+                "rows": st.column_config.NumberColumn("Rows", format="%d"),
+                "users": st.column_config.NumberColumn("Users", format="%d"),
+                "devices": st.column_config.NumberColumn("Devices", format="%d"),
+                "meds": st.column_config.NumberColumn("Meds", format="%d"),
+                "total_abs_count_delta": st.column_config.NumberColumn("Total Abs Count Change", format="%.0f"),
+            },
+        )
+
+        c1, c2, c3 = st.columns([1, 1, 1])
+        categories = sorted(clinical_control_df["control_category"].dropna().unique())
+        selected_categories = c1.multiselect(
+            "Categories",
+            categories,
+            default=[
+                category for category in categories
+                if category not in {"Expected clinical vend/waste", "Clinical inventory check, no change"}
+            ],
+            key=f"clinical_count_control_categories_{start_date}_{end_date}",
+        )
+        selected_users = c2.multiselect(
+            "Clinical User",
+            sorted(clinical_control_df["user_name"].dropna().unique()),
+            placeholder="All users",
+            key=f"clinical_count_control_users_{start_date}_{end_date}",
+        )
+        selected_devices = c3.multiselect(
+            "Device",
+            sorted(clinical_control_df["device"].dropna().unique()),
+            placeholder="All devices",
+            key=f"clinical_count_control_devices_{start_date}_{end_date}",
+        )
+
+        visible = clinical_control_df.copy()
+        if selected_categories:
+            visible = visible[visible["control_category"].isin(selected_categories)]
+        else:
+            visible = visible.iloc[0:0]
+        if selected_users:
+            visible = visible[visible["user_name"].isin(selected_users)]
+        if selected_devices:
+            visible = visible[visible["device"].isin(selected_devices)]
+
+        st.caption(
+            "Normal vend/waste rows can still change beginning/end quantity because the nurse removed medication. "
+            "Rows needing review are refill/load/unload, count corrections, or non-vend count changes."
+        )
+        display_cols = [
+            "dt", "control_category", "user_name", "user_type", "care_area_name", "location",
+            "device", "drawer_subdrawer_pocket", "event_type", "med_id", "med_desc",
+            "qty", "beginning_qty", "ending_qty", "count_delta", "discrepancy_difference",
+            "discrepancy_reason", "correction", "resolution_user", "source_filename",
+        ]
+        st.dataframe(
+            visible[display_cols].head(2000),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "dt": st.column_config.DatetimeColumn("Time", format="MM/DD/YY HH:mm:ss"),
+                "control_category": st.column_config.TextColumn("Category"),
+                "user_name": st.column_config.TextColumn("User"),
+                "user_type": st.column_config.TextColumn("User Type"),
+                "care_area_name": st.column_config.TextColumn("Care Area"),
+                "drawer_subdrawer_pocket": st.column_config.TextColumn("Pocket"),
+                "event_type": st.column_config.TextColumn("Transaction"),
+                "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+                "beginning_qty": st.column_config.NumberColumn("Begin", format="%.0f"),
+                "ending_qty": st.column_config.NumberColumn("End", format="%.0f"),
+                "count_delta": st.column_config.NumberColumn("Count Delta", format="%.0f"),
+                "discrepancy_difference": st.column_config.NumberColumn("Discrepancy Diff", format="%.0f"),
+            },
+        )
+        if len(visible) > 2000:
+            st.caption(f"Showing first 2,000 of {len(visible):,} visible rows. Export for the full filtered set.")
+        st.download_button(
+            "Export Clinical Count Control Audit",
+            data=to_excel_bytes(visible),
+            file_name="clinical_count_control_audit.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
+@st.cache_data(ttl=300)
 def load_pyxis_pulls(start, end, lookback_days=60):
     """Carousel/Pyxis pull demand lines from pharmacy_orders."""
     try:
@@ -947,6 +1169,11 @@ else:
     st.caption("Verify Inventory mismatch plus the most recent prior refill/load for the same med and device.")
     _debug_event("Discrepancy Deep Dive", "verify_count_audit_fallback_header")
     _debug_panel("Discrepancy Deep Dive", intro_mode="fallback")
+
+with st.spinner("Building clinical count control audit..."):
+    clinical_count_control_df = load_clinical_count_control_audit(start_date, end_date)
+
+render_clinical_count_control_audit(clinical_count_control_df)
 
 with st.spinner("Building verify count audit..."):
     audit_df = build_count_audit_dataset(start_date, end_date).copy()
