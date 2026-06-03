@@ -773,6 +773,7 @@ def load_clinical_count_control_audit(start, end):
         return_event = event_text.str.contains(r"return", regex=True, na=False)
         return_bin = (
             df["drawer_subdrawer_pocket"].str.contains(r"return\s*bin", case=False, regex=True, na=False)
+            | df["drawer_subdrawer_pocket"].str.contains(r"\binternal\b", case=False, regex=True, na=False)
             | df["event_type"].str.contains(r"return\s*bin", case=False, regex=True, na=False)
         )
         pyxis_pocket_return = return_event & ~return_bin
