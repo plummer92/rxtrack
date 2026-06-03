@@ -770,16 +770,31 @@ def load_clinical_count_control_audit(start, end):
             df["discrepancy_difference"].fillna(0),
         )
 
+        return_event = event_text.str.contains(r"return", regex=True, na=False)
+        return_bin = (
+            df["drawer_subdrawer_pocket"].str.contains(r"return\s*bin", case=False, regex=True, na=False)
+            | df["event_type"].str.contains(r"return\s*bin", case=False, regex=True, na=False)
+        )
+        pyxis_pocket_return = return_event & ~return_bin
+        transfer_event = event_text.str.contains(r"\btransfer\b", regex=True, na=False)
         df["control_category"] = "Other clinical RC activity"
         df.loc[normal_vend | normal_waste, "control_category"] = "Expected clinical vend/waste"
+        df.loc[return_bin, "control_category"] = "Expected clinical return bin"
+        df.loc[pyxis_pocket_return, "control_category"] = "Clinical return to Pyxis pocket"
+        df.loc[transfer_event, "control_category"] = "Clinical transfer"
         df.loc[inventory_control & ~df["count_changed"], "control_category"] = "Clinical inventory check, no change"
         df.loc[inventory_control & df["count_changed"], "control_category"] = "Clinical count correction"
-        df.loc[df["count_changed"] & ~(normal_vend | normal_waste | inventory_control | refill_load), "control_category"] = "Clinical count change outside vend"
+        df.loc[
+            df["count_changed"] & ~(normal_vend | normal_waste | inventory_control | refill_load | return_event | transfer_event),
+            "control_category",
+        ] = "Clinical count change outside vend"
         df.loc[refill_load, "control_category"] = "Clinical refill/load/unload"
         df["needs_review"] = df["control_category"].isin([
             "Clinical refill/load/unload",
             "Clinical count correction",
             "Clinical count change outside vend",
+            "Clinical return to Pyxis pocket",
+            "Clinical transfer",
             "Other clinical RC activity",
         ])
         return df.dropna(subset=["dt"])
@@ -791,8 +806,8 @@ def load_clinical_count_control_audit(start, end):
 def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
     with st.expander("Clinical Count Control Audit", expanded=not clinical_control_df.empty):
         st.caption(
-            "Uses Audit Transaction Detail RC to check whether clinical users are only vending/wasting meds, "
-            "or whether they performed refill/load/unload or count-changing inventory activity."
+            "Uses Audit Transaction Detail RC to check whether clinical users are only vending/wasting meds "
+            "or returning to the return bin, versus returning meds to Pyxis pockets or changing counts."
         )
         if clinical_control_df.empty:
             st.info("No clinical Audit Transaction Detail RC rows were found for the selected date range.")
@@ -820,9 +835,9 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Clinical RC Rows", f"{len(scoped_control_df):,}")
         k2.metric("Needs Review", f"{len(review_df):,}")
-        k3.metric("Refill/Load/Unload", f"{int((scoped_control_df['control_category'] == 'Clinical refill/load/unload').sum()):,}")
+        k3.metric("Pyxis Pocket Returns", f"{int((scoped_control_df['control_category'] == 'Clinical return to Pyxis pocket').sum()):,}")
         k4.metric("Count Corrections", f"{int((scoped_control_df['control_category'] == 'Clinical count correction').sum()):,}")
-        k5.metric("Expected Vend/Waste", f"{len(expected_df):,}")
+        k5.metric("Expected Activity", f"{len(expected_df):,}")
 
         category_summary = (
             scoped_control_df.groupby("control_category")
@@ -857,7 +872,11 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
             categories,
             default=[
                 category for category in categories
-                if category not in {"Expected clinical vend/waste", "Clinical inventory check, no change"}
+                if category not in {
+                    "Expected clinical vend/waste",
+                    "Expected clinical return bin",
+                    "Clinical inventory check, no change",
+                }
             ],
             key=f"clinical_count_control_categories_{start_date}_{end_date}",
         )
@@ -885,8 +904,9 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
             visible = visible[visible["device"].isin(selected_devices)]
 
         st.caption(
-            "Normal vend/waste rows can still change beginning/end quantity because the nurse removed medication. "
-            "Rows needing review are refill/load/unload, count corrections, or non-vend count changes."
+            "Return-bin activity is expected. Returns to drawer/pocket locations are flagged because those put stock "
+            "back into the Pyxis machine. Normal vend/waste rows can still change beginning/end quantity because "
+            "the nurse removed medication."
         )
         display_cols = [
             "dt", "control_category", "known_pharmacy_colleague", "user_name", "user_type", "care_area_name", "location",
