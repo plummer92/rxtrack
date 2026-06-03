@@ -35,6 +35,7 @@ INVENTORY_CHANGE_EVENT_PATTERN = (
 )
 PATIENT_CASSETTE_PATTERN = r"patient\s*cass|cassette|cass\b"
 COACHING_LOG_TABLE = "verify_count_audit_coaching_log"
+REFILL_OCCURRENCE_LOG_TABLE = "refill_entry_occurrence_log"
 MANUAL_CORRECTION_USERS = ["Jared Wolfe"]
 KNOWN_PHARMACY_COLLEAGUES = [
     "Koehler, Dave",
@@ -263,6 +264,206 @@ def load_completed_audit_pks() -> set:
 
 def db_value(value):
     return None if pd.isna(value) else value
+
+
+def ensure_refill_occurrence_log_table():
+    sql = text(f"""
+        CREATE TABLE IF NOT EXISTS {REFILL_OCCURRENCE_LOG_TABLE} (
+            occurrence_key TEXT PRIMARY KEY,
+            logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            occurrence_status TEXT DEFAULT 'Needs Review',
+            occurrence_user TEXT,
+            refill_dt TIMESTAMP,
+            device TEXT,
+            pocket TEXT,
+            med_id TEXT,
+            med_desc TEXT,
+            event_type TEXT,
+            entered_qty FLOAT,
+            beginning_qty FLOAT,
+            ending_qty FLOAT,
+            matched_pull_qty FLOAT,
+            total_pull_qty FLOAT,
+            entered_vs_matched_pull FLOAT,
+            expected_ending_qty FLOAT,
+            expected_ending_variance FLOAT,
+            pull_users TEXT,
+            first_pull_dt TIMESTAMP,
+            last_pull_dt TIMESTAMP,
+            note TEXT,
+            source_payload_json TEXT
+        )
+    """)
+    with engine.begin() as conn:
+        conn.execute(sql)
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS occurrence_status TEXT DEFAULT 'Needs Review'"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS expected_ending_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS expected_ending_variance FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS source_payload_json TEXT"))
+
+
+@st.cache_data(ttl=60)
+def load_refill_occurrence_keys() -> set[str]:
+    ensure_refill_occurrence_log_table()
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"SELECT occurrence_key FROM {REFILL_OCCURRENCE_LOG_TABLE}")).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+@st.cache_data(ttl=60)
+def load_refill_occurrence_log(start, end) -> pd.DataFrame:
+    ensure_refill_occurrence_log_table()
+    sql = text(f"""
+        SELECT *
+        FROM {REFILL_OCCURRENCE_LOG_TABLE}
+        WHERE refill_dt::date BETWEEN :start AND :end
+        ORDER BY refill_dt DESC, logged_at DESC
+    """)
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"start": start, "end": end})
+        if df.empty:
+            return df
+        for col in ["logged_at", "refill_dt", "first_pull_dt", "last_pull_dt"]:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+        for col in [
+            "entered_qty", "beginning_qty", "ending_qty", "matched_pull_qty",
+            "total_pull_qty", "entered_vs_matched_pull", "expected_ending_qty",
+            "expected_ending_variance",
+        ]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+    except Exception as exc:
+        st.warning(f"[load_refill_occurrence_log] {exc}")
+        return pd.DataFrame()
+
+
+def refill_occurrence_key(refill_row: pd.Series) -> str:
+    refill_pk = str(refill_row.get("pk") or "").strip()
+    if refill_pk:
+        return f"rc-refill:{refill_pk}"
+    refill_dt = pd.to_datetime(refill_row.get("dt"), errors="coerce")
+    refill_label = refill_dt.isoformat() if pd.notna(refill_dt) else "unknown-time"
+    return (
+        f"rc-refill:{refill_label}:"
+        f"{str(refill_row.get('device') or '').strip()}:"
+        f"{str(refill_row.get('drawer_subdrawer_pocket') or '').strip()}:"
+        f"{str(refill_row.get('med_id') or '').strip()}"
+    )
+
+
+def save_refill_occurrence(
+    refill_row: pd.Series,
+    pull_evidence: pd.DataFrame,
+    matched_pull_qty: float,
+    total_pull_qty: float,
+    note: str = "",
+) -> int:
+    ensure_refill_occurrence_log_table()
+    entered_qty = pd.to_numeric(refill_row.get("qty"), errors="coerce")
+    beginning_qty = pd.to_numeric(refill_row.get("beginning_qty"), errors="coerce")
+    ending_qty = pd.to_numeric(refill_row.get("ending_qty"), errors="coerce")
+    expected_ending_qty = (
+        beginning_qty + matched_pull_qty
+        if pd.notna(beginning_qty) and pd.notna(matched_pull_qty)
+        else np.nan
+    )
+    expected_ending_variance = (
+        ending_qty - expected_ending_qty
+        if pd.notna(ending_qty) and pd.notna(expected_ending_qty)
+        else np.nan
+    )
+    matched_pulls = pull_evidence[pull_evidence["destination_match"]].copy() if not pull_evidence.empty else pd.DataFrame()
+    pull_source = matched_pulls if not matched_pulls.empty else pull_evidence
+    pull_users = ""
+    first_pull_dt = pd.NaT
+    last_pull_dt = pd.NaT
+    if not pull_source.empty:
+        pull_users = ", ".join(sorted(pull_source["user_name"].dropna().astype(str).unique()))
+        first_pull_dt = pull_source["dt"].min()
+        last_pull_dt = pull_source["dt"].max()
+
+    evidence_payload = {
+        "refill": {
+            "pk": str(refill_row.get("pk") or ""),
+            "dt": str(refill_row.get("dt") or ""),
+            "user_name": str(refill_row.get("user_name") or ""),
+            "user_type": str(refill_row.get("user_type") or ""),
+            "device": str(refill_row.get("device") or ""),
+            "pocket": str(refill_row.get("drawer_subdrawer_pocket") or ""),
+            "event_type": str(refill_row.get("event_type") or ""),
+            "med_id": str(refill_row.get("med_id") or ""),
+            "med_desc": str(refill_row.get("med_desc") or ""),
+            "entered_qty": db_value(entered_qty),
+            "beginning_qty": db_value(beginning_qty),
+            "ending_qty": db_value(ending_qty),
+        },
+        "pull_evidence": pull_evidence.to_dict("records") if not pull_evidence.empty else [],
+    }
+    payload = {
+        "occurrence_key": refill_occurrence_key(refill_row),
+        "occurrence_user": str(refill_row.get("user_name") or "").strip(),
+        "refill_dt": db_value(pd.to_datetime(refill_row.get("dt"), errors="coerce")),
+        "device": str(refill_row.get("device") or "").strip(),
+        "pocket": str(refill_row.get("drawer_subdrawer_pocket") or "").strip(),
+        "med_id": str(refill_row.get("med_id") or "").strip(),
+        "med_desc": str(refill_row.get("med_desc") or "").strip(),
+        "event_type": str(refill_row.get("event_type") or "").strip(),
+        "entered_qty": db_value(entered_qty),
+        "beginning_qty": db_value(beginning_qty),
+        "ending_qty": db_value(ending_qty),
+        "matched_pull_qty": db_value(matched_pull_qty),
+        "total_pull_qty": db_value(total_pull_qty),
+        "entered_vs_matched_pull": db_value(entered_qty - matched_pull_qty if pd.notna(entered_qty) else np.nan),
+        "expected_ending_qty": db_value(expected_ending_qty),
+        "expected_ending_variance": db_value(expected_ending_variance),
+        "pull_users": pull_users,
+        "first_pull_dt": db_value(first_pull_dt),
+        "last_pull_dt": db_value(last_pull_dt),
+        "note": note,
+        "source_payload_json": json.dumps(evidence_payload, default=str),
+    }
+    sql = text(f"""
+        INSERT INTO {REFILL_OCCURRENCE_LOG_TABLE} (
+            occurrence_key, occurrence_user, refill_dt, device, pocket, med_id,
+            med_desc, event_type, entered_qty, beginning_qty, ending_qty,
+            matched_pull_qty, total_pull_qty, entered_vs_matched_pull,
+            expected_ending_qty, expected_ending_variance, pull_users,
+            first_pull_dt, last_pull_dt, note, source_payload_json
+        )
+        VALUES (
+            :occurrence_key, :occurrence_user, :refill_dt, :device, :pocket, :med_id,
+            :med_desc, :event_type, :entered_qty, :beginning_qty, :ending_qty,
+            :matched_pull_qty, :total_pull_qty, :entered_vs_matched_pull,
+            :expected_ending_qty, :expected_ending_variance, :pull_users,
+            :first_pull_dt, :last_pull_dt, :note, :source_payload_json
+        )
+        ON CONFLICT (occurrence_key) DO UPDATE SET
+            logged_at = CURRENT_TIMESTAMP,
+            occurrence_user = EXCLUDED.occurrence_user,
+            refill_dt = EXCLUDED.refill_dt,
+            device = EXCLUDED.device,
+            pocket = EXCLUDED.pocket,
+            med_id = EXCLUDED.med_id,
+            med_desc = EXCLUDED.med_desc,
+            event_type = EXCLUDED.event_type,
+            entered_qty = EXCLUDED.entered_qty,
+            beginning_qty = EXCLUDED.beginning_qty,
+            ending_qty = EXCLUDED.ending_qty,
+            matched_pull_qty = EXCLUDED.matched_pull_qty,
+            total_pull_qty = EXCLUDED.total_pull_qty,
+            entered_vs_matched_pull = EXCLUDED.entered_vs_matched_pull,
+            expected_ending_qty = EXCLUDED.expected_ending_qty,
+            expected_ending_variance = EXCLUDED.expected_ending_variance,
+            pull_users = EXCLUDED.pull_users,
+            first_pull_dt = EXCLUDED.first_pull_dt,
+            last_pull_dt = EXCLUDED.last_pull_dt,
+            note = EXCLUDED.note,
+            source_payload_json = EXCLUDED.source_payload_json
+    """)
+    with engine.begin() as conn:
+        result = conn.execute(sql, payload)
+    return result.rowcount or 0
 
 
 def save_completed_rows(rows: pd.DataFrame, notes: str = "", manual_correction_by: str | None = None) -> int:
@@ -1422,13 +1623,24 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
                     else:
                         destination_match_qty = pull_evidence.loc[pull_evidence["destination_match"], "qty"].sum()
                         total_pull_qty = pull_evidence["qty"].sum()
-                        p1, p2, p3, p4 = st.columns(4)
+                        expected_ending_qty = (
+                            pd.to_numeric(selected_refill.get("beginning_qty"), errors="coerce") + destination_match_qty
+                            if pd.notna(pd.to_numeric(selected_refill.get("beginning_qty"), errors="coerce"))
+                            else np.nan
+                        )
+                        actual_ending_qty = pd.to_numeric(selected_refill.get("ending_qty"), errors="coerce")
+                        p1, p2, p3, p4, p5 = st.columns(5)
                         p1.metric("Entered Refill Qty", fmt_qty(entered_qty))
                         p2.metric("Matched Destination Pull Qty", fmt_qty(destination_match_qty))
                         p3.metric("All Same-Med Pull Qty", fmt_qty(total_pull_qty))
                         p4.metric(
                             "Entered - Matched Pull",
                             fmt_qty(entered_qty - destination_match_qty if pd.notna(entered_qty) else np.nan),
+                        )
+                        p5.metric(
+                            "Expected Ending",
+                            fmt_qty(expected_ending_qty),
+                            delta=f"actual {fmt_qty(actual_ending_qty)}",
                         )
                         st.dataframe(
                             pull_evidence,
@@ -1445,6 +1657,50 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
                                 "med_desc": st.column_config.TextColumn("Medication"),
                             },
                         )
+                        occurrence_key = refill_occurrence_key(selected_refill)
+                        logged_occurrence_keys = load_refill_occurrence_keys()
+                        already_logged = occurrence_key in logged_occurrence_keys
+                        if already_logged:
+                            st.success("This refill transaction is already logged as a refill-entry occurrence.")
+                        with st.form(
+                            f"refill_occurrence_log_form_{occurrence_key}_{start_date}_{end_date}",
+                            clear_on_submit=False,
+                        ):
+                            log_occurrence = st.checkbox(
+                                "Log this refill transaction as an occurrence for this tech",
+                                value=not already_logged,
+                                key=f"log_refill_occurrence_checkbox_{occurrence_key}_{start_date}_{end_date}",
+                            )
+                            occurrence_note = st.text_area(
+                                "Occurrence note",
+                                value=(
+                                    f"Refill entered {fmt_qty(entered_qty)} but matched carousel pull evidence was "
+                                    f"{fmt_qty(destination_match_qty)}. Expected ending count {fmt_qty(expected_ending_qty)}; "
+                                    f"actual ending count {fmt_qty(actual_ending_qty)}."
+                                ),
+                                key=f"log_refill_occurrence_note_{occurrence_key}_{start_date}_{end_date}",
+                            )
+                            submit_occurrence = st.form_submit_button(
+                                "Save refill occurrence",
+                                disabled=not log_occurrence,
+                                type="primary",
+                            )
+                        if submit_occurrence:
+                            saved_count = save_refill_occurrence(
+                                selected_refill,
+                                pull_evidence,
+                                float(destination_match_qty),
+                                float(total_pull_qty),
+                                occurrence_note,
+                            )
+                            load_refill_occurrence_keys.clear()
+                            load_refill_occurrence_log.clear()
+                            st.success(
+                                "Refill occurrence logged."
+                                if saved_count
+                                else "No occurrence was saved."
+                            )
+                            st.rerun()
                         st.download_button(
                             "Export Pull Evidence For Selected Refill",
                             data=to_excel_bytes(pull_evidence),
@@ -1463,6 +1719,69 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
             file_name="clinical_count_control_audit.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+        logged_occurrences = load_refill_occurrence_log(start_date, end_date)
+        with st.expander("Logged Refill Entry Occurrences", expanded=not logged_occurrences.empty):
+            if logged_occurrences.empty:
+                st.info("No refill-entry occurrences have been logged for this date range yet.")
+            else:
+                occ_summary = (
+                    logged_occurrences.groupby("occurrence_user")
+                    .agg(
+                        occurrences=("occurrence_key", "count"),
+                        total_entered_vs_pull=("entered_vs_matched_pull", "sum"),
+                        max_entered_vs_pull=("entered_vs_matched_pull", "max"),
+                        meds=("med_id", "nunique"),
+                        devices=("device", "nunique"),
+                    )
+                    .reset_index()
+                    .sort_values(["occurrences", "total_entered_vs_pull"], ascending=False)
+                )
+                st.dataframe(
+                    occ_summary,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "occurrence_user": st.column_config.TextColumn("Tech"),
+                        "occurrences": st.column_config.NumberColumn("Occurrences", format="%d"),
+                        "total_entered_vs_pull": st.column_config.NumberColumn("Total Entered vs Pull", format="%.0f"),
+                        "max_entered_vs_pull": st.column_config.NumberColumn("Max Entered vs Pull", format="%.0f"),
+                        "meds": st.column_config.NumberColumn("Meds", format="%d"),
+                        "devices": st.column_config.NumberColumn("Devices", format="%d"),
+                    },
+                )
+                occurrence_cols = [
+                    "logged_at", "occurrence_status", "occurrence_user", "refill_dt", "device",
+                    "pocket", "med_id", "med_desc", "event_type", "entered_qty",
+                    "matched_pull_qty", "entered_vs_matched_pull", "beginning_qty",
+                    "expected_ending_qty", "ending_qty", "expected_ending_variance",
+                    "pull_users", "first_pull_dt", "last_pull_dt", "note",
+                ]
+                st.dataframe(
+                    logged_occurrences[occurrence_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "logged_at": st.column_config.DatetimeColumn("Logged", format="MM/DD/YY HH:mm"),
+                        "refill_dt": st.column_config.DatetimeColumn("Refill Time", format="MM/DD/YY HH:mm"),
+                        "occurrence_user": st.column_config.TextColumn("Tech"),
+                        "entered_qty": st.column_config.NumberColumn("Entered Qty", format="%.0f"),
+                        "matched_pull_qty": st.column_config.NumberColumn("Matched Pull Qty", format="%.0f"),
+                        "entered_vs_matched_pull": st.column_config.NumberColumn("Entered vs Pull", format="%.0f"),
+                        "beginning_qty": st.column_config.NumberColumn("Begin", format="%.0f"),
+                        "expected_ending_qty": st.column_config.NumberColumn("Expected End", format="%.0f"),
+                        "ending_qty": st.column_config.NumberColumn("Actual End", format="%.0f"),
+                        "expected_ending_variance": st.column_config.NumberColumn("Actual - Expected", format="%.0f"),
+                        "first_pull_dt": st.column_config.DatetimeColumn("First Pull", format="MM/DD/YY HH:mm"),
+                        "last_pull_dt": st.column_config.DatetimeColumn("Last Pull", format="MM/DD/YY HH:mm"),
+                    },
+                )
+                st.download_button(
+                    "Export Logged Refill Occurrences",
+                    data=to_excel_bytes(logged_occurrences),
+                    file_name="logged_refill_entry_occurrences.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
 
 
 @st.cache_data(ttl=300)
