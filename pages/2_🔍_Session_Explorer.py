@@ -74,6 +74,31 @@ def save_shift_audit_profile(profile_name, shifts, selected_names, view_scope):
         return False
 
 
+@st.cache_data(ttl=300)
+def load_scheduled_staff_roster(start_date, end_date):
+    try:
+        sql = text("""
+            SELECT DISTINCT staff_name
+            FROM staff_schedule
+            WHERE dt::date BETWEEN :start_date AND :end_date
+              AND NULLIF(TRIM(staff_name), '') IS NOT NULL
+            ORDER BY staff_name
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={"start_date": str(start_date), "end_date": str(end_date)},
+            )
+        if df.empty:
+            return pd.DataFrame(columns=["staff_name", "match_key"])
+        df["staff_name"] = df["staff_name"].fillna("").astype(str).str.strip()
+        df["match_key"] = df["staff_name"].apply(normalize_name)
+        return df[df["match_key"].ne("")].drop_duplicates("match_key")
+    except Exception:
+        return pd.DataFrame(columns=["staff_name", "match_key"])
+
+
 def summarize_shift_audit(active_sessions, active_work_keys, training_count):
     total_active_sec = active_sessions["duration_sec"].sum()
     total_walk_sec = active_sessions["walk_sec"].sum()
@@ -487,6 +512,40 @@ sessions = sessions.sort_values(['User', 'Start'])
 sessions['Next Start'] = sessions.groupby('User')['Start'].shift(-1)
 sessions['Walk Time'] = (sessions['Next Start'] - sessions['End']).dt.total_seconds()
 
+scheduled_staff_roster = load_scheduled_staff_roster(start_date, end_date)
+scheduled_staff_keys = set(scheduled_staff_roster["match_key"].dropna().astype(str))
+has_schedule_staff_scope = bool(scheduled_staff_keys)
+
+scope_options = ["Scheduled pharmacy staff only", "All users"]
+scope_index = 0 if has_schedule_staff_scope else 1
+user_scope = st.radio(
+    "User scope",
+    scope_options,
+    index=scope_index,
+    horizontal=True,
+    key="session_explorer_user_scope",
+    help="Use the uploaded schedule as the pharmacy staff roster, or show every user found in the source reports.",
+)
+use_scheduled_staff_scope = user_scope == "Scheduled pharmacy staff only" and has_schedule_staff_scope
+
+if use_scheduled_staff_scope:
+    hidden_session_count = int((~sessions["Tech_Key"].isin(scheduled_staff_keys)).sum())
+    st.caption(
+        f"Showing scheduled pharmacy staff from the uploaded schedule. "
+        f"Hiding {hidden_session_count:,} non-roster sessions from normal selectors."
+    )
+elif user_scope == "Scheduled pharmacy staff only":
+    st.info("No schedule roster was found for this range, so Session Explorer is showing all users.")
+
+
+def apply_scheduled_staff_scope(frame, key_col="Tech_Key"):
+    if not use_scheduled_staff_scope or frame.empty or key_col not in frame.columns:
+        return frame.copy()
+    return frame[frame[key_col].astype(str).isin(scheduled_staff_keys)].copy()
+
+
+sessions_scoped = apply_scheduled_staff_scope(sessions)
+
 
 def build_movement_segments(user_sessions):
     if user_sessions.empty:
@@ -597,7 +656,7 @@ with tab1:
     # ----------------------------
     c0, c1, c2, c3 = st.columns([1.2, 1.4, 1, 1.4])
 
-    available_session_dates = sorted(sessions["Start"].dt.date.dropna().unique())
+    available_session_dates = sorted(sessions_scoped["Start"].dt.date.dropna().unique())
     if available_session_dates:
         default_session_date = end_date if end_date in available_session_dates else available_session_dates[-1]
         if st.session_state.get("session_view_date") not in available_session_dates:
@@ -609,10 +668,10 @@ with tab1:
             key="session_view_date",
             format_func=lambda value: value.strftime("%m/%d/%Y (%A)"),
         )
-        sessions_for_day = sessions[sessions["Start"].dt.date == selected_session_date].copy()
+        sessions_for_day = sessions_scoped[sessions_scoped["Start"].dt.date == selected_session_date].copy()
     else:
         selected_session_date = None
-        sessions_for_day = sessions.copy()
+        sessions_for_day = sessions_scoped.copy()
         c0.info("No session dates found.")
 
     all_users = pharmacy_session_users(sessions_for_day)
@@ -764,7 +823,7 @@ with tab_visualizer:
     )
 
     v1, v2 = st.columns([1, 1.4])
-    movement_dates = sorted(sessions["Start"].dt.date.dropna().unique())
+    movement_dates = sorted(sessions_scoped["Start"].dt.date.dropna().unique())
 
     if not movement_dates:
         st.info("No session dates are available for the selected range.")
@@ -781,7 +840,7 @@ with tab_visualizer:
             format_func=lambda value: value.strftime("%m/%d/%Y (%A)"),
         )
 
-        movement_day_sessions = sessions[sessions["Start"].dt.date == movement_date].copy()
+        movement_day_sessions = sessions_scoped[sessions_scoped["Start"].dt.date == movement_date].copy()
         movement_users = pharmacy_session_users(movement_day_sessions)
 
         if not movement_users:
@@ -933,15 +992,23 @@ with tab4:
 
     inv_events = add_inventory_change_flags(load_inventory_verification_events(start_date, end_date))
     inv_events = filter_by_time_window(inv_events, run_start, run_end)
+    if not inv_events.empty:
+        inv_events["match_key"] = inv_events["user_name"].apply(normalize_name)
+        inv_events = apply_scheduled_staff_scope(inv_events, key_col="match_key")
 
     if inv_events.empty:
         st.info("No inventory verification events were found for the selected date range and run window.")
     else:
         all_inventory_users = sorted(inv_events["user_name"].dropna().unique().tolist())
+        if "inventory_accuracy_users" not in st.session_state:
+            st.session_state.inventory_accuracy_users = all_inventory_users
+        else:
+            st.session_state.inventory_accuracy_users = [
+                user for user in st.session_state.inventory_accuracy_users if user in all_inventory_users
+            ]
         selected_inventory_users = f3.multiselect(
             "Technicians",
             all_inventory_users,
-            default=all_inventory_users,
             key="inventory_accuracy_users",
         )
 
