@@ -44,6 +44,7 @@ NAME_MAPPINGS = {
 AMBIGUOUS_NAMES = {
     "melissa", "emily", "sarah", "megan", "erin", "kyle",
     "jessica", "andy", "heather", "michelle", "taylor",
+    "logan",
 }
 
 INHALER_PUFF_CONVERSIONS = [
