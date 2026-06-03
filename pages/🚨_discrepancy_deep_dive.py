@@ -883,6 +883,51 @@ def load_rc_pocket_timeline(device, med_id, pocket, selected_dt, selected_pk="",
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_pull_evidence_for_refill(device, med_id, refill_dt):
+    """Load same-day pharmacy pull rows before a selected Pyxis refill/load."""
+    try:
+        refill_ts = pd.to_datetime(refill_dt, errors="coerce")
+        if pd.isna(refill_ts):
+            return pd.DataFrame()
+        day_start = refill_ts.normalize()
+        sql = text("""
+            SELECT pk, queue_id, priority, dt, med_id, med_desc, destination, user_name, qty
+            FROM pharmacy_orders
+            WHERE dt >= :day_start
+              AND dt <= :refill_ts
+              AND UPPER(TRIM(med_id)) = UPPER(TRIM(:med_id))
+              AND priority ILIKE '%pyxis%pull%'
+            ORDER BY dt ASC
+        """)
+        with engine.connect() as conn:
+            df = pd.read_sql(
+                sql,
+                conn,
+                params={
+                    "day_start": day_start,
+                    "refill_ts": refill_ts,
+                    "med_id": str(med_id or ""),
+                },
+            )
+        if df.empty:
+            return df
+        df["dt"] = pd.to_datetime(df["dt"], errors="coerce")
+        df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        for col in ["queue_id", "priority", "med_id", "med_desc", "destination", "user_name"]:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+        device_text = str(device or "").strip().upper()
+        df["destination_match"] = df["destination"].str.upper().str.contains(
+            re.escape(device_text),
+            regex=True,
+            na=False,
+        )
+        return df.dropna(subset=["dt"])
+    except Exception as exc:
+        st.warning(f"[load_pull_evidence_for_refill] {exc}")
+        return pd.DataFrame()
+
+
 def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
     with st.expander("Clinical Count Control Audit", expanded=not clinical_control_df.empty):
         st.caption(
@@ -1085,6 +1130,74 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
                         "resolution_dt": st.column_config.DatetimeColumn("Resolution Time", format="MM/DD/YY HH:mm:ss"),
                     },
                 )
+
+                refill_rows = timeline[
+                    timeline["event_type"].fillna("").str.contains(
+                        r"refill|restock|replenish|\bload\b",
+                        case=False,
+                        regex=True,
+                    )
+                ].sort_values("dt", ascending=False).copy()
+                if not refill_rows.empty:
+                    st.markdown("#### Pharmacy Pull Evidence For Refill")
+                    st.caption(
+                        "Pick a pharmacy refill/load row from the paper trail to compare the entered Pyxis refill quantity "
+                        "against same-day pharmacy Pyxis-pull rows before that refill time."
+                    )
+                    refill_rows["refill_label"] = refill_rows.apply(
+                        lambda row: (
+                            f"{row['dt']:%m/%d %H:%M} | {row.get('user_name') or 'Unknown'} | "
+                            f"{row.get('event_type') or 'Refill'} | entered {fmt_qty(row.get('qty'))} | "
+                            f"{fmt_qty(row.get('beginning_qty'))} -> {fmt_qty(row.get('ending_qty'))}"
+                        ),
+                        axis=1,
+                    )
+                    selected_refill_label = st.selectbox(
+                        "Refill/load row",
+                        refill_rows["refill_label"].tolist(),
+                        key=f"clinical_count_control_refill_drilldown_{selected_row['pk']}_{start_date}_{end_date}",
+                    )
+                    selected_refill = refill_rows[refill_rows["refill_label"].eq(selected_refill_label)].iloc[0]
+                    pull_evidence = load_pull_evidence_for_refill(
+                        selected_refill["device"],
+                        selected_refill["med_id"],
+                        selected_refill["dt"],
+                    )
+                    entered_qty = pd.to_numeric(selected_refill.get("qty"), errors="coerce")
+                    if pull_evidence.empty:
+                        st.info("No same-day pharmacy Pyxis-pull rows were found before that refill time for the same med ID.")
+                    else:
+                        destination_match_qty = pull_evidence.loc[pull_evidence["destination_match"], "qty"].sum()
+                        total_pull_qty = pull_evidence["qty"].sum()
+                        p1, p2, p3, p4 = st.columns(4)
+                        p1.metric("Entered Refill Qty", fmt_qty(entered_qty))
+                        p2.metric("Matched Destination Pull Qty", fmt_qty(destination_match_qty))
+                        p3.metric("All Same-Med Pull Qty", fmt_qty(total_pull_qty))
+                        p4.metric(
+                            "Entered - Matched Pull",
+                            fmt_qty(entered_qty - destination_match_qty if pd.notna(entered_qty) else np.nan),
+                        )
+                        st.dataframe(
+                            pull_evidence,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "dt": st.column_config.DatetimeColumn("Pull Time", format="MM/DD/YY HH:mm:ss"),
+                                "destination_match": st.column_config.CheckboxColumn("Destination Match"),
+                                "qty": st.column_config.NumberColumn("Pull Qty", format="%.0f"),
+                                "priority": st.column_config.TextColumn("Priority"),
+                                "destination": st.column_config.TextColumn("Destination"),
+                                "user_name": st.column_config.TextColumn("Pull User"),
+                                "queue_id": st.column_config.TextColumn("Queue ID"),
+                                "med_desc": st.column_config.TextColumn("Medication"),
+                            },
+                        )
+                        st.download_button(
+                            "Export Pull Evidence For Selected Refill",
+                            data=to_excel_bytes(pull_evidence),
+                            file_name="selected_refill_pull_evidence.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        )
                 st.download_button(
                     "Export Selected Event Paper Trail",
                     data=to_excel_bytes(timeline),
