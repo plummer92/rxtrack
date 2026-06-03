@@ -659,12 +659,13 @@ with tab1:
     available_session_dates = sorted(sessions_scoped["Start"].dt.date.dropna().unique())
     if available_session_dates:
         default_session_date = end_date if end_date in available_session_dates else available_session_dates[-1]
-        if st.session_state.get("session_view_date") not in available_session_dates:
-            st.session_state.session_view_date = default_session_date
+        session_date_value = st.session_state.get("session_view_date", default_session_date)
+        if session_date_value not in available_session_dates:
+            session_date_value = default_session_date
         selected_session_date = c0.selectbox(
             "Session Date",
             options=available_session_dates,
-            index=available_session_dates.index(st.session_state.session_view_date),
+            index=available_session_dates.index(session_date_value),
             key="session_view_date",
             format_func=lambda value: value.strftime("%m/%d/%Y (%A)"),
         )
@@ -675,23 +676,21 @@ with tab1:
         c0.info("No session dates found.")
 
     all_users = pharmacy_session_users(sessions_for_day)
-    if "u_sess_uni" in st.session_state:
-        st.session_state.u_sess_uni = [user for user in st.session_state.u_sess_uni if user in all_users]
-    sel_u = c1.multiselect("Filter Pharmacy User", all_users, key="u_sess_uni")
+    session_filter_suffix = f"{selected_session_date or 'all'}_{user_scope}"
+    sel_u = c1.multiselect(
+        "Filter Pharmacy User",
+        all_users,
+        key=f"u_sess_uni_{session_filter_suffix}",
+    )
 
     min_dur = c2.number_input("Min Duration (sec)", 0, 3600, 0)
 
     all_sources = sorted(sessions_for_day['Source'].dropna().unique())
-    if "session_view_sources" not in st.session_state:
-        st.session_state.session_view_sources = all_sources
-    else:
-        st.session_state.session_view_sources = [
-            source for source in st.session_state.session_view_sources if source in all_sources
-        ]
     sel_source = c3.multiselect(
         "Filter Source",
         all_sources,
-        key="session_view_sources",
+        default=all_sources,
+        key=f"session_view_sources_{session_filter_suffix}",
     )
 
     view = sessions_for_day.copy()
@@ -829,13 +828,14 @@ with tab_visualizer:
         st.info("No session dates are available for the selected range.")
     else:
         default_movement_date = end_date if end_date in movement_dates else movement_dates[-1]
-        if st.session_state.get("movement_visualizer_date") not in movement_dates:
-            st.session_state.movement_visualizer_date = default_movement_date
+        movement_date_value = st.session_state.get("movement_visualizer_date", default_movement_date)
+        if movement_date_value not in movement_dates:
+            movement_date_value = default_movement_date
 
         movement_date = v1.selectbox(
             "Date",
             options=movement_dates,
-            index=movement_dates.index(st.session_state.movement_visualizer_date),
+            index=movement_dates.index(movement_date_value),
             key="movement_visualizer_date",
             format_func=lambda value: value.strftime("%m/%d/%Y (%A)"),
         )
@@ -846,14 +846,11 @@ with tab_visualizer:
         if not movement_users:
             st.info("No pharmacy user sessions were found for that date.")
         else:
-            if st.session_state.get("movement_visualizer_user") not in movement_users:
-                st.session_state.movement_visualizer_user = movement_users[0]
-
             movement_user = v2.selectbox(
                 "Technician",
                 options=movement_users,
-                index=movement_users.index(st.session_state.movement_visualizer_user),
-                key="movement_visualizer_user",
+                index=0,
+                key=f"movement_visualizer_user_{movement_date}_{user_scope}",
             )
 
             movement_keys = selected_user_keys(movement_day_sessions, [movement_user])
@@ -1000,16 +997,12 @@ with tab4:
         st.info("No inventory verification events were found for the selected date range and run window.")
     else:
         all_inventory_users = sorted(inv_events["user_name"].dropna().unique().tolist())
-        if "inventory_accuracy_users" not in st.session_state:
-            st.session_state.inventory_accuracy_users = all_inventory_users
-        else:
-            st.session_state.inventory_accuracy_users = [
-                user for user in st.session_state.inventory_accuracy_users if user in all_inventory_users
-            ]
+        inventory_filter_suffix = f"{start_date}_{end_date}_{run_start}_{run_end}_{user_scope}"
         selected_inventory_users = f3.multiselect(
             "Technicians",
             all_inventory_users,
-            key="inventory_accuracy_users",
+            default=all_inventory_users,
+            key=f"inventory_accuracy_users_{inventory_filter_suffix}",
         )
 
         accuracy_view = inv_events.copy()
