@@ -211,11 +211,48 @@ with list_col:
             payload_text = selected_note.get("source_payload_json")
             if pd.notna(payload_text) and str(payload_text).strip():
                 try:
-                    evidence = pd.DataFrame(json.loads(payload_text))
+                    parsed_payload = json.loads(payload_text)
                 except Exception:
-                    evidence = pd.DataFrame()
+                    parsed_payload = None
+                source_page = str(selected_note.get("source_page") or "").lower()
+                evidence = pd.DataFrame()
+                if isinstance(parsed_payload, dict) and source_page.find("refill entry occurrence") >= 0:
+                    refill = parsed_payload.get("refill") or {}
+                    pull_evidence = pd.DataFrame(parsed_payload.get("pull_evidence") or [])
+                    if refill:
+                        st.markdown("**Refill Occurrence Evidence**")
+                        refill_df = pd.DataFrame([{
+                            "Refill Time": refill.get("dt"),
+                            "Tech": refill.get("user_name"),
+                            "Device": refill.get("device"),
+                            "Pocket": refill.get("pocket"),
+                            "Med ID": refill.get("med_id"),
+                            "Medication": refill.get("med_desc"),
+                            "Entered Qty": refill.get("entered_qty"),
+                            "Beginning Qty": refill.get("beginning_qty"),
+                            "Ending Qty": refill.get("ending_qty"),
+                        }])
+                        st.dataframe(refill_df, width="stretch", hide_index=True)
+                    if not pull_evidence.empty:
+                        st.markdown("**Carousel Pull Evidence**")
+                        visible_pull_cols = [
+                            col for col in [
+                                "dt", "queue_id", "priority", "destination", "destination_match",
+                                "med_id", "med_desc", "user_name", "qty",
+                            ]
+                            if col in pull_evidence.columns
+                        ]
+                        st.dataframe(
+                            pull_evidence[visible_pull_cols] if visible_pull_cols else pull_evidence,
+                            width="stretch",
+                            hide_index=True,
+                        )
+                else:
+                    try:
+                        evidence = pd.DataFrame(parsed_payload)
+                    except Exception:
+                        evidence = pd.DataFrame()
                 if not evidence.empty:
-                    source_page = str(selected_note.get("source_page") or "").lower()
                     evidence_title = (
                         "Clinical Chain Evidence"
                         if source_page.find("clinical") >= 0

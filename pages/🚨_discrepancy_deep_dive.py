@@ -1782,6 +1782,7 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
                         already_logged = occurrence_key in logged_occurrence_keys
                         if already_logged:
                             st.success("This refill transaction is already logged as a refill-entry occurrence.")
+                            st.caption("Click Save below to update the occurrence and send/update the Management Coaching note.")
                             logged_selected = load_refill_occurrence_by_key(occurrence_key)
                             if not logged_selected.empty:
                                 selected_occurrence_cols = [
@@ -1811,8 +1812,8 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
                             clear_on_submit=False,
                         ):
                             log_occurrence = st.checkbox(
-                                "Log this refill transaction as an occurrence for this tech",
-                                value=not already_logged,
+                                "Save/update this refill occurrence and Management Coaching note",
+                                value=True,
                                 key=f"log_refill_occurrence_checkbox_{occurrence_key}_{start_date}_{end_date}",
                             )
                             occurrence_note = st.text_area(
@@ -1840,9 +1841,9 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
                             load_refill_occurrence_keys.clear()
                             load_refill_occurrence_log.clear()
                             st.success(
-                                "Refill occurrence logged."
+                                "Refill occurrence logged and Management Coaching updated."
                                 if saved_count
-                                else "No occurrence was saved."
+                                else "No occurrence was saved or updated."
                             )
                             st.rerun()
                         st.download_button(
