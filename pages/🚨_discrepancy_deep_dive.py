@@ -272,6 +272,14 @@ def db_value(value):
     return value
 
 
+def display_value(value) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
+
+
 def ensure_refill_occurrence_log_table():
     sql = text(f"""
         CREATE TABLE IF NOT EXISTS {REFILL_OCCURRENCE_LOG_TABLE} (
@@ -2580,8 +2588,15 @@ else:
             hide_index=True,
         )
     with raw_tab:
+        raw_detail = (
+            detail_row.drop(labels=["completed"], errors="ignore")
+            .rename("Value")
+            .reset_index()
+            .rename(columns={"index": "Field"})
+        )
+        raw_detail["Value"] = raw_detail["Value"].map(display_value)
         st.dataframe(
-            detail_row.drop(labels=["completed"], errors="ignore").rename("Value").reset_index().rename(columns={"index": "Field"}),
+            raw_detail,
             use_container_width=True,
             hide_index=True,
         )
