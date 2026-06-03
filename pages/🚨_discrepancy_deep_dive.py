@@ -263,7 +263,13 @@ def load_completed_audit_pks() -> set:
 
 
 def db_value(value):
-    return None if pd.isna(value) else value
+    if pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def ensure_refill_occurrence_log_table():
@@ -296,9 +302,27 @@ def ensure_refill_occurrence_log_table():
     """)
     with engine.begin() as conn:
         conn.execute(sql)
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
         conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS occurrence_status TEXT DEFAULT 'Needs Review'"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS occurrence_user TEXT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS refill_dt TIMESTAMP"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS device TEXT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS pocket TEXT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS med_id TEXT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS med_desc TEXT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS event_type TEXT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS entered_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS beginning_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS ending_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS matched_pull_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS total_pull_qty FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS entered_vs_matched_pull FLOAT"))
         conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS expected_ending_qty FLOAT"))
         conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS expected_ending_variance FLOAT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS pull_users TEXT"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS first_pull_dt TIMESTAMP"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS last_pull_dt TIMESTAMP"))
+        conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS note TEXT"))
         conn.execute(text(f"ALTER TABLE {REFILL_OCCURRENCE_LOG_TABLE} ADD COLUMN IF NOT EXISTS source_payload_json TEXT"))
 
 
