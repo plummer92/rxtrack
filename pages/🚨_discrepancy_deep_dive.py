@@ -370,6 +370,33 @@ def load_refill_occurrence_log(start, end) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=60)
+def load_refill_occurrence_by_key(occurrence_key: str) -> pd.DataFrame:
+    ensure_refill_occurrence_log_table()
+    sql = text(f"""
+        SELECT *
+        FROM {REFILL_OCCURRENCE_LOG_TABLE}
+        WHERE occurrence_key = :occurrence_key
+    """)
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(sql, conn, params={"occurrence_key": occurrence_key})
+        if df.empty:
+            return df
+        for col in ["logged_at", "refill_dt", "first_pull_dt", "last_pull_dt"]:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+        for col in [
+            "entered_qty", "beginning_qty", "ending_qty", "matched_pull_qty",
+            "total_pull_qty", "entered_vs_matched_pull", "expected_ending_qty",
+            "expected_ending_variance",
+        ]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
+    except Exception as exc:
+        st.warning(f"[load_refill_occurrence_by_key] {exc}")
+        return pd.DataFrame()
+
+
 def refill_occurrence_key(refill_row: pd.Series) -> str:
     refill_pk = str(refill_row.get("pk") or "").strip()
     if refill_pk:
@@ -1755,6 +1782,30 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
                         already_logged = occurrence_key in logged_occurrence_keys
                         if already_logged:
                             st.success("This refill transaction is already logged as a refill-entry occurrence.")
+                            logged_selected = load_refill_occurrence_by_key(occurrence_key)
+                            if not logged_selected.empty:
+                                selected_occurrence_cols = [
+                                    "logged_at", "occurrence_status", "occurrence_user", "refill_dt", "device",
+                                    "pocket", "med_id", "med_desc", "entered_qty", "matched_pull_qty",
+                                    "entered_vs_matched_pull", "expected_ending_qty", "ending_qty",
+                                    "expected_ending_variance", "note",
+                                ]
+                                st.dataframe(
+                                    logged_selected[selected_occurrence_cols],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                    column_config={
+                                        "logged_at": st.column_config.DatetimeColumn("Logged", format="MM/DD/YY HH:mm"),
+                                        "refill_dt": st.column_config.DatetimeColumn("Refill Time", format="MM/DD/YY HH:mm"),
+                                        "occurrence_user": st.column_config.TextColumn("Tech"),
+                                        "entered_qty": st.column_config.NumberColumn("Entered Qty", format="%.0f"),
+                                        "matched_pull_qty": st.column_config.NumberColumn("Matched Pull Qty", format="%.0f"),
+                                        "entered_vs_matched_pull": st.column_config.NumberColumn("Entered vs Pull", format="%.0f"),
+                                        "expected_ending_qty": st.column_config.NumberColumn("Expected End", format="%.0f"),
+                                        "ending_qty": st.column_config.NumberColumn("Actual End", format="%.0f"),
+                                        "expected_ending_variance": st.column_config.NumberColumn("Actual - Expected", format="%.0f"),
+                                    },
+                                )
                         with st.form(
                             f"refill_occurrence_log_form_{occurrence_key}_{start_date}_{end_date}",
                             clear_on_submit=False,
@@ -1816,7 +1867,7 @@ def render_clinical_count_control_audit(clinical_control_df: pd.DataFrame):
         logged_occurrences = load_refill_occurrence_log(start_date, end_date)
         with st.expander("Logged Refill Entry Occurrences", expanded=not logged_occurrences.empty):
             if logged_occurrences.empty:
-                st.info("No refill-entry occurrences have been logged for this date range yet.")
+                st.info("No refill-entry occurrences have been logged inside the current Analysis Window date range.")
             else:
                 occ_summary = (
                     logged_occurrences.groupby("occurrence_user")
