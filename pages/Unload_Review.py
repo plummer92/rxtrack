@@ -46,6 +46,8 @@ def load_unloads(start, end):
                             UPPER(TRIM(station_name)) AS device,
                             care_area_name,
                             location,
+                            drawer_subdrawer_pocket,
+                            source_filename,
                             transaction_type AS event_type,
                             med_id,
                             med_desc,
@@ -53,8 +55,21 @@ def load_unloads(start, end):
                             beginning_qty,
                             ending_qty,
                             discrepancy_difference AS discrepancy_qty,
-                            transaction_type ILIKE '%eject%' AS cubie_ejected
+                            (
+                                transaction_type ILIKE '%eject%'
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM audit_transaction_detail_rc ej
+                                    WHERE ej.transaction_type ILIKE '%eject%'
+                                      AND ej.dt::timestamp >= a.dt::timestamp - INTERVAL '2 minutes'
+                                      AND ej.dt::timestamp <= a.dt::timestamp + INTERVAL '2 minutes'
+                                      AND UPPER(TRIM(ej.station_name)) = UPPER(TRIM(a.station_name))
+                                      AND UPPER(TRIM(ej.med_id)) = UPPER(TRIM(a.med_id))
+                                      AND COALESCE(NULLIF(TRIM(ej.user_name), ''), '') = COALESCE(NULLIF(TRIM(a.user_name), ''), '')
+                                )
+                            ) AS cubie_ejected
                         FROM audit_transaction_detail_rc
+                        a
                         WHERE dt::timestamp >= :start_ts
                           AND dt::timestamp < :end_ts
                           AND transaction_type ILIKE '%unload%'
@@ -69,6 +84,8 @@ def load_unloads(start, end):
                             UPPER(TRIM(e.device)) AS device,
                             NULL::text AS care_area_name,
                             NULL::text AS location,
+                            NULL::text AS drawer_subdrawer_pocket,
+                            NULL::text AS source_filename,
                             e.event_type,
                             e.med_id,
                             e.med_desc,
@@ -107,7 +124,10 @@ def load_unloads(start, end):
     df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
     for col in ["qty", "beginning_qty", "ending_qty", "discrepancy_qty"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ["user_name", "device", "care_area_name", "location", "event_type", "med_id", "med_desc"]:
+    for col in [
+        "user_name", "device", "care_area_name", "location", "drawer_subdrawer_pocket",
+        "source_filename", "event_type", "med_id", "med_desc"
+    ]:
         df[col] = df[col].fillna("").astype(str).str.strip()
     df["cubie_ejected"] = df["cubie_ejected"].fillna(False).astype(bool)
     return df
@@ -515,11 +535,12 @@ with tab_detail:
     detail_cols = [
         c for c in [
             "dt", "date", "user_name", "device", "care_area_name", "primary_care_area", "location",
-            "event_type", "cubie_ejected", "med_id", "med_desc", "qty", "return_unit_note", "compare_qty",
+            "event_type", "cubie_ejected", "drawer_subdrawer_pocket", "med_id", "med_desc",
+            "qty", "return_unit_note", "compare_qty",
             "beginning_qty", "ending_qty", "inventory_snapshot_ts", "days_unused_from_snapshot",
             "active_orders_from_snapshot", "prior_inventory_snapshot_ts", "prior_active_orders",
             "active_orders_went_away", "max_days_unused", "active_orders", "pocket_locations",
-            "outdate_tracking", "standard_stock", "unload_bucket",
+            "outdate_tracking", "standard_stock", "unload_bucket", "source_filename",
         ]
         if c in view.columns
     ]
@@ -530,6 +551,7 @@ with tab_detail:
         column_config={
             "dt": st.column_config.DatetimeColumn("Unload Time", format="MM/DD/YY HH:mm:ss"),
             "cubie_ejected": st.column_config.CheckboxColumn("Cubie Ejected"),
+            "drawer_subdrawer_pocket": "Transaction Pocket",
             "inventory_snapshot_ts": st.column_config.DatetimeColumn("Matched Inventory Upload", format="MM/DD/YY HH:mm"),
             "prior_inventory_snapshot_ts": st.column_config.DatetimeColumn("Prior Inventory Upload", format="MM/DD/YY HH:mm"),
             "days_unused_from_snapshot": st.column_config.NumberColumn("Days Unused from Snapshot", format="%.0f"),
@@ -538,6 +560,7 @@ with tab_detail:
             "compare_qty": st.column_config.NumberColumn("Compare Qty", format="%.2f"),
             "beginning_qty": st.column_config.NumberColumn("Beginning Qty", format="%.0f"),
             "ending_qty": st.column_config.NumberColumn("Ending Qty", format="%.0f"),
+            "source_filename": "Source File",
         },
     )
     st.download_button(
