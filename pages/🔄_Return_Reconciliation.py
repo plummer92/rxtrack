@@ -87,6 +87,8 @@ if not df_events.empty and "event_type" in df_events.columns:
     unload_eject = pyxis_all_raw[
         pyxis_all_raw["event_type"].astype(str).str.contains("eject", case=False, na=False)
     ].copy()
+    if not unload_eject.empty:
+        unload_eject["cubie_ejected"] = True
     pyxis_reference_removals = pyxis_all_raw[
         ~pyxis_all_raw["event_type"].astype(str).str.contains(r"\bunload\b|eject", case=False, regex=True, na=False)
     ].copy()
@@ -150,6 +152,7 @@ detail_pyxis_reference_removals = pyxis_reference_removals.copy()
 
 if selected_users:
     if not detail_pyxis_unload.empty: detail_pyxis_unload = detail_pyxis_unload[detail_pyxis_unload["user_name"].isin(selected_users)]
+    if not unload_eject.empty: unload_eject = unload_eject[unload_eject["user_name"].isin(selected_users)]
     if not detail_pharm_return.empty: detail_pharm_return = detail_pharm_return[detail_pharm_return["user_name"].isin(selected_users)]
     if not detail_inv_moves.empty: detail_inv_moves = detail_inv_moves[detail_inv_moves["user_name"].isin(selected_users)]
     if not detail_restocks.empty: detail_restocks = detail_restocks[detail_restocks["user_name"].isin(selected_users)]
@@ -535,6 +538,7 @@ def split_returns_by_unload_timing(return_df, unload_df, match_window_hours=12):
 
 if exclude_dummy:
     pyxis_unload = remove_dummy(pyxis_unload)
+    unload_eject = remove_dummy(unload_eject)
     pharm_return = remove_dummy(pharm_return)
     detail_pyxis_unload = remove_dummy(detail_pyxis_unload)
     detail_pharm_return = remove_dummy(detail_pharm_return)
@@ -543,6 +547,7 @@ if exclude_dummy:
 
 if exclude_controls:
     pyxis_unload = remove_controls(pyxis_unload)
+    unload_eject = remove_controls(unload_eject)
     pharm_return = remove_controls(pharm_return)
     detail_pyxis_unload = remove_controls(detail_pyxis_unload)
     detail_pharm_return = remove_controls(detail_pharm_return)
@@ -551,6 +556,7 @@ if exclude_controls:
 
 if exclude_pat_refs:
     pyxis_unload = remove_pat_refs(pyxis_unload)
+    unload_eject = remove_pat_refs(unload_eject)
     pharm_return = remove_pat_refs(pharm_return)
     detail_pyxis_unload = remove_pat_refs(detail_pyxis_unload)
     detail_pharm_return = remove_pat_refs(detail_pharm_return)
@@ -561,6 +567,7 @@ if exclude_pat_refs:
 
 if exclude_patient_specific_refs:
     pyxis_unload = remove_patient_specific_refs(pyxis_unload)
+    unload_eject = remove_patient_specific_refs(unload_eject)
     pharm_return = remove_patient_specific_refs(pharm_return)
     detail_pyxis_unload = remove_patient_specific_refs(detail_pyxis_unload)
     detail_pharm_return = remove_patient_specific_refs(detail_pharm_return)
@@ -589,6 +596,8 @@ pharm_return = ensure_date_column(pharm_return)
 inv_moves    = ensure_date_column(inv_moves)
 restocks     = ensure_date_column(restocks)
 unload_eject = ensure_date_column(unload_eject)
+if not unload_eject.empty and "cubie_ejected" not in unload_eject.columns:
+    unload_eject["cubie_ejected"] = True
 pyxis_reference_removals = ensure_date_column(pyxis_reference_removals)
 detail_pyxis_unload = ensure_date_column(detail_pyxis_unload)
 detail_pharm_return = ensure_date_column(detail_pharm_return)
@@ -1047,8 +1056,24 @@ with st.expander(f"⚙️ Unload Eject Events — Excluded from Reconciliation (
     if unload_eject.empty:
         st.info("No unload eject events found for this date range.")
     else:
-        cols = [c for c in ["dt", "date", "user_name", "device", "med_desc", "qty", "event_type"] if c in unload_eject.columns]
-        st.dataframe(unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols], width="stretch")
+        cols = [
+            c for c in [
+                "dt", "date", "user_name", "device", "cubie_ejected",
+                "med_id", "med_desc", "qty", "event_type"
+            ]
+            if c in unload_eject.columns
+        ]
+        st.dataframe(
+            unload_eject[cols].sort_values("dt") if "dt" in cols else unload_eject[cols],
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "dt": st.column_config.DatetimeColumn("Date / Time"),
+                "date": st.column_config.DateColumn("Date"),
+                "cubie_ejected": st.column_config.CheckboxColumn("Cubie Ejected"),
+                "qty": st.column_config.NumberColumn("Qty", format="%.0f"),
+            },
+        )
 
 with st.expander(f"Pyxis Non-Unload Removal Events - Reference Only ({int(reference_removal_qty)} units)", expanded=False):
     st.caption("These are empty return bin, return-bin, or destock rows. They are visible for context but excluded from the simplified unload-only reconciliation.")

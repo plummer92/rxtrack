@@ -52,13 +52,13 @@ def load_unloads(start, end):
                             qty,
                             beginning_qty,
                             ending_qty,
-                            discrepancy_difference AS discrepancy_qty
+                            discrepancy_difference AS discrepancy_qty,
+                            transaction_type ILIKE '%eject%' AS cubie_ejected
                         FROM audit_transaction_detail_rc
                         WHERE dt::timestamp >= :start_ts
                           AND dt::timestamp < :end_ts
                           AND transaction_type ILIKE '%unload%'
                           AND transaction_type NOT ILIKE '%cancel%'
-                          AND transaction_type NOT ILIKE '%eject%'
                     ),
                     legacy_unloads AS (
                         SELECT
@@ -75,13 +75,13 @@ def load_unloads(start, end):
                             e.qty,
                             e.beginning_qty,
                             e.ending_qty,
-                            e.discrepancy_qty
+                            e.discrepancy_qty,
+                            e.event_type ILIKE '%eject%' AS cubie_ejected
                         FROM events e
                         WHERE e.dt::timestamp >= :start_ts
                           AND e.dt::timestamp < :end_ts
                           AND e.event_type ILIKE '%unload%'
                           AND e.event_type NOT ILIKE '%cancel%'
-                          AND e.event_type NOT ILIKE '%eject%'
                           AND NOT EXISTS (
                               SELECT 1
                               FROM audit_days ad
@@ -109,6 +109,7 @@ def load_unloads(start, end):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     for col in ["user_name", "device", "care_area_name", "location", "event_type", "med_id", "med_desc"]:
         df[col] = df[col].fillna("").astype(str).str.strip()
+    df["cubie_ejected"] = df["cubie_ejected"].fillna(False).astype(bool)
     return df
 
 
@@ -346,17 +347,24 @@ def enrich_unloads(unloads, inventory_context, inventory_timeline, care_area_map
         )
 
     out["hour"] = pd.to_datetime(out["dt"], errors="coerce").dt.hour
+    if "cubie_ejected" not in out.columns:
+        out["cubie_ejected"] = out["event_type"].fillna("").astype(str).str.contains("eject", case=False, na=False)
+    else:
+        out["cubie_ejected"] = out["cubie_ejected"].fillna(False).astype(bool)
     out["unload_bucket"] = "Other unload"
     event_text = out["event_type"].fillna("").astype(str)
+    out.loc[out["cubie_ejected"], "unload_bucket"] = "Cubie ejected"
     out.loc[event_text.str.contains("outdate|expire|28", case=False, regex=True, na=False), "unload_bucket"] = (
         "Outdate / expiration signal"
     )
+    out.loc[out["cubie_ejected"], "unload_bucket"] = "Cubie ejected"
     if "days_unused_from_snapshot" in out.columns or "max_days_unused" in out.columns:
         days_unused = pd.to_numeric(
             out.get("days_unused_from_snapshot", out.get("max_days_unused")),
             errors="coerce",
         )
         out.loc[days_unused.ge(28), "unload_bucket"] = "28+ days unused signal"
+        out.loc[out["cubie_ejected"], "unload_bucket"] = "Cubie ejected"
         if "active_orders_present" in out.columns:
             has_active = out["active_orders_present"].fillna(False).astype(bool)
             went_away = out.get("active_orders_went_away", pd.Series(False, index=out.index)).fillna(False).astype(bool)
@@ -367,6 +375,7 @@ def enrich_unloads(unloads, inventory_context, inventory_timeline, care_area_map
             out.loc[days_unused.ge(28) & ~has_active & ~went_away, "unload_bucket"] = (
                 "28+ unused, no active orders"
             )
+            out.loc[out["cubie_ejected"], "unload_bucket"] = "Cubie ejected"
     return out
 
 
@@ -407,6 +416,7 @@ if search:
 total_qty = pd.to_numeric(view["qty"], errors="coerce").abs().sum()
 unique_meds = view["med_id"].replace("", pd.NA).nunique()
 unique_devices = view["device"].replace("", pd.NA).nunique()
+ejected_rows = int(view.get("cubie_ejected", pd.Series(False, index=view.index)).fillna(False).astype(bool).sum())
 signals_28 = int(view["unload_bucket"].astype(str).str.contains(r"28\+.*unused", regex=True, na=False).sum())
 active_orders_remained = int(view["unload_bucket"].eq("28+ unused but active orders remained").sum())
 care_area_conflicts = int(
@@ -416,13 +426,14 @@ care_area_conflicts = int(
     ].nunique()
 ) if "device" in view.columns else 0
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 m1.metric("Unload Rows", f"{len(view):,}")
 m2.metric("Unload Qty", f"{total_qty:,.0f}")
 m3.metric("Unique Meds", f"{unique_meds:,}")
 m4.metric("Devices", f"{unique_devices:,}")
 m5.metric("28+ Signals", f"{signals_28:,}")
 m6.metric("28+ w/ Active Orders", f"{active_orders_remained:,}")
+m7.metric("Cubie Ejected", f"{ejected_rows:,}")
 
 if care_area_conflicts:
     st.warning(f"{care_area_conflicts} selected device(s) have more than one care area in recent RC history.")
@@ -435,8 +446,14 @@ with tab_summary:
         unload_qty=("qty", "sum"),
         devices=("device", "nunique"),
         unique_meds=("med_id", "nunique"),
+        cubie_ejected=("cubie_ejected", "sum"),
     ).reset_index().sort_values("unload_rows", ascending=False)
-    st.dataframe(by_bucket, width="stretch", hide_index=True)
+    st.dataframe(
+        by_bucket,
+        width="stretch",
+        hide_index=True,
+        column_config={"cubie_ejected": st.column_config.NumberColumn("Cubie Ejected", format="%d")},
+    )
 
 with tab_devices:
     group_cols = ["device"]
@@ -446,6 +463,7 @@ with tab_devices:
         unload_rows=("pk", "count"),
         unload_qty=("qty", "sum"),
         unique_meds=("med_id", "nunique"),
+        cubie_ejected=("cubie_ejected", "sum"),
         first_unload=("dt", "min"),
         last_unload=("dt", "max"),
     ).reset_index().sort_values(["unload_rows", "unload_qty"], ascending=[False, False])
@@ -462,6 +480,7 @@ with tab_devices:
         column_config={
             "first_unload": st.column_config.DatetimeColumn("First", format="HH:mm"),
             "last_unload": st.column_config.DatetimeColumn("Last", format="HH:mm"),
+            "cubie_ejected": st.column_config.NumberColumn("Cubie Ejected", format="%d"),
         },
     )
 
@@ -470,6 +489,7 @@ with tab_meds:
         "unload_rows": ("pk", "count"),
         "unload_qty": ("qty", "sum"),
         "devices": ("device", "nunique"),
+        "cubie_ejected": ("cubie_ejected", "sum"),
     }
     if "days_unused_from_snapshot" in view.columns:
         med_aggs["max_days_unused_from_snapshot"] = ("days_unused_from_snapshot", "max")
@@ -495,7 +515,7 @@ with tab_detail:
     detail_cols = [
         c for c in [
             "dt", "date", "user_name", "device", "care_area_name", "primary_care_area", "location",
-            "event_type", "med_id", "med_desc", "qty", "return_unit_note", "compare_qty",
+            "event_type", "cubie_ejected", "med_id", "med_desc", "qty", "return_unit_note", "compare_qty",
             "beginning_qty", "ending_qty", "inventory_snapshot_ts", "days_unused_from_snapshot",
             "active_orders_from_snapshot", "prior_inventory_snapshot_ts", "prior_active_orders",
             "active_orders_went_away", "max_days_unused", "active_orders", "pocket_locations",
@@ -509,6 +529,7 @@ with tab_detail:
         hide_index=True,
         column_config={
             "dt": st.column_config.DatetimeColumn("Unload Time", format="MM/DD/YY HH:mm:ss"),
+            "cubie_ejected": st.column_config.CheckboxColumn("Cubie Ejected"),
             "inventory_snapshot_ts": st.column_config.DatetimeColumn("Matched Inventory Upload", format="MM/DD/YY HH:mm"),
             "prior_inventory_snapshot_ts": st.column_config.DatetimeColumn("Prior Inventory Upload", format="MM/DD/YY HH:mm"),
             "days_unused_from_snapshot": st.column_config.NumberColumn("Days Unused from Snapshot", format="%.0f"),
